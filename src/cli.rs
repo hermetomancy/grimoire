@@ -1,3 +1,8 @@
+//! Command-line interface: the `clap` types that parse `grm`'s arguments into typed commands.
+//!
+//! Each subcommand maps to an `Args` struct consumed by the matching module entry point (see
+//! `main.rs` for dispatch). Doc comments on the fields double as the `--help` text users see.
+
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -14,6 +19,13 @@ nothing requires administrator privileges."
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
+    /// Suppress progress and result confirmations. Explicitly requested data (list/search/info/
+    /// doctor output) and errors are still printed. Mutually exclusive with `--verbose`.
+    #[arg(short, long, global = true, conflicts_with = "verbose")]
+    pub quiet: bool,
+    /// Print granular step-by-step progress on stderr on top of the normal output.
+    #[arg(short, long, global = true)]
+    pub verbose: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -63,9 +75,6 @@ pub struct BuildArgs {
     /// `<name>-<version>-<target>.tar.zst`.
     #[arg(short, long, default_value = "target/grimoire-packages")]
     pub output: PathBuf,
-    /// Suppress progress output on stderr. Errors and command results are still printed.
-    #[arg(short, long)]
-    pub quiet: bool,
 }
 
 #[derive(Debug, Args)]
@@ -82,9 +91,11 @@ pub struct InstallArgs {
     /// against it before being read or extracted; a mismatch is a hard failure.
     #[arg(long = "sha256")]
     pub sha256: Option<String>,
-    /// Suppress progress output on stderr. Errors and command results are still printed.
-    #[arg(short, long)]
-    pub quiet: bool,
+    /// Reproduce the install recorded in `grimoire.lock.nuon`: every package in the resolved
+    /// graph must match a locked version and archive hash, and nothing outside the lockfile may
+    /// be pulled in. Fails if no lockfile exists. Ignored for a local-archive install.
+    #[arg(long)]
+    pub locked: bool,
 }
 
 #[derive(Debug, Args)]
@@ -103,9 +114,6 @@ pub struct QueryArg {
 pub struct UpgradeArgs {
     /// Packages to upgrade. If omitted, every installed package is upgraded.
     pub packages: Vec<String>,
-    /// Suppress progress output on stderr. Errors and command results are still printed.
-    #[arg(short, long)]
-    pub quiet: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -159,15 +167,17 @@ pub struct TomeRuneArgs {
 
 #[derive(Debug, Args)]
 pub struct TomeBuildArgs {
-    /// Name of the rune to build. Resolved as `runes/<name>.rn` within the tome.
-    pub package: String,
+    /// Name of the rune to build, resolved as `runes/<name>.rn` within the tome. Omit it and
+    /// pass `--all` to build every rune in the tome instead.
+    pub package: Option<String>,
+    /// Build every rune in the tome's `runes/` directory, registering each in the index. Cannot
+    /// be combined with a named package.
+    #[arg(long, conflicts_with = "package")]
+    pub all: bool,
     /// Tome directory containing the rune (must contain `tome.rn`). Defaults to the current
     /// directory.
     #[arg(short, long, default_value = ".")]
     pub path: PathBuf,
-    /// Suppress progress output on stderr. Errors and command results are still printed.
-    #[arg(short, long)]
-    pub quiet: bool,
 }
 
 #[derive(Debug, Args)]
@@ -184,9 +194,6 @@ pub struct TomeAddArgs {
 pub struct TomeUpdateArgs {
     /// Tome to update. If omitted, every configured tome is updated.
     pub name: Option<String>,
-    /// Suppress progress output on stderr. Errors and command results are still printed.
-    #[arg(short, long)]
-    pub quiet: bool,
 }
 
 #[derive(Debug, Args)]

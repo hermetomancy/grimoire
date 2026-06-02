@@ -6,9 +6,11 @@
 //! user invoking grimoire from the project.
 
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::thread;
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -299,9 +301,12 @@ fn tome_init_rune_authoring_flow() {
     assert_success(&init, "tome init");
     assert!(tome_dir.join("tome.rn").exists(), "tome.rn scaffolded");
     assert!(tome_dir.join("runes").is_dir(), "runes/ scaffolded");
+    assert!(tome_dir.join("dist").is_dir(), "dist/ scaffolded");
     assert!(
-        tome_dir.join("index.nuon").exists(),
-        "index.nuon scaffolded"
+        fs::read_to_string(tome_dir.join(".gitignore"))
+            .unwrap()
+            .contains("/dist/"),
+        ".gitignore ignores dist/"
     );
 
     let rune = run(root, &["tome", "rune", "widget", "--path", tome_path]);
@@ -347,19 +352,25 @@ fn tome_build_publishes_prebuilt_into_index() {
 
     let target = target_triple();
     let archive = tome_dir
-        .join("packages")
+        .join("dist")
         .join(format!("widget-0.1.0-{target}.tar.zst"));
     assert!(archive.exists(), "built archive should exist: {archive:?}");
 
-    let archive_rel = format!("packages/widget-0.1.0-{target}.tar.zst");
-    let index = fs::read_to_string(tome_dir.join("index.nuon")).unwrap();
+    let archive_rel = format!("widget-0.1.0-{target}.tar.zst");
+    let index = fs::read_to_string(tome_dir.join("dist").join("index.nuon")).unwrap();
     assert!(index.contains("widget"), "index lists widget: {index}");
     assert!(
         index.contains(&archive_rel),
         "index records archive path: {index}"
     );
 
-    // The published prebuilt archive is installable without --from-source.
+    // Point the tome at its built `dist/` directory as a local package repo so the published
+    // prebuilt archive is installable without --from-source.
+    fs::write(
+        tome_dir.join("tome.rn"),
+        "export const tome = {\n  name: 'mytome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
     let add = run(root, &["tome", "add", tome_path, "--ref", "main"]);
     assert_success(&add, "tome add authored");
     let install = run(root, &["install", "widget"]);
@@ -374,7 +385,7 @@ fn tome_build_publishes_prebuilt_into_index() {
     // A rebuild replaces the entry in place rather than duplicating it.
     let rebuild = run(root, &["tome", "build", "widget", "--path", tome_path]);
     assert_success(&rebuild, "tome build rebuild");
-    let index = fs::read_to_string(tome_dir.join("index.nuon")).unwrap();
+    let index = fs::read_to_string(tome_dir.join("dist").join("index.nuon")).unwrap();
     assert_eq!(
         index.matches(&archive_rel).count(),
         1,
@@ -429,6 +440,44 @@ fn example_tome_build_dependency() {
 }
 
 #[test]
+fn build_dependency_bins_are_on_build_path() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'pathtome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("stampdep.rn"),
+        "export const package = {\n  name: 'stampdep'\n  version: '0.1.0'\n  bins: { stamp: 'bin/stamp' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'from build dependency\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'stamp')\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("usespath.rn"),
+        "export const package = {\n  name: 'usespath'\n  version: '0.1.0'\n  deps: { build: { default: ['stampdep'] }, runtime: [] }\n  bins: { usespath: 'bin/usespath' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  let stamped = (stamp | str trim)\n  $\"#!/usr/bin/env sh\\nprintf '($stamped)\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'usespath')\n}\n",
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "add path tome");
+    let install = run(root, &["install", "usespath"]);
+    assert_success(&install, "install package using build dep PATH");
+
+    let output = run_shim(root, "usespath");
+    assert_success(&output, "run usespath");
+    assert_eq!(stdout(&output).trim(), "from build dependency");
+}
+
+#[test]
 fn example_tome_checksummed_source() {
     let root = TempDir::new().unwrap();
     let root = root.path();
@@ -447,6 +496,54 @@ fn example_tome_checksummed_source() {
         "grimoire example payload",
         "bundle output reflects the verified source"
     );
+}
+
+#[test]
+fn source_tar_zst_is_extracted_into_build_context() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let out = TempDir::new().unwrap();
+    let out = out.path();
+    let src = TempDir::new().unwrap();
+    let src = src.path();
+
+    let source_archive = src.join("payload.tar.zst");
+    let mut builder = open_archive(&source_archive);
+    append_file(
+        &mut builder,
+        "payload/message.txt",
+        b"hello from extracted source\n",
+        0o644,
+    );
+    finish_archive(builder);
+    let source_hash = sha256_file(&source_archive);
+
+    let rune = src.join("extractor.rn");
+    fs::write(
+        &rune,
+        format!(
+            "export const package = {{\n  name: 'extractor'\n  version: '0.1.0'\n  sources: {{ main: {{ url: 'payload.tar.zst', sha256: '{source_hash}' }} }}\n  bins: {{ extractor: 'bin/extractor' }}\n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  let message = (open --raw ($ctx.sources.main.dir | path join 'payload' 'message.txt') | str trim)\n  $\"#!/usr/bin/env sh\\nprintf '($message)\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'extractor')\n}}\n"
+        ),
+    )
+    .unwrap();
+
+    let build = run(
+        root,
+        &[
+            "build",
+            rune.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert_success(&build, "build from extracted source archive");
+    let archive = out.join(format!("extractor-0.1.0-{}.tar.zst", target_triple()));
+    let install = run(root, &["install", archive.to_str().unwrap()]);
+    assert_success(&install, "install extracted source package");
+
+    let output = run_shim(root, "extractor");
+    assert_success(&output, "run extractor");
+    assert_eq!(stdout(&output).trim(), "hello from extracted source");
 }
 
 #[test]
@@ -714,19 +811,107 @@ fn build_fetches_and_verifies_sources() {
 }
 
 #[test]
+fn direct_source_install_preserves_runtime_deps() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let src = TempDir::new().unwrap();
+    let src = src.path();
+    let runes = src.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        src.join("tome.rn"),
+        "export const tome = {\n  name: 'directdeps'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+
+    fs::write(
+        runes.join("dep.rn"),
+        "export const package = {\n  name: 'dep'\n  version: '0.1.0'\n  bins: { dep: 'bin/dep' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'dep\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'dep')\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("app.rn"),
+        "export const package = {\n  name: 'app'\n  version: '0.1.0'\n  deps: { runtime: ['dep'], build: {} }\n  bins: { app: 'bin/app' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'app\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'app')\n}\n",
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &["tome", "add", src.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "add direct deps tome");
+
+    let install = run(root, &["install", runes.join("app.rn").to_str().unwrap()]);
+    assert_success(&install, "install direct source app");
+    assert!(
+        root.join("state")
+            .join("packages")
+            .join("dep.nuon")
+            .exists(),
+        "runtime dep from embedded archive metadata should be installed"
+    );
+}
+
+#[test]
+fn locked_source_install_rejects_rebuilt_hash_drift() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let src = TempDir::new().unwrap();
+    let src = src.path();
+
+    let rune = src.join("locksrc.rn");
+    fs::write(
+        &rune,
+        "export const package = {\n  name: 'locksrc'\n  version: '0.1.0'\n  bins: { locksrc: 'bin/locksrc' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'v1\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'locksrc')\n}\n",
+    )
+    .unwrap();
+
+    let install = run(root, &["install", rune.to_str().unwrap()]);
+    assert_success(&install, "initial source install");
+    let lock_path = root.join("state").join("grimoire.lock.nuon");
+    let locked = fs::read_to_string(&lock_path).expect("lockfile after source install");
+
+    let remove = run(root, &["remove", "locksrc"]);
+    assert_success(&remove, "remove source package");
+    fs::write(&lock_path, locked).unwrap();
+
+    fs::write(
+        &rune,
+        "export const package = {\n  name: 'locksrc'\n  version: '0.1.0'\n  bins: { locksrc: 'bin/locksrc' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'v2\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'locksrc')\n}\n",
+    )
+    .unwrap();
+
+    let locked_install = run(root, &["install", rune.to_str().unwrap(), "--locked"]);
+    assert_failure_contains(
+        &locked_install,
+        "hash mismatch",
+        "locked source install rejects changed same-version source",
+    );
+    assert!(
+        !root
+            .join("state")
+            .join("packages")
+            .join("locksrc.nuon")
+            .exists(),
+        "failed locked source install should not write package state"
+    );
+}
+
+#[test]
 fn install_resolves_binary_from_index() {
     let root = TempDir::new().unwrap();
     let root = root.path();
     let triple = target_triple();
 
-    // A tome whose package repo is itself (`.`): it ships a rune *and* a pre-built archive.
+    // A tome that publishes its package repo to a local `dist/` directory: it ships a rune
+    // *and* a pre-built archive alongside the index in `dist/`.
     let tome = TempDir::new().unwrap();
     let tome = tome.path();
     let runes = tome.join("runes");
     fs::create_dir_all(&runes).unwrap();
     fs::write(
         tome.join("tome.rn"),
-        "export const tome = {\n  name: 'bincore'\n  packages: { repo: '.', format: 'git', index: 'index.nuon' }\n}\n",
+        "export const tome = {\n  name: 'bincore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
     )
     .unwrap();
 
@@ -740,14 +925,14 @@ fn install_resolves_binary_from_index() {
 
     let archive_name = format!("binpkg-0.1.0-{triple}.tar.zst");
     let archive = make_indexed_archive(
-        &tome.join(&archive_name),
+        &tome.join("dist").join(&archive_name),
         "binpkg",
         &triple,
         "#!/usr/bin/env sh\nprintf 'from binary\\n'\n",
     );
     let hash = sha256_file(&archive);
     fs::write(
-        tome.join("index.nuon"),
+        tome.join("dist").join("index.nuon"),
         format!(
             "{{\n  packages: [\n    {{ name: \"binpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", runtime_deps: [] }}\n  ]\n}}\n"
         ),
@@ -782,20 +967,94 @@ fn install_resolves_binary_from_index() {
 }
 
 #[test]
+fn install_resolves_binary_over_http() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+
+    // The published index + archive live in a directory served over HTTP; the tome.rn points
+    // at that base URL with format "http". Installing must fetch and verify the archive over
+    // the network rather than building the source rune (which prints a different marker).
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        runes.join("httppkg.rn"),
+        "export const package = {\n  name: 'httppkg'\n  version: '0.1.0'\n  bins: { httppkg: 'bin/httppkg' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'from source\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'httppkg')\n}\n",
+    )
+    .unwrap();
+
+    // Stage the published artifacts (archive + index) in a directory the HTTP server hosts.
+    let published = TempDir::new().unwrap();
+    let published = published.path();
+    let archive_name = format!("httppkg-0.1.0-{triple}.tar.zst");
+    let archive = make_indexed_archive(
+        &published.join(&archive_name),
+        "httppkg",
+        &triple,
+        "#!/usr/bin/env sh\nprintf 'from binary\\n'\n",
+    );
+    let hash = sha256_file(&archive);
+    fs::write(
+        published.join("index.nuon"),
+        format!(
+            "{{\n  packages: [\n    {{ name: \"httppkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", runtime_deps: [] }}\n  ]\n}}\n"
+        ),
+    )
+    .unwrap();
+
+    let base_url = serve_dir(published.to_path_buf());
+    fs::write(
+        tome.join("tome.rn"),
+        format!(
+            "export const tome = {{\n  name: 'httpcore'\n  packages: {{ repo: '{base_url}', format: 'http', index: 'index.nuon' }}\n}}\n"
+        ),
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "tome add httpcore");
+    let update = run(root, &["tome", "update", "httpcore"]);
+    assert_success(&update, "tome update httpcore");
+
+    let install = run(root, &["install", "httppkg"]);
+    assert_success(&install, "install httppkg from http index");
+    assert!(
+        root.join("cache")
+            .join("archives")
+            .join(hash.strip_prefix("sha256:").unwrap())
+            .exists(),
+        "verified http archive should be cached by hash"
+    );
+
+    let shim = run_shim(root, "httppkg");
+    assert_success(&shim, "run http-installed httppkg");
+    assert_eq!(
+        stdout(&shim).trim(),
+        "from binary",
+        "http binary archive must be preferred over source build"
+    );
+}
+
+#[test]
 fn install_pulls_in_runtime_dependencies() {
     let root = TempDir::new().unwrap();
     let root = root.path();
     let triple = target_triple();
 
-    // A tome whose package repo is itself (`.`): `app` declares a runtime dependency on `lib`,
-    // and both ship as pre-built archives. Installing `app` must install `lib` too.
+    // A tome that publishes to a local `dist/` directory: `app` declares a runtime dependency
+    // on `lib`, and both ship as pre-built archives. Installing `app` must install `lib` too.
     let tome = TempDir::new().unwrap();
     let tome = tome.path();
     let runes = tome.join("runes");
     fs::create_dir_all(&runes).unwrap();
     fs::write(
         tome.join("tome.rn"),
-        "export const tome = {\n  name: 'depcore'\n  packages: { repo: '.', format: 'git', index: 'index.nuon' }\n}\n",
+        "export const tome = {\n  name: 'depcore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
     )
     .unwrap();
     // The binary archives are preferred, but a tome must define at least one rune.
@@ -809,7 +1068,7 @@ fn install_pulls_in_runtime_dependencies() {
 
     let app_name = format!("app-0.1.0-{triple}.tar.zst");
     let app = make_indexed_archive(
-        &tome.join(&app_name),
+        &tome.join("dist").join(&app_name),
         "app",
         &triple,
         "#!/usr/bin/env sh\nprintf 'app\\n'\n",
@@ -818,7 +1077,7 @@ fn install_pulls_in_runtime_dependencies() {
 
     let lib_name = format!("lib-0.1.0-{triple}.tar.zst");
     let lib = make_indexed_archive(
-        &tome.join(&lib_name),
+        &tome.join("dist").join(&lib_name),
         "lib",
         &triple,
         "#!/usr/bin/env sh\nprintf 'lib\\n'\n",
@@ -826,7 +1085,7 @@ fn install_pulls_in_runtime_dependencies() {
     let lib_hash = sha256_file(&lib);
 
     fs::write(
-        tome.join("index.nuon"),
+        tome.join("dist").join("index.nuon"),
         format!(
             "{{\n  packages: [\n    {{ name: \"app\", version: \"0.1.0\", target: \"{triple}\", archive: \"{app_name}\", archive_hash: \"{app_hash}\", runtime_deps: [\"lib\"] }}\n    {{ name: \"lib\", version: \"0.1.0\", target: \"{triple}\", archive: \"{lib_name}\", archive_hash: \"{lib_hash}\", runtime_deps: [] }}\n  ]\n}}\n"
         ),
@@ -858,6 +1117,237 @@ fn install_pulls_in_runtime_dependencies() {
     let lib_shim = run_shim(root, "lib");
     assert_success(&lib_shim, "run dependency shim lib");
     assert_eq!(stdout(&lib_shim).trim(), "lib");
+}
+
+#[test]
+fn install_selects_constrained_dependency_version() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+
+    // The index offers two versions of `lib`; `app` constrains it to `<2.0`. The solver must
+    // pick `lib` 1.0.0 even though 2.0.0 is newer, proving version-aware resolution end to end.
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'vercore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    for pkg in ["app", "lib"] {
+        fs::write(
+            runes.join(format!("{pkg}.rn")),
+            format!("export const package = {{\n  name: '{pkg}'\n  version: '1.0.0'\n  bins: {{}}\n}}\n\nexport def build [ctx] {{ }}\n"),
+        )
+        .unwrap();
+    }
+
+    let dist = tome.join("dist");
+    let app_name = format!("app-1.0.0-{triple}.tar.zst");
+    let app = make_versioned_archive(
+        &dist.join(&app_name),
+        "app",
+        "1.0.0",
+        &triple,
+        "#!/usr/bin/env sh\nprintf 'app\\n'\n",
+    );
+    let app_hash = sha256_file(&app);
+
+    let lib1_name = format!("lib-1.0.0-{triple}.tar.zst");
+    let lib1 = make_versioned_archive(
+        &dist.join(&lib1_name),
+        "lib",
+        "1.0.0",
+        &triple,
+        "#!/usr/bin/env sh\nprintf 'lib 1.0\\n'\n",
+    );
+    let lib1_hash = sha256_file(&lib1);
+
+    let lib2_name = format!("lib-2.0.0-{triple}.tar.zst");
+    let lib2 = make_versioned_archive(
+        &dist.join(&lib2_name),
+        "lib",
+        "2.0.0",
+        &triple,
+        "#!/usr/bin/env sh\nprintf 'lib 2.0\\n'\n",
+    );
+    let lib2_hash = sha256_file(&lib2);
+
+    fs::write(
+        dist.join("index.nuon"),
+        format!(
+            "{{\n  packages: [\n    {{ name: \"app\", version: \"1.0.0\", target: \"{triple}\", archive: \"{app_name}\", archive_hash: \"{app_hash}\", runtime_deps: [{{ name: \"lib\", version: \"<2.0\" }}] }}\n    {{ name: \"lib\", version: \"1.0.0\", target: \"{triple}\", archive: \"{lib1_name}\", archive_hash: \"{lib1_hash}\", runtime_deps: [] }}\n    {{ name: \"lib\", version: \"2.0.0\", target: \"{triple}\", archive: \"{lib2_name}\", archive_hash: \"{lib2_hash}\", runtime_deps: [] }}\n  ]\n}}\n"
+        ),
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "tome add vercore");
+    let update = run(root, &["tome", "update", "vercore"]);
+    assert_success(&update, "tome update vercore");
+
+    let install = run(root, &["install", "app"]);
+    assert_success(&install, "install app with constrained lib");
+
+    let lib_shim = run_shim(root, "lib");
+    assert_success(&lib_shim, "run constrained lib shim");
+    assert_eq!(
+        stdout(&lib_shim).trim(),
+        "lib 1.0",
+        "solver must honor the `<2.0` constraint and pick lib 1.0.0"
+    );
+}
+
+#[test]
+fn tome_build_all_builds_every_rune() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let workspace = TempDir::new().unwrap();
+    let tome_dir = workspace.path().join("multitome");
+    let tome_path = tome_dir.to_str().unwrap();
+
+    let init = run(root, &["tome", "init", "multitome", "--path", tome_path]);
+    assert_success(&init, "tome init");
+    for rune in ["alpha", "beta", "gamma"] {
+        let out = run(root, &["tome", "rune", rune, "--path", tome_path]);
+        assert_success(&out, "tome rune");
+    }
+
+    // `--all` builds every rune in one pass and registers each in the single index.
+    let build = run(root, &["tome", "build", "--all", "--path", tome_path]);
+    assert_success(&build, "tome build --all");
+
+    let target = target_triple();
+    let dist = tome_dir.join("dist");
+    let index = fs::read_to_string(dist.join("index.nuon")).unwrap();
+    for rune in ["alpha", "beta", "gamma"] {
+        let archive_rel = format!("{rune}-0.1.0-{target}.tar.zst");
+        assert!(
+            dist.join(&archive_rel).exists(),
+            "built archive for {rune} should exist"
+        );
+        assert!(
+            index.contains(&archive_rel),
+            "index should record {rune}: {index}"
+        );
+    }
+
+    // A second `--all` build upserts rather than duplicating entries.
+    let rebuild = run(root, &["tome", "build", "--all", "--path", tome_path]);
+    assert_success(&rebuild, "tome build --all rebuild");
+    let index = fs::read_to_string(dist.join("index.nuon")).unwrap();
+    let alpha_rel = format!("alpha-0.1.0-{target}.tar.zst");
+    assert_eq!(
+        index.matches(&alpha_rel).count(),
+        1,
+        "rebuild should upsert, not duplicate: {index}"
+    );
+
+    // Naming a package while passing --all is rejected by the CLI.
+    let conflict = run(
+        root,
+        &["tome", "build", "alpha", "--all", "--path", tome_path],
+    );
+    assert!(
+        !conflict.status.success(),
+        "passing both a package and --all should fail"
+    );
+}
+
+#[test]
+fn install_locked_reproduces_pinned_version() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+
+    // The index offers two versions of `lockpkg`; the lockfile pins the older 0.1.0. A
+    // `--locked` install must reproduce the pinned 0.1.0 even though 0.2.0 is newer and present.
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'lockcore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("lockpkg.rn"),
+        "export const package = {\n  name: 'lockpkg'\n  version: '0.1.0'\n  bins: {}\n}\n\nexport def build [ctx] { }\n",
+    )
+    .unwrap();
+
+    let dist = tome.join("dist");
+    let v1_name = format!("lockpkg-0.1.0-{triple}.tar.zst");
+    let v1 = make_versioned_archive(
+        &dist.join(&v1_name),
+        "lockpkg",
+        "0.1.0",
+        &triple,
+        "#!/usr/bin/env sh\nprintf 'v0.1.0\\n'\n",
+    );
+    let v1_hash = sha256_file(&v1);
+
+    let v2_name = format!("lockpkg-0.2.0-{triple}.tar.zst");
+    let v2 = make_versioned_archive(
+        &dist.join(&v2_name),
+        "lockpkg",
+        "0.2.0",
+        &triple,
+        "#!/usr/bin/env sh\nprintf 'v0.2.0\\n'\n",
+    );
+    let v2_hash = sha256_file(&v2);
+
+    fs::write(
+        dist.join("index.nuon"),
+        format!(
+            "{{\n  packages: [\n    {{ name: \"lockpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", runtime_deps: [] }}\n    {{ name: \"lockpkg\", version: \"0.2.0\", target: \"{triple}\", archive: \"{v2_name}\", archive_hash: \"{v2_hash}\", runtime_deps: [] }}\n  ]\n}}\n"
+        ),
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "tome add lockcore");
+    let update = run(root, &["tome", "update", "lockcore"]);
+    assert_success(&update, "tome update lockcore");
+
+    // Hand-write a lockfile pinning the older 0.1.0 (with its real archive hash). A locked
+    // install must honor this rather than resolving to the newest available release.
+    let state = root.join("state");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(
+        state.join("grimoire.lock.nuon"),
+        format!(
+            "{{\n  version: 1,\n  packages: [\n    {{ name: \"lockpkg\", version: \"0.1.0\", target: \"{triple}\", archive_hash: \"{v1_hash}\", source_hashes: {{}}, runtime_deps: [], build_deps: [] }}\n  ]\n}}\n"
+        ),
+    )
+    .unwrap();
+
+    let locked = run(root, &["install", "lockpkg", "--locked"]);
+    assert_success(&locked, "locked install of lockpkg");
+    let installed = run(root, &["list"]);
+    assert!(
+        stdout(&installed).contains("lockpkg\t0.1.0"),
+        "locked install must reproduce pinned 0.1.0, not newest: {}",
+        stdout(&installed)
+    );
+
+    // A package absent from the lockfile cannot be installed under `--locked`.
+    let unpinned = run(root, &["install", "lockpkg-missing", "--locked"]);
+    assert_failure_contains(
+        &unpinned,
+        "not recorded in the lockfile",
+        "locked install of unpinned package",
+    );
 }
 
 #[test]
@@ -1019,7 +1509,7 @@ fn make_fake_tome() -> TempDir {
 
     fs::write(
         dir.path().join("tome.rn"),
-        "export const tome = {\n  name: 'core'\n  packages: { repo: '.', format: 'git', index: 'index.nuon' }\n}\n",
+        "export const tome = {\n  name: 'core'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
     )
     .unwrap();
 
@@ -1036,6 +1526,54 @@ fn make_fake_tome() -> TempDir {
     .unwrap();
 
     dir
+}
+
+/// Serves the files in `dir` over a minimal HTTP/1.1 server on an ephemeral local port and
+/// returns the base URL. A request for `/name` returns that file (200) or 404 if absent. The
+/// listener thread is detached and lives for the rest of the test process.
+fn serve_dir(dir: PathBuf) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind http server");
+    let port = listener.local_addr().expect("local addr").port();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            let mut request_line = String::new();
+            if reader.read_line(&mut request_line).is_err() {
+                continue;
+            }
+            // Drain the remaining request headers so the client's write completes.
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) if line == "\r\n" || line == "\n" => break,
+                    Ok(_) => continue,
+                    Err(_) => break,
+                }
+            }
+            let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+            let name = path.trim_start_matches('/');
+            let response = match fs::read(dir.join(name)) {
+                Ok(body) => {
+                    let mut head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .into_bytes();
+                    head.extend_from_slice(&body);
+                    head
+                }
+                Err(_) => {
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_vec()
+                }
+            };
+            let _ = stream.write_all(&response);
+            let _ = stream.flush();
+        }
+    });
+    format!("http://127.0.0.1:{port}")
 }
 
 fn open_archive(path: &Path) -> tar::Builder<ZstdFileEncoder> {
@@ -1088,12 +1626,24 @@ fn make_package_archive(out: &Path, name: &str, package_nuon: &str) -> PathBuf {
 /// Builds a complete `.tar.zst` package archive at `path` whose single bin is `bin_script`.
 /// Used to stage a pre-built binary in a fake package repository.
 fn make_indexed_archive(path: &Path, name: &str, triple: &str, bin_script: &str) -> PathBuf {
+    make_versioned_archive(path, name, "0.1.0", triple, bin_script)
+}
+
+/// Like [`make_indexed_archive`] but with an explicit `version`, so a test can stage several
+/// versions of the same package in one index.
+fn make_versioned_archive(
+    path: &Path,
+    name: &str,
+    version: &str,
+    triple: &str,
+    bin_script: &str,
+) -> PathBuf {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
     let mut builder = open_archive(path);
     let package_nuon = format!(
-        "{{format: 1, name: \"{name}\", version: \"0.1.0\", target: \"{triple}\", bins: {{{name}: \"bin/{name}\"}}}}\n"
+        "{{format: 1, name: \"{name}\", version: \"{version}\", target: \"{triple}\", bins: {{{name}: \"bin/{name}\"}}}}\n"
     );
     append_file(
         &mut builder,

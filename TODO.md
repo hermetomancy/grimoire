@@ -1,20 +1,55 @@
 # Grimoire TODO
 
-## Missing functionality
+## Focus next
 
-The README is an end-user overview; this is what is designed but not built yet.
+The README is an end-user overview; this is what is designed but not built yet, in priority
+order. The theme: the catalog/solver/install machinery is done, but nothing has actually
+*compiled* a real package — closing that gap comes first.
 
-1. **Addendums**
-   - Entirely stubbed in `main.rs` (`would add ...` / `addendum state is not wired yet`).
+1. **Build-environment contract** — the prerequisite for any real compiled package.
+   - **Worked real-package fixture.** Native `.tar.zst` source extraction and build-dependency
+     `PATH` wiring are implemented and covered by smoke tests, but they still need pressure from
+     a genuine autotools/cmake-style rune (`./configure && make && make install`) rather than only
+     focused fixtures.
+   - **Contract docs.** Document `ctx.sources.<name>.path`, optional `ctx.sources.<name>.dir`,
+     `ctx.env.PATH`, `ctx.package_dir`, `ctx.work_dir`, and `ctx.prefix` in author-facing prose.
+
+2. **A `core` tome + host-toolchain precheck.**
+   - Ship a minimal `core` tome of prebuilt, relocatable build tools (`make`, `pkg-config`, `m4`,
+     `autoconf`, `automake`, `libtool`, `gettext`, `bash`, `coreutils`, `sed`, `gawk`, `grep`,
+     `tar`, `gzip`, `xz`).
+   - Lean on the **host** C toolchain (cc/binutils/libc) for the MVP rather than redistributing
+     it; add a `doctor`-style precheck that fails a source build early with a clear message when
+     `cc`/`make`/`sh`/`tar` are missing. Self-hosting the toolchain (prebuilt gcc/glibc) is a
+     later, much larger effort gated on relocatability work (RPATH/loader patching).
+
+3. **Addendums.**
+   - Entirely stubbed in `main.rs` (`would add ...` / `addendum state is not wired yet`); an empty
+     placeholder field exists in `model.rs`.
    - Persist addendum state as NUON, clone via `gix`, and patch rune data declaratively
      (sources, mirrors, checksums, build flags, target policy, metadata).
    - Data-only — no execution hooks (AGENTS.md §5.5).
 
+## Hardening / real-world gaps
+
+Not part of the original MVP design, but a package manager wants these before it is trustworthy
+in daily use. Listed so they are tracked, not necessarily scheduled.
+
+- **Concurrency lock.** Two `grm install`/`remove` runs against the same root can race the shared
+  state. Guard mutation with an install-root lockfile.
+- **Orphan GC / autoremove.** `remove` deletes one package; nothing reclaims dependencies left
+  unreferenced afterwards.
+- **`grm clean`.** The archive cache, build output, and `transactions/` dirs accumulate with no
+  way to reclaim space.
+- **Pin/hold.** No way to hold a package back from `upgrade`.
+- **Polish.** Shell completions, man pages, `grm` self-update, and an actual *published* `core`
+  catalog to install from.
+
 ## Documentation
 
-- Write `///` rustdoc on the public surface (modules, key types, command entry points)
-  so `cargo doc` produces useful API documentation. This is the documentation plan —
-  no separate prose docs for now.
+- Module-level `//!` docs cover every module and `///` rustdoc documents key types and command
+  entry points, so `cargo doc --no-deps` builds warning-free. Extend coverage as the surface
+  grows; no separate prose docs for now.
 
 ## Done
 
@@ -26,24 +61,43 @@ The README is an end-user overview; this is what is designed but not built yet.
 3. **Binary download and resolution** — a bare package name resolves against configured tome
    indexes, preferring a target-matching binary archive (download + `archive_hash` verified
    before extraction) over a source build.
-4. **Dependency resolution** — runtime deps install with a package; build deps install before
-   a source build. Name-based, cycle-guarded, no constraint solver (deferred scope).
+4. **Version-aware dependency resolution** — a backtracking solver (`src/solve.rs`) picks a
+   concrete version for every package in the runtime graph that satisfies all accumulated
+   semver requirements; candidates are a tome index's binary archives plus the source rune,
+   highest satisfying version first (binary preferred over source at equal version). Build
+   deps install just-in-time before a source build. Cycle-guarded; ordered deps-before-dependents.
 5. **Lockfile (`grimoire.lock.nuon`)** — regenerated under install-root state after every
    install/remove from recorded package + tome state (target, versions, archive/source
    hashes, runtime/build deps, tome commits). `upgrade` reinstalls and so refreshes it.
+   `install --locked` reads it back and constrains resolution to the recorded versions and
+   archive hashes (rejecting anything not in the lock) for a reproducible reinstall.
 6. **`doctor` health checks** — validates configured tome caches, installed-state integrity
    (package dirs + shims), and lockfile presence; counts to stdout, problems to stderr.
 7. **Tome authoring (`grm tome init` / `grm tome rune`)** — scaffolds a new tome (manifest,
-   `runes/`, `sources/`, empty index) and templated, buildable runes, so a catalog can be
-   authored locally and installed from without hand-writing the layout.
-8. **Tome publishing (`grm tome build`)** — builds a tome's rune into a `.tar.zst` under
-   `packages/` and upserts its entry (name, version, target, archive path, hash, runtime deps)
-   into the tome's `index.nuon`, so prebuilt archives can be published from a local tome
-   (`packages.repo = "."`). External package repos are not supported yet.
+   `runes/`, `sources/`, a git-ignored `dist/`, and `.gitignore`) and templated, buildable
+   runes, so a catalog can be authored locally and installed from without hand-writing the layout.
+8. **Tome publishing (`grm tome build`)** — builds a tome's rune into a `.tar.zst` under the
+   git-ignored `dist/` and upserts its entry (name, version, target, archive filename, hash,
+   runtime deps) into `dist/index.nuon`. `--all` builds every rune in the tome in one pass.
+   `dist/` is the publishing unit: the git repo carries only runes + `tome.rn`, and `dist/` is
+   uploaded to a static webserver. Manifests select the repo via `packages.format`: `"http"`
+   (repo is an http(s) base URL — index and checksum-verified archives fetched over HTTP, with
+   connect/read timeouts and bounded retries on transient failures) or `"local"` (repo is a
+   filesystem path, for testing).
+9. **Output and verbosity** — global `--quiet`/`--verbose` flags select a process-wide level
+   (`src/progress.rs`): granular progress collapses into a transient pacman-style spinner on
+   stderr at the default level, becomes persistent colored step lines under `--verbose`, and is
+   suppressed under `--quiet`. Color and decorations are TTY-gated and `NO_COLOR`-aware, so piped
+   output stays plain. Result lines go to stdout (AGENTS.md §7); `install` reports a no-op when a
+   package is already up to date instead of printing nothing.
 
 ## Testing gaps (AGENTS.md §8)
 
-- CLI output and `--quiet` behavior (stderr vs. stdout split).
+- **CLI output across verbosity levels.** The `--quiet`/`--verbose` stdout-vs-stderr split, the
+  pacman-style spinner + color path (TTY-gated, `NO_COLOR`-aware), and the `install` no-op
+  "already installed and up to date" message all currently lack assertions. Tests run with
+  captured (non-TTY) output, so the spinner/color are auto-disabled — add coverage for the plain
+  output each level produces.
 - Windows shim generation/execution (blocked on a Windows test environment).
 - Addendum-override end-to-end fixtures (blocked on the remaining item).
 
@@ -52,11 +106,13 @@ The README is an end-user overview; this is what is designed but not built yet.
 - Single self-contained Rust binary embedding the Nushell engine; native git/tar/zstd
   via `gix`/`tar`/`zstd`, no shelling out (AGENTS.md §0, §1a).
 - `src/` is modularised: `archive/`, `nu/`, `tome/` with module roots plus `build`,
-  `install`, `fetch`, `index`, `resolve`, `lock`, `doctor`, `query`, `paths`, `model`, `cli`.
+  `install`, `fetch`, `index`, `solve`, `lock`, `doctor`, `query`, `paths`, `model`, `cli`.
 - Build, install (binary archive from a tome index, local archive, or source build),
   remove, list, search, info, upgrade, and a health-checking doctor are functional.
-- Source builds fetch and checksum-verify declared sources; bare-name installs prefer a
-  verified binary archive and pull in runtime/build dependencies (cycle-guarded).
+- Source builds fetch and checksum-verify declared sources; bare-name installs resolve a
+  version-satisfying set across the dependency graph, prefer a verified binary archive over a
+  source build, and pull in runtime/build dependencies (cycle-guarded). Binary archives and
+  their index are served either from a local filesystem path or over HTTP.
 - A `grimoire.lock.nuon` snapshot is regenerated under install-root state on every change.
 - Installs stage into a transaction directory and promote with atomic renames; failures
   after promotion (shims, state writes) roll back to the prior version (AGENTS.md §4).

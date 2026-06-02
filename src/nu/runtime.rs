@@ -1,10 +1,20 @@
+//! Evaluating `.rn` definitions and running build steps in the embedded Nushell engine.
+//!
+//! The [`RuneRuntime`] trait exposes reading package/tome metadata and executing a rune's `build`
+//! function against a prepared context; [`EmbeddedNuRuntime`] is the in-process implementation.
+//! Runes are evaluated, not shelled out to — the engine is embedded (AGENTS.md §1a).
+
 use anyhow::{Context, Result, anyhow};
 use nu_protocol::{
     PipelineData, Record, Span, Value,
     debugger::WithoutDebug,
     engine::{Stack, StateWorkingSet},
 };
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     fetch::FetchedSource,
@@ -21,11 +31,17 @@ pub trait RuneRuntime {
         package_dir: &Path,
         work_dir: &Path,
         sources: &BTreeMap<String, FetchedSource>,
+        env: &BuildEnv,
     ) -> Result<()>;
 }
 
 #[derive(Debug, Default)]
 pub struct EmbeddedNuRuntime;
+
+#[derive(Debug, Default)]
+pub struct BuildEnv {
+    pub path_dirs: Vec<PathBuf>,
+}
 
 impl RuneRuntime for EmbeddedNuRuntime {
     fn package_metadata(&self, rune: &Path) -> Result<PackageMetadata> {
@@ -42,6 +58,7 @@ impl RuneRuntime for EmbeddedNuRuntime {
         package_dir: &Path,
         work_dir: &Path,
         sources: &BTreeMap<String, FetchedSource>,
+        env: &BuildEnv,
     ) -> Result<()> {
         let rune = rune
             .canonicalize()
@@ -53,9 +70,12 @@ impl RuneRuntime for EmbeddedNuRuntime {
             .canonicalize()
             .with_context(|| format!("resolve work dir {}", work_dir.display()))?;
 
-        let context = build_context(&package_dir, &work_dir, sources);
+        let path_entries = build_path_entries(&env.path_dirs);
+        let path = build_path_string(&path_entries);
+        let context = build_context(&package_dir, &work_dir, sources, path.as_deref());
+        let env_prefix = path_env_assignment(&path_entries)?;
         let source = format!(
-            "use {} build\nbuild {}\n",
+            "{env_prefix}use {} build\nbuild {}\n",
             nuon_string(&rune.display().to_string())?,
             nuon_io::to_nuon_string(&context)?,
         );
@@ -64,6 +84,7 @@ impl RuneRuntime for EmbeddedNuRuntime {
             &source,
             Some(&format!("grimoire-build-{}", rune.display())),
             package_dir.parent().unwrap_or(&package_dir),
+            path.as_deref(),
         )
     }
 }
@@ -74,6 +95,7 @@ fn build_context(
     package_dir: &Path,
     work_dir: &Path,
     sources: &BTreeMap<String, FetchedSource>,
+    path: Option<&str>,
 ) -> Value {
     let span = Span::unknown();
     let mut ctx = Record::new();
@@ -87,11 +109,21 @@ fn build_context(
     for (name, source) in sources {
         let mut entry = Record::new();
         entry.push("path", path_value(&source.path));
+        match &source.extracted_dir {
+            Some(dir) => entry.push("dir", path_value(dir)),
+            None => entry.push("dir", Value::nothing(span)),
+        }
         entry.push("url", Value::string(&source.url, span));
         entry.push("sha256", Value::string(&source.sha256, span));
         sources_record.push(name, Value::record(entry, span));
     }
     ctx.push("sources", Value::record(sources_record, span));
+
+    let mut env = Record::new();
+    if let Some(path) = path {
+        env.push("PATH", Value::string(path, span));
+    }
+    ctx.push("env", Value::record(env, span));
 
     Value::record(ctx, span)
 }
@@ -124,7 +156,12 @@ fn exported_const(path: &Path, name: &str) -> Result<Value> {
     Ok(value.clone())
 }
 
-fn eval_nu_source(source: &str, source_name: Option<&str>, cwd: &Path) -> Result<()> {
+fn eval_nu_source(
+    source: &str,
+    source_name: Option<&str>,
+    cwd: &Path,
+    path: Option<&str>,
+) -> Result<()> {
     let mut engine_state =
         nu_command::add_shell_command_context(nu_cmd_lang::create_default_context());
     engine_state.add_env_var(
@@ -132,6 +169,15 @@ fn eval_nu_source(source: &str, source_name: Option<&str>, cwd: &Path) -> Result
         Value::string(cwd.display().to_string(), nu_protocol::Span::unknown()),
     );
     let mut stack = Stack::new();
+    stack.add_env_var(
+        "PWD".to_string(),
+        Value::string(cwd.display().to_string(), nu_protocol::Span::unknown()),
+    );
+    if let Some(path) = path {
+        let value = path_value_from_string(path);
+        engine_state.add_env_var("PATH".to_string(), value.clone());
+        stack.add_env_var("PATH".to_string(), value);
+    }
 
     let (block, delta) = {
         let mut working_set = StateWorkingSet::new(&engine_state);
@@ -173,6 +219,48 @@ fn eval_nu_source(source: &str, source_name: Option<&str>, cwd: &Path) -> Result
 /// generated Nushell build runner. Routed through `nuon_io` per the single-NUON-layer rule.
 fn nuon_string(value: &str) -> Result<String> {
     nuon_io::to_nuon_string(&Value::string(value, nu_protocol::Span::unknown()))
+}
+
+fn build_path_entries(path_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut entries = path_dirs.to_vec();
+    if let Some(existing) = std::env::var_os("PATH") {
+        entries.extend(std::env::split_paths(&existing));
+    }
+    entries
+}
+
+fn build_path_string(path_entries: &[PathBuf]) -> Option<String> {
+    if path_entries.is_empty() {
+        return None;
+    }
+    std::env::join_paths(path_entries)
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+fn path_env_assignment(path_entries: &[PathBuf]) -> Result<String> {
+    if path_entries.is_empty() {
+        return Ok(String::new());
+    }
+    Ok(format!(
+        "$env.PATH = {}\n",
+        nuon_io::to_nuon_string(&path_list_value(path_entries))?
+    ))
+}
+
+fn path_list_value(path_entries: &[PathBuf]) -> Value {
+    Value::list(
+        path_entries
+            .iter()
+            .map(|path| path_value(path.as_path()))
+            .collect(),
+        nu_protocol::Span::unknown(),
+    )
+}
+
+fn path_value_from_string(path: &str) -> Value {
+    let entries = std::env::split_paths(path).collect::<Vec<_>>();
+    path_list_value(&entries)
 }
 
 #[cfg(test)]
