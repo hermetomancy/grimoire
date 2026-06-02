@@ -56,7 +56,22 @@ grm info hello
 # Install, upgrade, and remove
 grm install hello
 grm upgrade hello
-grm remove hello
+grm remove hello     # also removes runtime deps nothing else still needs
+
+# Preview what an install or upgrade would do without touching state
+grm install hello --dry-run
+grm upgrade --dry-run
+
+# Hold a package back from upgrade until you release it
+grm hold hello
+grm unhold hello
+
+# Reclaim disk space (caches and stale transaction dirs; installs untouched)
+grm clean
+
+# Shell completions and man pages
+grm completions bash > ~/.local/share/bash-completion/completions/grm
+grm man --output ./man
 
 # Build from source explicitly
 grm install hello --from-source
@@ -201,6 +216,13 @@ catalog model of per-user installers — while staying OS-independent and conven
 | **Chocolatey** | Windows software + automation | Central feed (+ private feeds) | No central feed assumed; git repositories are the native distribution unit. |
 | **Homebrew** | Developer packages on macOS/Linux | Git taps of formulae | Keeps git-backed catalogs but runs natively on Windows too, with first-class customization layers. |
 | **Nix** | Reproducible builds & environments | Declarative repos / channels | Source definitions, pins, and overlays without requiring a full functional store model. |
+
+## Further reading
+
+- [Threat model](docs/threat-model.md) — what `grm` does and does not protect against,
+  given git-native catalogs and arbitrary build scripts.
+- [Operating layout](docs/layout.md) — where state lives under the install root, what's
+  safe to delete, and how to relocate via `GRIMOIRE_ROOT`.
 
 ## Status
 
