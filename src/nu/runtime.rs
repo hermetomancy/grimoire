@@ -31,6 +31,7 @@ pub trait RuneRuntime {
         package_dir: &Path,
         work_dir: &Path,
         sources: &BTreeMap<String, FetchedSource>,
+        build_flags: &BTreeMap<String, String>,
         env: &BuildEnv,
     ) -> Result<()>;
 }
@@ -58,6 +59,7 @@ impl RuneRuntime for EmbeddedNuRuntime {
         package_dir: &Path,
         work_dir: &Path,
         sources: &BTreeMap<String, FetchedSource>,
+        build_flags: &BTreeMap<String, String>,
         env: &BuildEnv,
     ) -> Result<()> {
         let rune = rune
@@ -72,7 +74,13 @@ impl RuneRuntime for EmbeddedNuRuntime {
 
         let path_entries = build_path_entries(&env.path_dirs);
         let path = build_path_string(&path_entries);
-        let context = build_context(&package_dir, &work_dir, sources, path.as_deref());
+        let context = build_context(
+            &package_dir,
+            &work_dir,
+            sources,
+            build_flags,
+            path.as_deref(),
+        );
         let env_prefix = path_env_assignment(&path_entries)?;
         let source = format!(
             "{env_prefix}use {} build\nbuild {}\n",
@@ -95,6 +103,7 @@ fn build_context(
     package_dir: &Path,
     work_dir: &Path,
     sources: &BTreeMap<String, FetchedSource>,
+    build_flags: &BTreeMap<String, String>,
     path: Option<&str>,
 ) -> Value {
     let span = Span::unknown();
@@ -118,6 +127,12 @@ fn build_context(
         sources_record.push(name, Value::record(entry, span));
     }
     ctx.push("sources", Value::record(sources_record, span));
+
+    let mut flags = Record::new();
+    for (name, value) in build_flags {
+        flags.push(name, Value::string(value, span));
+    }
+    ctx.push("build_flags", Value::record(flags, span));
 
     let mut env = Record::new();
     if let Some(path) = path {
@@ -162,6 +177,7 @@ fn eval_nu_source(
     cwd: &Path,
     path: Option<&str>,
 ) -> Result<()> {
+    let _working_dir = WorkingDirectoryGuard::enter(cwd)?;
     let mut engine_state =
         nu_command::add_shell_command_context(nu_cmd_lang::create_default_context());
     engine_state.add_env_var(
@@ -213,6 +229,25 @@ fn eval_nu_source(
     }
 
     Ok(())
+}
+
+struct WorkingDirectoryGuard {
+    previous: PathBuf,
+}
+
+impl WorkingDirectoryGuard {
+    fn enter(cwd: &Path) -> Result<Self> {
+        let previous = std::env::current_dir().context("read current working directory")?;
+        std::env::set_current_dir(cwd)
+            .with_context(|| format!("enter build working directory {}", cwd.display()))?;
+        Ok(Self { previous })
+    }
+}
+
+impl Drop for WorkingDirectoryGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.previous);
+    }
 }
 
 /// Renders a string as a NUON string literal so it can be safely interpolated into the
@@ -298,7 +333,7 @@ mod tests {
     fn reads_package_metadata_from_rune() {
         let runtime = EmbeddedNuRuntime;
         let metadata = runtime
-            .package_metadata(Path::new("example/runes/hello.rn"))
+            .package_metadata(Path::new("tome-example/runes/hello.rn"))
             .expect("package metadata");
 
         assert_eq!(metadata.name, "hello");

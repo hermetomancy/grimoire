@@ -32,6 +32,8 @@ forked, pinned, reviewed, and rolled back like any other code.
   and archives are validated before extraction.
 - **Git-native catalogs.** Package sets are git repositories you can fork, pin to a
   commit, diff, and roll back.
+- **Data-only overlays.** Addenda patch package metadata without executing hooks, so local
+  source/checksum/dependency overrides stay reviewable.
 
 ## Install
 
@@ -98,12 +100,44 @@ fetch the index and checksum-verified archives over HTTP. For local testing, set
 filesystem path with `format: "local"`. Either way, the git repository carries only your runes
 and `tome.rn` — never the built binaries.
 
-During a source build, Grimoire passes a `ctx` record to the rune's `build` function. Verified
-source artifacts are available at `ctx.sources.<name>.path`; `.tar.zst`/`.tzst` sources are also
-extracted natively into `ctx.sources.<name>.dir` before the build runs. Installed build
-dependencies have their package `bin/` directories prepended to the embedded Nushell `PATH`, and
-the resulting value is exposed as `ctx.env.PATH`. Runes install into `ctx.package_dir`, with
-`ctx.prefix` pointing at the same directory for conventional configure/install flows.
+### Source build context
+
+During a source build, Grimoire fetches every declared source, verifies its `sha256`, prepares a
+temporary build workspace, installs build dependencies, then calls the rune's `build` function with
+a `ctx` record. The build function should assemble the package under `ctx.package_dir`; Grimoire
+packs that directory into the final `.tar.zst`.
+
+The build context fields are:
+
+- `ctx.sources.<name>.path`: the verified source artifact, keyed by the name used in
+  `package.sources`. This is the cached file Grimoire checked against the declared checksum.
+- `ctx.sources.<name>.dir`: for `.tar.zst` and `.tzst` sources, the directory where Grimoire
+  natively extracted the archive after validating every member path and rejecting links. For other
+  source types this is `null`.
+- `ctx.env.PATH`: the build PATH visible to Nushell and external commands run by the package's
+  build script. Grimoire prepends each installed build dependency's `bin/` directory, then appends
+  the host PATH.
+- `ctx.package_dir`: the staging root that becomes the installed package. Put files here exactly as
+  they should appear after install, for example `bin/tool`, `lib/...`, or `share/...`.
+- `ctx.work_dir`: a scratch directory for the build. It contains Grimoire-prepared sources and may
+  be used for temporary build output.
+- `ctx.prefix`: the install prefix to pass to conventional build systems. It currently points at
+  the same path as `ctx.package_dir`, so configure-style builds can use `./configure
+  --prefix=$ctx.prefix` followed by `make install PREFIX=$ctx.package_dir`.
+- `ctx.build_flags`: inert string key/value data from the rune's `build_flags` metadata after
+  addenda have been applied. Runes may read it to choose configure options or feature flags.
+
+For a typical archived source package, a rune build might look like:
+
+```nu
+export def build [ctx] {
+  let src = ($ctx.sources.main.dir | path join "widget-1.2.3")
+  cd $src
+  ./configure $"--prefix=($ctx.prefix)"
+  make
+  make install $"PREFIX=($ctx.package_dir)"
+}
+```
 
 ## Concepts
 
@@ -115,8 +149,44 @@ the resulting value is exposed as `ctx.env.PATH`. Runes install into `ctx.packag
 - **Packages** install as self-contained archives with embedded metadata and checksums.
   Source builds and prebuilt downloads both produce the same kind of archive, so installs
   behave identically either way.
-- **Addendums** *(planned)* are customization layers that patch a tome's packages —
-  sources, mirrors, build flags, metadata — without forking it, in the spirit of overlays.
+- **Addenda** are customization layers that patch a tome's package metadata without forking it,
+  in the spirit of overlays. They are inert NUON data: no hooks or scripts run from an addendum.
+
+## Addenda
+
+An addendum repository has an `addendum.nuon` file at its root:
+
+```nuon
+{
+  name: mypatches
+  patches: [
+    {
+      tome: example
+      package: hello
+      version: "0.2.0"
+      summary: "hello with a local source override"
+      sources: {
+        main: {
+          url: "hello-0.2.0.tar.zst"
+          sha256: "sha256:..."
+        }
+      }
+      deps: {
+        build: { default: ["make"] }
+        runtime: []
+      }
+      build_flags: {
+        configure: "--disable-nls"
+      }
+    }
+  ]
+}
+```
+
+`tome` is optional; when omitted, the patch applies to any rune with the matching package name.
+Scalar fields (`version`, `summary`, `target`) replace the rune's metadata, `sources`, `bins`, and
+`build_flags` merge by key, and `deps` replaces the rune's dependency policy. Addenda are managed with
+`grm addendum add <git-url-or-local-path>`, `grm addendum list`, and `grm addendum remove <name>`.
 
 ## How it compares
 
@@ -136,8 +206,8 @@ catalog model of per-user installers — while staying OS-independent and conven
 
 Grimoire is in early development. Installing (prebuilt and from source), building,
 version-aware dependency resolution, publishing prebuilt archives over HTTP, removal,
-upgrades, lockfiles with reproducible `--locked` installs, and health checks are working
-today. Addendums are designed but not yet implemented.
+upgrades, lockfiles with reproducible `--locked` installs, addenda, and health checks are working
+today.
 
 ## License
 

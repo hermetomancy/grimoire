@@ -10,6 +10,7 @@ use std::{
 };
 
 use crate::{
+    addendum,
     cli::{PackageArg, QueryArg, UpgradeArgs},
     install,
     model::{PackageMetadata, PackageState},
@@ -133,9 +134,11 @@ fn tome_packages() -> Result<Vec<TomePackage>> {
         }
 
         for rune in rune_files(&runes_dir)? {
-            let metadata = runtime
+            let mut metadata = runtime
                 .package_metadata(&rune)
                 .with_context(|| format!("read rune metadata {}", rune.display()))?;
+            addendum::patched_package_metadata(&mut metadata, Some(&state.name), &rune)
+                .with_context(|| format!("apply addendums to {}", rune.display()))?;
             packages.push(TomePackage {
                 tome: state.name.clone(),
                 rune,

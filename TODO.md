@@ -6,15 +6,7 @@ The README is an end-user overview; this is what is designed but not built yet, 
 order. The theme: the catalog/solver/install machinery is done, but nothing has actually
 *compiled* a real package — closing that gap comes first.
 
-1. **Build-environment contract** — the prerequisite for any real compiled package.
-   - **Worked real-package fixture.** Native `.tar.zst` source extraction and build-dependency
-     `PATH` wiring are implemented and covered by smoke tests, but they still need pressure from
-     a genuine autotools/cmake-style rune (`./configure && make && make install`) rather than only
-     focused fixtures.
-   - **Contract docs.** Document `ctx.sources.<name>.path`, optional `ctx.sources.<name>.dir`,
-     `ctx.env.PATH`, `ctx.package_dir`, `ctx.work_dir`, and `ctx.prefix` in author-facing prose.
-
-2. **A `core` tome + host-toolchain precheck.**
+1. **A `core` tome + host-toolchain precheck.**
    - Ship a minimal `core` tome of prebuilt, relocatable build tools (`make`, `pkg-config`, `m4`,
      `autoconf`, `automake`, `libtool`, `gettext`, `bash`, `coreutils`, `sed`, `gawk`, `grep`,
      `tar`, `gzip`, `xz`).
@@ -22,13 +14,6 @@ order. The theme: the catalog/solver/install machinery is done, but nothing has 
      it; add a `doctor`-style precheck that fails a source build early with a clear message when
      `cc`/`make`/`sh`/`tar` are missing. Self-hosting the toolchain (prebuilt gcc/glibc) is a
      later, much larger effort gated on relocatability work (RPATH/loader patching).
-
-3. **Addendums.**
-   - Entirely stubbed in `main.rs` (`would add ...` / `addendum state is not wired yet`); an empty
-     placeholder field exists in `model.rs`.
-   - Persist addendum state as NUON, clone via `gix`, and patch rune data declaratively
-     (sources, mirrors, checksums, build flags, target policy, metadata).
-   - Data-only — no execution hooks (AGENTS.md §5.5).
 
 ## Hardening / real-world gaps
 
@@ -90,6 +75,15 @@ in daily use. Listed so they are tracked, not necessarily scheduled.
    suppressed under `--quiet`. Color and decorations are TTY-gated and `NO_COLOR`-aware, so piped
    output stays plain. Result lines go to stdout (AGENTS.md §7); `install` reports a no-op when a
    package is already up to date instead of printing nothing.
+10. **Build-environment contract** — native `.tar.zst` source extraction, build-dependency `PATH`
+    wiring, and a configure/make/install-style source package fixture are covered by smoke tests.
+    Author-facing README prose documents `ctx.sources.<name>.path`, optional
+    `ctx.sources.<name>.dir`, `ctx.env.PATH`, `ctx.package_dir`, `ctx.work_dir`, and `ctx.prefix`.
+11. **Addenda** — `grm addendum add/list/remove` persists NUON state, clones/copies addendum
+    repositories natively, records addenda in the lockfile, and applies inert `addendum.nuon`
+    package metadata patches to rune source candidates before search/info, resolution, source
+    fetching, and builds. Patched `build_flags` are exposed as inert `ctx.build_flags`; no
+    addendum hooks execute.
 
 ## Testing gaps (AGENTS.md §8)
 
@@ -99,7 +93,8 @@ in daily use. Listed so they are tracked, not necessarily scheduled.
   captured (non-TTY) output, so the spinner/color are auto-disabled — add coverage for the plain
   output each level produces.
 - Windows shim generation/execution (blocked on a Windows test environment).
-- Addendum-override end-to-end fixtures (blocked on the remaining item).
+- Addendum coverage is source-metadata focused; broader overlay combinations (dependency policy,
+  target policy, and binary/source preference interactions) could use more end-to-end fixtures.
 
 ## Current working baseline
 

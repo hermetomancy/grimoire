@@ -6,6 +6,7 @@
 //! escalation. This crate is the binary; `main` parses the CLI and dispatches to each module's
 //! command entry point (`install`, `build`, `tome`, `doctor`, `query`, …).
 
+mod addendum;
 mod archive;
 mod build;
 mod cli;
@@ -24,7 +25,7 @@ mod tome;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{AddendumCommand, Cli, Command, TomeCommand};
+use cli::{Cli, Command, TomeCommand};
 use progress::Verbosity;
 
 fn main() -> Result<()> {
@@ -63,24 +64,10 @@ fn run(cli: Cli) -> Result<()> {
             TomeCommand::Remove(args) => tome::remove(args),
             TomeCommand::List => tome::list(),
         },
-        Command::Addendum { command } => addendum(command),
+        Command::Addendum { command } => match command {
+            cli::AddendumCommand::Add(args) => addendum::add(args),
+            cli::AddendumCommand::Remove(args) => addendum::remove(args),
+            cli::AddendumCommand::List => addendum::list(),
+        },
     }
-}
-
-fn addendum(command: AddendumCommand) -> Result<()> {
-    match command {
-        AddendumCommand::Add(args) => {
-            println!(
-                "would add addendum from {} at {}",
-                args.git_url, args.ref_name
-            );
-        }
-        AddendumCommand::Remove(args) => {
-            println!("would remove addendum {}", args.name);
-        }
-        AddendumCommand::List => {
-            println!("addendum state is not wired yet");
-        }
-    }
-    Ok(())
 }
