@@ -1,8 +1,16 @@
+//! The data model: typed representations of Grimoire's on-disk NUON documents.
+//!
+//! Package metadata, dependency requirements, package indexes, installed-package state, tome
+//! manifests, and the lockfile all live here, with `from_value`/`to_value` conversions to and
+//! from Nushell `Value`s. Construction validates structure (names, targets, semver) so the rest
+//! of the codebase works with already-checked data.
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use nu_protocol::{Record, Span, Value};
+use semver::{Version, VersionReq};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageMetadata {
@@ -27,6 +35,24 @@ pub struct Source {
     pub sha256: String,
 }
 
+/// A dependency on another package, optionally constrained to a semver range. A bare name in a
+/// rune (`"hello"`) parses to a [`VersionReq`] of `*` (any version); a record
+/// (`{ name: "libc", version: ">=2.0" }`) carries an explicit requirement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Dependency {
+    pub name: String,
+    pub req: VersionReq,
+}
+
+impl Dependency {
+    pub fn any(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            req: VersionReq::STAR,
+        }
+    }
+}
+
 /// Build and runtime dependencies declared by a rune. Runtime deps are installed with the
 /// package; build deps are required only for a source build.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -34,9 +60,9 @@ pub struct Deps {
     /// Build dependencies keyed by target triple, plus an optional `default` set that
     /// applies to every target. Use [`Deps::build_for`] to resolve the set for a target.
     #[serde(default)]
-    pub build: BTreeMap<String, Vec<String>>,
+    pub build: BTreeMap<String, Vec<Dependency>>,
     #[serde(default)]
-    pub runtime: Vec<String>,
+    pub runtime: Vec<Dependency>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,7 +100,7 @@ pub struct IndexEntry {
     pub archive: String,
     pub archive_hash: String,
     #[serde(default)]
-    pub runtime_deps: Vec<String>,
+    pub runtime_deps: Vec<Dependency>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,19 +135,20 @@ pub struct TomePackages {
 
 impl Deps {
     /// Build dependencies that apply to `target`: the `default` set plus any entry keyed by
-    /// the exact target triple, de-duplicated while preserving order.
-    pub fn build_for(&self, target: &str) -> Vec<String> {
-        let mut names = Vec::new();
+    /// the exact target triple, de-duplicated while preserving order. Distinct requirements on
+    /// the same dependency are kept so the resolver can intersect them.
+    pub fn build_for(&self, target: &str) -> Vec<Dependency> {
+        let mut deps: Vec<Dependency> = Vec::new();
         for key in ["default", target] {
             if let Some(entries) = self.build.get(key) {
-                for name in entries {
-                    if !names.contains(name) {
-                        names.push(name.clone());
+                for dep in entries {
+                    if !deps.iter().any(|d| d.name == dep.name && d.req == dep.req) {
+                        deps.push(dep.clone());
                     }
                 }
             }
         }
-        names
+        deps
     }
 }
 
@@ -187,6 +214,29 @@ impl PackageMetadata {
             record.push("summary", Value::string(summary, Span::unknown()));
         }
 
+        let mut sources = Record::new();
+        for (name, source) in &self.sources {
+            let mut entry = Record::new();
+            entry.push("url", Value::string(&source.url, Span::unknown()));
+            entry.push("sha256", Value::string(&source.sha256, Span::unknown()));
+            sources.push(name, Value::record(entry, Span::unknown()));
+        }
+        record.push("sources", Value::record(sources, Span::unknown()));
+        record.push("deps", self.deps.to_value());
+
+        Value::record(record, Span::unknown())
+    }
+}
+
+impl Deps {
+    fn to_value(&self) -> Value {
+        let mut record = Record::new();
+        let mut build = Record::new();
+        for (target, deps) in &self.build {
+            build.push(target, dependency_list_value(deps));
+        }
+        record.push("build", Value::record(build, Span::unknown()));
+        record.push("runtime", dependency_list_value(&self.runtime));
         Value::record(record, Span::unknown())
     }
 }
@@ -205,26 +255,36 @@ impl PackageIndex {
         Ok(Self { packages })
     }
 
-    /// The entry matching `name` for `target`, if the index offers one.
-    pub fn find(&self, name: &str, target: &str) -> Option<&IndexEntry> {
-        self.packages
+    /// Every entry for `name`/`target`, newest version first. The index may list several
+    /// versions of a package so the resolver can pick one satisfying a requirement.
+    pub fn candidates(&self, name: &str, target: &str) -> Vec<&IndexEntry> {
+        let mut entries = self
+            .packages
             .iter()
-            .find(|entry| entry.name == name && entry.target == target)
+            .filter(|entry| entry.name == name && entry.target == target)
+            .collect::<Vec<_>>();
+        entries.sort_by(|a, b| compare_versions(&b.version, &a.version));
+        entries
     }
 
-    /// Inserts `entry`, replacing any existing entry for the same name and target. Entries are
-    /// kept sorted by name then target so the written index is deterministic.
+    /// Inserts `entry`, replacing any existing entry for the same name, version, and target so
+    /// rebuilding the same version updates in place while distinct versions accumulate. Entries
+    /// are kept sorted by name, then target, then version so the written index is deterministic.
     pub fn upsert(&mut self, entry: IndexEntry) {
-        match self
-            .packages
-            .iter_mut()
-            .find(|existing| existing.name == entry.name && existing.target == entry.target)
-        {
+        match self.packages.iter_mut().find(|existing| {
+            existing.name == entry.name
+                && existing.version == entry.version
+                && existing.target == entry.target
+        }) {
             Some(existing) => *existing = entry,
             None => self.packages.push(entry),
         }
-        self.packages
-            .sort_by(|a, b| a.name.cmp(&b.name).then(a.target.cmp(&b.target)));
+        self.packages.sort_by(|a, b| {
+            a.name
+                .cmp(&b.name)
+                .then(a.target.cmp(&b.target))
+                .then_with(|| compare_versions(&a.version, &b.version))
+        });
     }
 
     pub fn to_value(&self) -> Value {
@@ -258,9 +318,10 @@ impl IndexEntry {
         let archive = required_field_string(val, "index entry", "archive")?;
         validate_archive_location(&archive)?;
         let archive_hash = required_field_string(val, "index entry", "archive_hash")?;
+        validate_sha256(&archive_hash, "index entry archive_hash")?;
 
         let runtime_deps = match val.get("runtime_deps") {
-            Some(value) => expect_string_list(value, "index entry runtime_deps")?,
+            Some(value) => parse_dependency_list(value, "index entry runtime_deps")?,
             None => Vec::new(),
         };
 
@@ -284,7 +345,7 @@ impl IndexEntry {
             "archive_hash",
             Value::string(&self.archive_hash, Span::unknown()),
         );
-        record.push("runtime_deps", string_list_value(&self.runtime_deps));
+        record.push("runtime_deps", dependency_list_value(&self.runtime_deps));
         Value::record(record, Span::unknown())
     }
 }
@@ -296,6 +357,7 @@ impl PackageState {
         let version = required_field_string(&record, "package state", "version")?;
         let target = optional_string(&record, "target")?;
         let archive_hash = required_field_string(&record, "package state", "archive_hash")?;
+        validate_sha256(&archive_hash, "package state archive_hash")?;
         let bins = match record.get("bins") {
             Some(value) => expect_string_map(value, "package field `bins`")?,
             None => BTreeMap::new(),
@@ -632,6 +694,7 @@ fn parse_sources(value: &Value) -> Result<BTreeMap<String, Source>> {
         };
         let url = required_field_string(source, &format!("source `{name}`"), "url")?;
         let sha256 = required_field_string(source, &format!("source `{name}`"), "sha256")?;
+        validate_sha256(&sha256, &format!("source `{name}` sha256"))?;
         out.insert(name.clone(), Source { url, sha256 });
     }
     Ok(out)
@@ -645,8 +708,11 @@ fn parse_deps(value: &Value) -> Result<Deps> {
     let build = match val.get("build") {
         Some(Value::Record { val, .. }) => {
             let mut out = BTreeMap::new();
-            for (target, names) in val.iter() {
-                out.insert(target.clone(), expect_string_list(names, "build deps")?);
+            for (target, deps) in val.iter() {
+                out.insert(
+                    target.clone(),
+                    parse_dependency_list(deps, &format!("build deps for `{target}`"))?,
+                );
             }
             out
         }
@@ -654,11 +720,46 @@ fn parse_deps(value: &Value) -> Result<Deps> {
         Some(_) => bail!("package field `deps.build` must be a record keyed by target"),
     };
     let runtime = match val.get("runtime") {
-        Some(value) => expect_string_list(value, "runtime deps")?,
+        Some(value) => parse_dependency_list(value, "runtime deps")?,
         None => Vec::new(),
     };
 
     Ok(Deps { build, runtime })
+}
+
+/// Parses a NUON list of dependencies. Each element is either a bare name string (any version)
+/// or a record `{ name, version }` whose `version` is a semver requirement.
+fn parse_dependency_list(value: &Value, label: &str) -> Result<Vec<Dependency>> {
+    let Value::List { vals, .. } = value else {
+        bail!("{label} must be a list");
+    };
+    vals.iter()
+        .map(|value| parse_dependency(value, label))
+        .collect()
+}
+
+fn parse_dependency(value: &Value, label: &str) -> Result<Dependency> {
+    match value {
+        Value::String { val, .. } => {
+            validate_package_name(val)?;
+            Ok(Dependency::any(val.clone()))
+        }
+        Value::Record { val, .. } => {
+            let name = required_field_string(val, label, "name")?;
+            validate_package_name(&name)?;
+            let req = match val.get("version") {
+                Some(Value::Nothing { .. }) | None => VersionReq::STAR,
+                Some(value) => {
+                    let raw = expect_string(value, &format!("{label} field `version`"))?;
+                    VersionReq::parse(&raw).with_context(|| {
+                        format!("dependency `{name}` version requirement `{raw}` is invalid")
+                    })?
+                }
+            };
+            Ok(Dependency { name, req })
+        }
+        _ => bail!("{label} entries must be a name string or a {{ name, version }} record"),
+    }
 }
 
 fn expect_string_list(value: &Value, label: &str) -> Result<Vec<String>> {
@@ -675,6 +776,28 @@ fn optional_string_list(record: &Record, field: &str) -> Result<Vec<String>> {
         Some(Value::Nothing { .. }) | None => Ok(Vec::new()),
         Some(value) => expect_string_list(value, &format!("field `{field}`")),
     }
+}
+
+/// Serializes dependencies back to the NUON list form `parse_dependency_list` accepts: a bare
+/// name string when the requirement is `*`, otherwise a `{ name, version }` record.
+fn dependency_list_value(deps: &[Dependency]) -> Value {
+    let items = deps
+        .iter()
+        .map(|dep| {
+            if dep.req == VersionReq::STAR {
+                Value::string(&dep.name, Span::unknown())
+            } else {
+                let mut record = Record::new();
+                record.push("name", Value::string(&dep.name, Span::unknown()));
+                record.push(
+                    "version",
+                    Value::string(dep.req.to_string(), Span::unknown()),
+                );
+                Value::record(record, Span::unknown())
+            }
+        })
+        .collect();
+    Value::list(items, Span::unknown())
 }
 
 fn string_list_value(items: &[String]) -> Value {
@@ -702,19 +825,23 @@ fn required_field_string(record: &Record, label: &str, field: &str) -> Result<St
     expect_string(value, &format!("{label} field `{field}`"))
 }
 
+/// Orders two version strings by semver precedence. Versions are semver-validated on the way
+/// in, so parsing succeeds in practice; an unparsable value falls back to lexical order.
+pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    match (Version::parse(a), Version::parse(b)) {
+        (Ok(a), Ok(b)) => a.cmp(&b),
+        _ => a.cmp(b),
+    }
+}
+
 pub fn validate_package_name(name: &str) -> Result<()> {
     validate_ident(name, "package name")
 }
 
 pub fn validate_package_version(version: &str) -> Result<()> {
-    if !starts_valid(version)
-        || !version
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_.:+~-".contains(c))
-    {
-        bail!("package version `{version}` contains unsupported characters");
-    }
-    Ok(())
+    Version::parse(version)
+        .map(|_| ())
+        .with_context(|| format!("package version `{version}` is not valid semver"))
 }
 
 fn validate_bin_name(name: &str) -> Result<()> {
@@ -747,6 +874,14 @@ fn looks_windows_absolute(path: &str) -> bool {
         && (bytes[2] == b'/' || bytes[2] == b'\\')
 }
 
+pub fn validate_sha256(hash: &str, label: &str) -> Result<()> {
+    let hex = hash.strip_prefix("sha256:").unwrap_or(hash).trim();
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("{label} must be a sha256 digest (`sha256:<64 hex>` or bare 64 hex)");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -754,21 +889,24 @@ mod tests {
     #[test]
     fn build_for_merges_default_and_target() {
         let mut build = BTreeMap::new();
-        build.insert("default".to_owned(), vec!["cmake".to_owned()]);
+        build.insert("default".to_owned(), vec![Dependency::any("cmake")]);
         build.insert(
             "x86_64-unknown-linux-gnu".to_owned(),
-            vec!["gcc".to_owned(), "cmake".to_owned()],
+            vec![Dependency::any("gcc"), Dependency::any("cmake")],
         );
         let deps = Deps {
             build,
             runtime: Vec::new(),
         };
 
-        assert_eq!(
-            deps.build_for("x86_64-unknown-linux-gnu"),
-            vec!["cmake".to_owned(), "gcc".to_owned()]
-        );
-        assert_eq!(deps.build_for("aarch64-apple-darwin"), vec!["cmake"]);
+        let names = |target| {
+            deps.build_for(target)
+                .into_iter()
+                .map(|dep| dep.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names("x86_64-unknown-linux-gnu"), vec!["cmake", "gcc"]);
+        assert_eq!(names("aarch64-apple-darwin"), vec!["cmake"]);
     }
 
     #[test]

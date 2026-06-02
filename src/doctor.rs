@@ -1,3 +1,8 @@
+//! The `doctor` command: a read-only health check of the local Grimoire environment.
+//!
+//! It validates tome caches, installed-package state (package directories and shims), and
+//! lockfile presence, reporting counts to stdout and per-item problems to stderr.
+
 use anyhow::{Context, Result};
 
 use crate::{install, lock, paths, tome};

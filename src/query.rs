@@ -1,12 +1,20 @@
+//! The read-only catalog queries: `search` (match packages across configured tomes by name and
+//! summary) and `info` (show a single package's metadata, versions, and source). Both read tome
+//! indexes and runes without installing anything.
+
 use anyhow::{Context, Result, bail};
-use std::path::{Path, PathBuf};
+use semver::Version;
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     cli::{PackageArg, QueryArg, UpgradeArgs},
     install,
     model::{PackageMetadata, PackageState},
     nu::runtime::{EmbeddedNuRuntime, RuneRuntime},
-    tome,
+    progress, solve, tome,
 };
 
 #[derive(Debug, Clone)]
@@ -20,7 +28,7 @@ pub fn search(args: QueryArg) -> Result<()> {
     let query = args.query.to_ascii_lowercase();
     let mut matches = Vec::new();
 
-    for package in tome_packages(true)? {
+    for package in tome_packages()? {
         let summary = package.metadata.summary.as_deref().unwrap_or("");
         if package.metadata.name.to_ascii_lowercase().contains(&query)
             || summary.to_ascii_lowercase().contains(&query)
@@ -29,6 +37,7 @@ pub fn search(args: QueryArg) -> Result<()> {
         }
     }
 
+    progress::finish();
     for package in matches {
         println!(
             "{}\t{}\t{}\t{}",
@@ -45,11 +54,12 @@ pub fn info(args: PackageArg) -> Result<()> {
     let installed = install::installed_states()?
         .into_iter()
         .find(|state| state.name == args.package);
-    let available: Vec<_> = tome_packages(true)?
+    let available: Vec<_> = tome_packages()?
         .into_iter()
         .filter(|package| package.metadata.name == args.package)
         .collect();
 
+    progress::finish();
     if installed.is_none() && available.is_empty() {
         bail!(
             "package `{}` was not found in installed state or configured tomes",
@@ -72,41 +82,50 @@ pub fn info(args: PackageArg) -> Result<()> {
 }
 
 pub fn upgrade(args: UpgradeArgs) -> Result<()> {
-    let packages = if args.packages.is_empty() {
-        install::installed_states()?
-            .into_iter()
-            .map(|state| state.name)
-            .collect::<Vec<_>>()
+    let installed: BTreeMap<String, Version> = install::installed_states()?
+        .into_iter()
+        .filter_map(|state| Version::parse(&state.version).ok().map(|v| (state.name, v)))
+        .collect();
+
+    let targets = if args.packages.is_empty() {
+        installed.keys().cloned().collect::<Vec<_>>()
     } else {
-        args.packages
+        args.packages.clone()
     };
 
-    if packages.is_empty() {
-        println!("no installed packages");
+    if targets.is_empty() {
+        progress::report("no installed packages");
         return Ok(());
     }
 
-    for package in packages {
-        if !args.quiet {
-            eprintln!("grimoire: upgrading {package}");
+    // Compare the installed version against the newest a tome offers and only reinstall when a
+    // strictly newer release exists, so an up-to-date package is left untouched.
+    let mut to_upgrade = Vec::new();
+    for name in targets {
+        let Some(current) = installed.get(&name) else {
+            bail!("package `{name}` is not installed");
+        };
+        match solve::newest_available(&name)? {
+            Some(newest) if newest > *current => {
+                progress::status(&format!("upgrading {name} {current} -> {newest}"));
+                to_upgrade.push(name);
+            }
+            _ => progress::report(&format!("{name} is up to date ({current})")),
         }
-        install::install(crate::cli::InstallArgs {
-            package,
-            from_source: false,
-            sha256: None,
-            quiet: args.quiet,
-        })?;
     }
 
-    Ok(())
+    if to_upgrade.is_empty() {
+        return Ok(());
+    }
+    install::upgrade_packages(&to_upgrade)
 }
 
-fn tome_packages(quiet: bool) -> Result<Vec<TomePackage>> {
+fn tome_packages() -> Result<Vec<TomePackage>> {
     let runtime = EmbeddedNuRuntime;
     let mut packages = Vec::new();
 
     for state in tome::load_tomes()? {
-        let cache_path = tome::ensure_tome_cache(&state, quiet)
+        let cache_path = tome::ensure_tome_cache(&state)
             .with_context(|| format!("sync tome `{}`", state.name))?;
         let runes_dir = cache_path.join("runes");
         if !runes_dir.exists() {

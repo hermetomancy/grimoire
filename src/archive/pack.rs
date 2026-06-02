@@ -1,9 +1,16 @@
+//! Packing a built package directory into a `.tar.zst` archive with embedded `.grimoire`
+//! metadata. This is the output format of a source build and is byte-for-byte the same shape a
+//! prebuilt download has, so the install path does not care how a package was produced.
+
 use anyhow::{Context, Result, bail};
 use std::{
     fs::{self, File},
-    io::Cursor,
+    io::{Cursor, Read},
     path::{Path, PathBuf},
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use crate::{
     archive,
@@ -15,16 +22,8 @@ use crate::{
     progress::{status, success},
 };
 
-pub fn pack_built_rune(
-    rune: &Path,
-    package_dir: &Path,
-    output: &Path,
-    quiet: bool,
-) -> Result<PathBuf> {
-    status(
-        quiet,
-        &format!("reading rune metadata ({})", rune.display()),
-    );
+pub fn pack_built_rune(rune: &Path, package_dir: &Path, output: &Path) -> Result<PathBuf> {
+    status(&format!("reading rune metadata ({})", rune.display()));
     let runtime = EmbeddedNuRuntime;
     let metadata = runtime.package_metadata(rune)?;
     let target = paths::target_triple();
@@ -32,27 +31,21 @@ pub fn pack_built_rune(
     let archive_path = output.join(archive_name);
     fs::create_dir_all(output)?;
 
-    status(
-        quiet,
-        &format!(
-            "staging package metadata for {} {}",
-            metadata.name, metadata.version
-        ),
-    );
+    status(&format!(
+        "staging package metadata for {} {}",
+        metadata.name, metadata.version
+    ));
     let package_nuon = nuon_io::to_nuon_string(&metadata.archive_value(&target))?;
     let rune_source =
         fs::read(rune).with_context(|| format!("read rune source {}", rune.display()))?;
 
-    status(
-        quiet,
-        &format!(
-            "compressing archive ({})",
-            archive_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("package.tar.zst")
-        ),
-    );
+    status(&format!(
+        "compressing archive ({})",
+        archive_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("package.tar.zst")
+    ));
 
     let file = File::create(&archive_path)?;
     let encoder = zstd::stream::write::Encoder::new(file, 0)?;
@@ -63,7 +56,7 @@ pub fn pack_built_rune(
     let encoder = tar.into_inner()?;
     encoder.finish()?;
 
-    success(quiet, &format!("wrote {}", archive_path.display()));
+    success(&format!("wrote {}", archive_path.display()));
     Ok(archive_path)
 }
 
@@ -91,9 +84,9 @@ fn append_package_dir<W: std::io::Write>(
         }
 
         if metadata.is_dir() {
-            tar.append_dir(relative, path)?;
+            append_dir(tar, relative)?;
         } else if metadata.is_file() {
-            tar.append_path_with_name(path, relative)?;
+            append_file(tar, path, relative, file_mode(&metadata))?;
         } else {
             bail!(
                 "package output contains unsupported file {}",
@@ -104,6 +97,45 @@ fn append_package_dir<W: std::io::Write>(
     Ok(())
 }
 
+fn append_dir<W: std::io::Write>(tar: &mut tar::Builder<W>, path: &Path) -> Result<()> {
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Directory);
+    header.set_size(0);
+    header.set_mode(0o755);
+    set_deterministic_metadata(&mut header);
+    tar.append_data(&mut header, path, Cursor::new([]))?;
+    Ok(())
+}
+
+fn append_file<W: std::io::Write>(
+    tar: &mut tar::Builder<W>,
+    source: &Path,
+    path: &Path,
+    mode: u32,
+) -> Result<()> {
+    let mut bytes = Vec::new();
+    File::open(source)
+        .with_context(|| format!("read package output {}", source.display()))?
+        .read_to_end(&mut bytes)?;
+    let mut header = tar::Header::new_gnu();
+    header.set_size(bytes.len() as u64);
+    header.set_mode(mode);
+    header.set_entry_type(tar::EntryType::Regular);
+    set_deterministic_metadata(&mut header);
+    tar.append_data(&mut header, path, Cursor::new(bytes))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn file_mode(metadata: &fs::Metadata) -> u32 {
+    metadata.permissions().mode() & 0o777
+}
+
+#[cfg(not(unix))]
+fn file_mode(_metadata: &fs::Metadata) -> u32 {
+    0o755
+}
+
 fn append_bytes<W: std::io::Write>(
     tar: &mut tar::Builder<W>,
     path: &str,
@@ -112,7 +144,16 @@ fn append_bytes<W: std::io::Write>(
     let mut header = tar::Header::new_gnu();
     header.set_size(bytes.len() as u64);
     header.set_mode(0o644);
-    header.set_cksum();
+    set_deterministic_metadata(&mut header);
     tar.append_data(&mut header, path, Cursor::new(bytes))?;
     Ok(())
+}
+
+fn set_deterministic_metadata(header: &mut tar::Header) {
+    header.set_mtime(0);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_username("").ok();
+    header.set_groupname("").ok();
+    header.set_cksum();
 }

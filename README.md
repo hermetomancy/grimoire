@@ -59,6 +59,9 @@ grm remove hello
 # Build from source explicitly
 grm install hello --from-source
 
+# Reproduce exactly what the lockfile records
+grm install hello --locked
+
 # See what's installed and check your setup
 grm list
 grm doctor
@@ -79,20 +82,35 @@ grm tome init mytome --path ./mytome   # scaffold a tome
 grm tome rune widget --path ./mytome   # add a package definition (rune)
 grm tome add ./mytome                  # register it locally to test
 grm install widget --from-source
-grm tome build widget --path ./mytome  # publish a prebuilt archive
+grm tome build widget --path ./mytome  # build a prebuilt archive into dist/
+grm tome build --all --path ./mytome   # build every rune in the tome
 ```
 
-`grm tome init` writes a `tome.rn` manifest alongside `runes/`, `sources/`, and an empty
-`index.nuon`. `grm tome rune` drops a templated rune you fill in with the package's
-sources, dependencies, and build steps. `grm tome build` compiles a rune into a verified
-archive under `packages/` and records it in the tome's `index.nuon`, so others can install
-the prebuilt package straight from your tome instead of building from source.
+`grm tome init` writes a `tome.rn` manifest alongside `runes/`, `sources/`, a git-ignored
+`dist/`, and a `.gitignore`. `grm tome rune` drops a templated rune you fill in with the
+package's sources, dependencies, and build steps.
+
+`grm tome build` compiles a rune into a verified archive and records it in `dist/index.nuon`.
+The `dist/` directory is the publishing unit: it holds the index plus every prebuilt archive
+and is kept out of git. To publish, upload the whole `dist/` directory to a static webserver
+and point the manifest's `packages.repo` at that base URL (`format: "http"`); installers then
+fetch the index and checksum-verified archives over HTTP. For local testing, set `repo` to a
+filesystem path with `format: "local"`. Either way, the git repository carries only your runes
+and `tome.rn` — never the built binaries.
+
+During a source build, Grimoire passes a `ctx` record to the rune's `build` function. Verified
+source artifacts are available at `ctx.sources.<name>.path`; `.tar.zst`/`.tzst` sources are also
+extracted natively into `ctx.sources.<name>.dir` before the build runs. Installed build
+dependencies have their package `bin/` directories prepended to the embedded Nushell `PATH`, and
+the resulting value is exposed as `ctx.env.PATH`. Runes install into `ctx.package_dir`, with
+`ctx.prefix` pointing at the same directory for conventional configure/install flows.
 
 ## Concepts
 
 - **Runes** are package definitions. Each rune declares a package — its version, sources,
   dependencies, and the executables it provides — and, when needed, how to build it from
-  source.
+  source. Dependencies can pin a version requirement (`{ name: "lib", version: ">=1.2" }`),
+  and Grimoire resolves a set of versions that satisfies every constraint in the graph.
 - **Tomes** are catalogs of runes: ordinary git repositories you add, update, and pin.
 - **Packages** install as self-contained archives with embedded metadata and checksums.
   Source builds and prebuilt downloads both produce the same kind of archive, so installs
@@ -117,8 +135,9 @@ catalog model of per-user installers — while staying OS-independent and conven
 ## Status
 
 Grimoire is in early development. Installing (prebuilt and from source), building,
-dependency resolution, removal, upgrades, lockfiles, and health checks are working today.
-Addendums are designed but not yet implemented.
+version-aware dependency resolution, publishing prebuilt archives over HTTP, removal,
+upgrades, lockfiles with reproducible `--locked` installs, and health checks are working
+today. Addendums are designed but not yet implemented.
 
 ## License
 
