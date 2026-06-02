@@ -10,7 +10,11 @@ homepage = "https://github.com/grimoire-of-glass/grimoire"
 readme = "README.md"
 keywords = ["package-manager", "cli", "homebrew", "scoop", "cross-platform"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = ["example/", "tests/", "docs/", "grimoire", "AGENTS.md", "TODO.md"]
+exclude = ["example/", "tests/", "docs/", ".github/", "grm", "AGENTS.md", "TODO.md"]
+
+[[bin]]
+name = "grm"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"
