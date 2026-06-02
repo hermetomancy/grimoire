@@ -211,6 +211,32 @@ impl PackageIndex {
             .iter()
             .find(|entry| entry.name == name && entry.target == target)
     }
+
+    /// Inserts `entry`, replacing any existing entry for the same name and target. Entries are
+    /// kept sorted by name then target so the written index is deterministic.
+    pub fn upsert(&mut self, entry: IndexEntry) {
+        match self
+            .packages
+            .iter_mut()
+            .find(|existing| existing.name == entry.name && existing.target == entry.target)
+        {
+            Some(existing) => *existing = entry,
+            None => self.packages.push(entry),
+        }
+        self.packages
+            .sort_by(|a, b| a.name.cmp(&b.name).then(a.target.cmp(&b.target)));
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut record = Record::new();
+        let entries = self
+            .packages
+            .iter()
+            .map(IndexEntry::to_value)
+            .collect::<Vec<_>>();
+        record.push("packages", Value::list(entries, Span::unknown()));
+        Value::record(record, Span::unknown())
+    }
 }
 
 impl IndexEntry {
@@ -246,6 +272,20 @@ impl IndexEntry {
             archive_hash,
             runtime_deps,
         })
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut record = Record::new();
+        record.push("name", Value::string(&self.name, Span::unknown()));
+        record.push("version", Value::string(&self.version, Span::unknown()));
+        record.push("target", Value::string(&self.target, Span::unknown()));
+        record.push("archive", Value::string(&self.archive, Span::unknown()));
+        record.push(
+            "archive_hash",
+            Value::string(&self.archive_hash, Span::unknown()),
+        );
+        record.push("runtime_deps", string_list_value(&self.runtime_deps));
+        Value::record(record, Span::unknown())
     }
 }
 
@@ -662,11 +702,11 @@ fn required_field_string(record: &Record, label: &str, field: &str) -> Result<St
     expect_string(value, &format!("{label} field `{field}`"))
 }
 
-fn validate_package_name(name: &str) -> Result<()> {
+pub fn validate_package_name(name: &str) -> Result<()> {
     validate_ident(name, "package name")
 }
 
-fn validate_package_version(version: &str) -> Result<()> {
+pub fn validate_package_version(version: &str) -> Result<()> {
     if !starts_valid(version)
         || !version
             .chars()

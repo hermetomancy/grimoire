@@ -33,6 +33,13 @@ The README is an end-user overview; this is what is designed but not built yet.
    hashes, runtime/build deps, tome commits). `upgrade` reinstalls and so refreshes it.
 6. **`doctor` health checks** — validates configured tome caches, installed-state integrity
    (package dirs + shims), and lockfile presence; counts to stdout, problems to stderr.
+7. **Tome authoring (`grm tome init` / `grm tome rune`)** — scaffolds a new tome (manifest,
+   `runes/`, `sources/`, empty index) and templated, buildable runes, so a catalog can be
+   authored locally and installed from without hand-writing the layout.
+8. **Tome publishing (`grm tome build`)** — builds a tome's rune into a `.tar.zst` under
+   `packages/` and upserts its entry (name, version, target, archive path, hash, runtime deps)
+   into the tome's `index.nuon`, so prebuilt archives can be published from a local tome
+   (`packages.repo = "."`). External package repos are not supported yet.
 
 ## Testing gaps (AGENTS.md §8)
 
