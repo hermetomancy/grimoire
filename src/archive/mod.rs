@@ -1,3 +1,9 @@
+//! Archive integrity and safety primitives shared by installs and builds.
+//!
+//! Hashing and the [`verify_hash`] checkpoint enforce "verify before trust", and
+//! [`validate_archive_member_path`] rejects unsafe member paths before extraction (AGENTS.md
+//! §5.2–§5.3). The [`pack`] submodule produces the `.tar.zst` package archives source builds emit.
+
 pub mod pack;
 
 use anyhow::{Result, bail};
@@ -43,10 +49,22 @@ pub fn archive_hash(path: &Path) -> Result<String> {
 }
 
 pub fn validate_archive_member_path(path: &Path) -> bool {
-    !path.is_absolute()
+    let text = path.to_string_lossy();
+    !text.starts_with('/')
+        && !text.starts_with('\\')
+        && !looks_windows_absolute(&text)
+        && !text.contains('\\')
         && path
             .components()
             .all(|part| !matches!(part, std::path::Component::ParentDir))
+}
+
+fn looks_windows_absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'/' || bytes[2] == b'\\')
 }
 
 #[cfg(test)]
@@ -68,5 +86,23 @@ mod tests {
     fn verify_hash_rejects_mismatch() {
         let err = verify_hash("sha256:abc123", "sha256:def456").unwrap_err();
         assert!(err.to_string().contains("hash mismatch"));
+    }
+
+    #[test]
+    fn archive_member_paths_reject_cross_platform_escape_forms() {
+        for path in [
+            Path::new("../escape"),
+            Path::new("/absolute"),
+            Path::new("\\absolute"),
+            Path::new("C:/absolute"),
+            Path::new("C:\\absolute"),
+            Path::new("dir\\file"),
+        ] {
+            assert!(
+                !validate_archive_member_path(path),
+                "archive path should be rejected: {}",
+                path.display()
+            );
+        }
     }
 }

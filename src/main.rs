@@ -1,3 +1,11 @@
+//! Grimoire (`grm`): a git-native, cross-platform package manager with reproducible installs.
+//!
+//! A single self-contained binary that installs software from *tomes* — git repositories of
+//! Nushell `.rn` package definitions. It installs a verified prebuilt archive when one matches
+//! the target and builds from source otherwise, into a user-local root with no privilege
+//! escalation. This crate is the binary; `main` parses the CLI and dispatches to each module's
+//! command entry point (`install`, `build`, `tome`, `doctor`, `query`, …).
+
 mod archive;
 mod build;
 mod cli;
@@ -11,16 +19,29 @@ mod nu;
 mod paths;
 mod progress;
 mod query;
-mod resolve;
+mod solve;
 mod tome;
 
 use anyhow::Result;
 use clap::Parser;
 use cli::{AddendumCommand, Cli, Command, TomeCommand};
+use progress::Verbosity;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    run(cli)
+    let verbosity = if cli.quiet {
+        Verbosity::Quiet
+    } else if cli.verbose {
+        Verbosity::Verbose
+    } else {
+        Verbosity::Normal
+    };
+    progress::set_verbosity(verbosity);
+    // Tear down any live spinner before returning so it never lingers in front of an error report
+    // (anyhow prints to stderr) or the shell prompt.
+    let result = run(cli);
+    progress::finish();
+    result
 }
 
 fn run(cli: Cli) -> Result<()> {

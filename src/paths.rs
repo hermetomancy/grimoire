@@ -1,3 +1,7 @@
+//! Filesystem layout: the user-local install root and the directories Grimoire derives from it
+//! (state, packages, shims, caches, build output), plus the current target triple. `GRIMOIRE_ROOT`
+//! overrides the root, which otherwise lives under the platform data directory — never a system path.
+
 use anyhow::{Context, Result};
 use std::{env, ffi::OsString, path::PathBuf};
 

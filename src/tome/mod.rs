@@ -1,3 +1,10 @@
+//! Tomes: the git-backed catalogs of runes packages are installed from.
+//!
+//! This module adds, updates, lists, and removes tomes (cloning and pinning via [`git`]), reads
+//! their manifests and package indexes, and authors/publishes them: `tome init`/`tome rune`
+//! scaffold a new catalog, and `tome build` compiles runes into verified archives recorded in a
+//! git-untracked `dist/index.nuon` served either from a local path or over HTTP.
+
 use anyhow::{Context, Result, bail};
 use std::{
     fs,
@@ -19,7 +26,7 @@ use crate::{
         runtime::{EmbeddedNuRuntime, RuneRuntime},
     },
     paths,
-    progress::status,
+    progress::{report, status},
 };
 
 pub fn add(args: TomeAddArgs) -> Result<()> {
@@ -42,20 +49,21 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
     fs::create_dir_all(&state_dir)?;
     let state = TomeState {
         name: name.clone(),
-        url: args.git_url,
+        url: resolve_tome_source_url(&args.git_url)?,
         ref_name: args.ref_name,
         checked_ref: None,
         checked_commit: None,
         tome: None,
     };
     nuon_io::write_nuon(&state_path, &state.to_value())?;
-    println!("added tome {name}");
+    report(&format!("added tome {name}"));
     Ok(())
 }
 
 /// Scaffolds a new tome: a self-naming `tome.rn` manifest, empty `runes/` and `sources/`
-/// directories, and an empty `index.nuon`. The result is ready for `grm tome rune` to add
-/// package definitions, and for `grm tome add <path>` once it holds at least one rune.
+/// directories, a git-untracked `dist/` publish directory, and a `.gitignore` that keeps `dist/`
+/// out of git. The git repository holds only runes and `tome.rn`; `grm tome build` writes built
+/// archives and `index.nuon` into `dist/`, which the author uploads to the host in `packages.repo`.
 pub fn init(args: TomeInitArgs) -> Result<()> {
     validate_tome_name(&args.name)?;
 
@@ -67,6 +75,7 @@ pub fn init(args: TomeInitArgs) -> Result<()> {
 
     fs::create_dir_all(root.join("runes"))?;
     fs::create_dir_all(root.join("sources"))?;
+    fs::create_dir_all(root.join("dist"))?;
 
     let description = args
         .description
@@ -76,16 +85,16 @@ pub fn init(args: TomeInitArgs) -> Result<()> {
         tome_manifest_template(&args.name, &description),
     )?;
 
-    let index_path = root.join("index.nuon");
-    if !index_path.exists() {
-        fs::write(&index_path, "{\n  packages: []\n}\n")?;
+    let gitignore_path = root.join(".gitignore");
+    if !gitignore_path.exists() {
+        fs::write(&gitignore_path, "/dist/\n")?;
     }
 
-    println!("created tome {} in {}", args.name, root.display());
-    println!(
+    report(&format!("created tome {} in {}", args.name, root.display()));
+    report(&format!(
         "next: add a package with `grm tome rune <name> --path {}`",
         root.display()
-    );
+    ));
     Ok(())
 }
 
@@ -108,16 +117,19 @@ pub fn rune(args: TomeRuneArgs) -> Result<()> {
     }
 
     fs::write(&rune_path, rune_template(&args.name, &args.version))?;
-    println!("created rune {} in {}", args.name, rune_path.display());
+    report(&format!(
+        "created rune {} in {}",
+        args.name,
+        rune_path.display()
+    ));
     Ok(())
 }
 
-/// Builds a tome's rune into a `.tar.zst` under `packages/` and registers (or replaces) its
-/// entry in the tome's package index, so the prebuilt archive can be published from the tome.
-/// Only a local package repo (`packages.repo = "."`) is supported for now.
+/// Builds a tome's rune into a `.tar.zst` inside the tome's git-untracked publish directory
+/// (`dist/`) and registers (or replaces) its entry in the publish directory's `index.nuon`. The
+/// author uploads the whole `dist/` directory to the host named by `packages.repo`; the git
+/// repository itself holds only runes and `tome.rn`.
 pub fn build(args: TomeBuildArgs) -> Result<()> {
-    validate_package_name(&args.package)?;
-
     let root = &args.path;
     let manifest_path = root.join("tome.rn");
     if !manifest_path.exists() {
@@ -131,38 +143,26 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
             manifest.name
         )
     })?;
-    if packages.repo != "." {
-        bail!(
-            "publishing to external package repos is not supported yet (packages.repo must be \".\")"
-        );
-    }
 
-    let rune_path = root.join("runes").join(format!("{}.rn", args.package));
-    if !rune_path.exists() {
-        bail!("rune not found: {}", rune_path.display());
-    }
-
-    let packages_dir = root.join("packages");
-    let archive =
-        crate::build::build_package(&rune_path.to_string_lossy(), &packages_dir, args.quiet)?;
-    let archive_hash = crate::archive::archive_hash(&archive)?;
-    let archive_file = archive
-        .file_name()
-        .and_then(|name| name.to_str())
-        .with_context(|| format!("archive path has no file name: {}", archive.display()))?;
-
-    let metadata = EmbeddedNuRuntime.package_metadata(&rune_path)?;
-    let target = paths::target_triple();
-    let entry = IndexEntry {
-        name: metadata.name.clone(),
-        version: metadata.version.clone(),
-        target: target.clone(),
-        archive: format!("packages/{archive_file}"),
-        archive_hash,
-        runtime_deps: metadata.deps.runtime.clone(),
+    // Decide which runes to build: every rune in `runes/` for `--all`, otherwise the single
+    // named package. clap already rejects passing both, so exactly one branch applies.
+    let rune_names = if args.all {
+        let names = rune_names(root)?;
+        if names.is_empty() {
+            bail!("tome `{}` has no runes to build", manifest.name);
+        }
+        names
+    } else {
+        let Some(package) = args.package.as_deref() else {
+            bail!("specify a rune to build, or pass --all to build every rune");
+        };
+        vec![package.to_owned()]
     };
 
-    let index_path = root.join(&packages.index);
+    let dist_dir = root.join("dist");
+    fs::create_dir_all(&dist_dir)?;
+
+    let index_path = dist_dir.join(&packages.index);
     let mut catalog = if index_path.exists() {
         PackageIndex::from_value(nuon_io::read_nuon(&index_path)?)?
     } else {
@@ -170,17 +170,80 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
             packages: Vec::new(),
         }
     };
-    catalog.upsert(entry);
+
+    // Build each rune, upserting its entry as we go, then write the index once so a multi-rune
+    // build records every package atomically rather than rewriting the file per rune.
+    let target = paths::target_triple();
+    for name in &rune_names {
+        let (entry, archive) = build_rune_into(root, name, &dist_dir)?;
+        report(&format!(
+            "built {} {} ({target}) into {}",
+            entry.name,
+            entry.version,
+            archive.display()
+        ));
+        catalog.upsert(entry);
+    }
     nuon_io::write_nuon(&index_path, &catalog.to_value())?;
 
-    println!(
-        "built {} {} ({target}) into {}",
-        metadata.name,
-        metadata.version,
-        archive.display()
-    );
-    println!("registered in {}", index_path.display());
+    report(&format!("registered in {}", index_path.display()));
+    report(&format!(
+        "publish: upload the contents of {} to the location in packages.repo",
+        dist_dir.display()
+    ));
     Ok(())
+}
+
+/// Builds the rune named `name` (`runes/<name>.rn`) into `dist_dir`, returning the index entry
+/// describing the verified archive and the archive path. Shared by single-package and `--all`
+/// builds so both register identical entries.
+fn build_rune_into(root: &Path, name: &str, dist_dir: &Path) -> Result<(IndexEntry, PathBuf)> {
+    validate_package_name(name)?;
+    let rune_path = root.join("runes").join(format!("{name}.rn"));
+    if !rune_path.exists() {
+        bail!("rune not found: {}", rune_path.display());
+    }
+
+    let archive = crate::build::build_package(&rune_path.to_string_lossy(), dist_dir)?;
+    let archive_hash = crate::archive::archive_hash(&archive)?;
+    let archive_file = archive
+        .file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("archive path has no file name: {}", archive.display()))?;
+
+    let metadata = EmbeddedNuRuntime.package_metadata(&rune_path)?;
+    let entry = IndexEntry {
+        name: metadata.name.clone(),
+        version: metadata.version.clone(),
+        target: paths::target_triple(),
+        archive: archive_file.to_owned(),
+        archive_hash,
+        runtime_deps: metadata.deps.runtime.clone(),
+    };
+    Ok((entry, archive))
+}
+
+/// The rune base names (without the `.rn` extension) in a tome's `runes/` directory, sorted for
+/// deterministic build order. Returns an empty list when there is no `runes/` directory.
+fn rune_names(root: &Path) -> Result<Vec<String>> {
+    let runes_dir = root.join("runes");
+    if !runes_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut names = Vec::new();
+    for entry in fs::read_dir(&runes_dir)
+        .with_context(|| format!("read runes directory {}", runes_dir.display()))?
+    {
+        let path = entry?.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rn") {
+            continue;
+        }
+        if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+            names.push(stem.to_owned());
+        }
+    }
+    names.sort();
+    Ok(names)
 }
 
 fn tome_manifest_template(name: &str, description: &str) -> String {
@@ -188,9 +251,12 @@ fn tome_manifest_template(name: &str, description: &str) -> String {
   name: "{NAME}"
   description: "{DESCRIPTION}"
 
+  # `grm tome build` writes archives and index.nuon into the git-untracked dist/ directory.
+  # Upload dist/ to a webserver and point `repo` at the base URL that serves it. For local
+  # testing `repo` may instead be an absolute path to the dist/ directory.
   packages: {
-    repo: "."
-    format: "git"
+    repo: "https://example.com/{NAME}"
+    format: "http"
     index: "index.nuon"
   }
 }
@@ -272,6 +338,7 @@ pub fn list() -> Result<()> {
     for state in load_tomes()? {
         println!("{}\t{}\t{}", state.name, state.url, state.ref_name);
     }
+    // Note: the loop above prints requested data and uses plain `println!` so it survives `--quiet`.
     Ok(())
 }
 
@@ -289,8 +356,8 @@ pub fn update(args: TomeUpdateArgs) -> Result<()> {
     }
 
     for tome in tomes {
-        sync_tome_cache(&tome, args.quiet)?;
-        println!("updated tome {}", tome.name);
+        sync_tome_cache(&tome)?;
+        report(&format!("updated tome {}", tome.name));
     }
     Ok(())
 }
@@ -304,7 +371,7 @@ pub fn remove(args: TomeRemoveArgs) -> Result<()> {
     }
 
     fs::remove_file(state_path)?;
-    println!("removed tome {}", args.name);
+    report(&format!("removed tome {}", args.name));
     Ok(())
 }
 
@@ -343,39 +410,57 @@ pub fn load_tome(name: &str) -> Result<TomeState> {
         .with_context(|| format!("read tome state {}", state_path.display()))
 }
 
-pub fn ensure_tome_cache(tome: &TomeState, quiet: bool) -> Result<PathBuf> {
+pub fn ensure_tome_cache(tome: &TomeState) -> Result<PathBuf> {
     let cache_path = tome_cache_path(&tome.name)?;
-    if !cache_path.exists() {
-        sync_tome_cache(tome, quiet)?;
+    // Re-sync when the cache is missing *or* invalid: a sync that failed partway (e.g. after a
+    // misconfigured URL) can leave a directory with no root `tome.rn`, which would otherwise be
+    // trusted forever and fail every later read. Treating that as "not cached" lets it self-heal.
+    if !cache_path.join("tome.rn").exists() {
+        sync_tome_cache(tome)?;
     }
     Ok(cache_path)
 }
 
-fn sync_tome_cache(tome: &TomeState, quiet: bool) -> Result<()> {
+fn sync_tome_cache(tome: &TomeState) -> Result<()> {
     let cache_dir = tome_cache_dir()?;
     let cache_path = tome_cache_path(&tome.name)?;
     fs::create_dir_all(&cache_dir)?;
+    let temp = tempfile::Builder::new()
+        .prefix("grimoire-tome-")
+        .tempdir_in(&cache_dir)?;
+    let staged = temp.path().join("cache");
 
     if is_local_tome_source(&tome.url) {
         let source = PathBuf::from(&tome.url)
             .canonicalize()
             .with_context(|| format!("resolve tome source {}", tome.url))?;
-        status(quiet, &format!("copying local tome ({})", tome.name));
-        if cache_path.exists() {
-            fs::remove_dir_all(&cache_path)?;
-        }
-        copy_dir_all(&source, &cache_path)?;
-        record_tome_sync_state(tome, &cache_path)?;
-        return Ok(());
+        status(&format!("copying local tome ({})", tome.name));
+        copy_dir_all(&source, &staged)?;
+    } else {
+        sync_remote_tome_cache(tome, &staged)?;
     }
 
-    sync_remote_tome_cache(tome, &cache_path, quiet)?;
-    record_tome_sync_state(tome, &cache_path)
+    validate_staged_tome_cache(tome, &staged)?;
+    promote_tome_cache(tome, &staged, &cache_path)
 }
 
 fn is_local_tome_source(url: &str) -> bool {
     let path = Path::new(url);
     path.is_dir() && path.join("tome.rn").exists()
+}
+
+/// Normalizes the URL stored for a tome. A local tome source is canonicalized to an absolute
+/// path so later syncs — which run from whatever directory the user invokes a command in —
+/// resolve to the same directory `add` read the manifest from, rather than re-interpreting a
+/// relative path like `.` against the new working directory. Remote URLs pass through unchanged.
+fn resolve_tome_source_url(url: &str) -> Result<String> {
+    if !is_local_tome_source(url) {
+        return Ok(url.to_owned());
+    }
+    let absolute = Path::new(url)
+        .canonicalize()
+        .with_context(|| format!("resolve local tome source {url}"))?;
+    Ok(absolute.to_string_lossy().into_owned())
 }
 
 fn validate_local_tome_source(url: &str) -> Result<()> {
@@ -431,90 +516,134 @@ fn record_tome_sync_state(tome: &TomeState, cache_path: &Path) -> Result<()> {
     nuon_io::write_nuon(&state_path, &state.to_value())
 }
 
-/// Finds the binary package index entry for `package`/`target` in this tome's package
-/// repository, if one exists. Returns the package-repository root alongside the entry so a
-/// relative archive location can be resolved against it. `None` means the tome offers no
-/// matching binary (the caller should fall back to a source build).
-pub fn package_index_entry(
-    tome: &TomeState,
-    package: &str,
-    target: &str,
-    quiet: bool,
-) -> Result<Option<(PathBuf, IndexEntry)>> {
-    let cache = ensure_tome_cache(tome, quiet)?;
+/// Loads a tome's binary package index along with the package-repository root that its
+/// (relative) archive locations resolve against. `None` means the tome declares no package
+/// index or has not published one yet, so callers fall back to a source build.
+pub fn package_index(tome: &TomeState) -> Result<Option<(PathBuf, crate::model::PackageIndex)>> {
+    let cache = ensure_tome_cache(tome)?;
     let manifest = EmbeddedNuRuntime.tome_manifest(&cache.join("tome.rn"))?;
     let Some(packages) = manifest.packages else {
         return Ok(None);
     };
 
-    let root = packages_repo_root(tome, &cache, &packages, quiet)?;
+    if is_http_repo(&packages.repo) {
+        return http_package_index(&packages);
+    }
+
+    let root = packages_repo_root(&cache, &packages);
     let index_path = root.join(&packages.index);
     if !index_path.exists() {
         return Ok(None);
     }
 
     let index = index::read_index(&index_path)?;
-    Ok(index
-        .find(package, target)
-        .cloned()
-        .map(|entry| (root, entry)))
+    Ok(Some((root, index)))
 }
 
-/// Resolves the directory that holds a tome's package index and (relative) archives. `.`
-/// means the package repo is the tome repo itself; a remote URL is cloned into the cache; a
-/// local path is used directly.
-fn packages_repo_root(
-    tome: &TomeState,
-    cache: &Path,
+/// Loads a package index published over `http(s)`: the host serves the git-untracked publish
+/// directory (`dist/`) a tome author builds, so the index lives at `{repo}/{index}` and each
+/// archive at `{repo}/{archive}`. Relative archive locations are rewritten to absolute URLs so
+/// the downloader fetches and verifies them straight from the host. `None` means none published.
+fn http_package_index(
     packages: &TomePackages,
-    quiet: bool,
-) -> Result<PathBuf> {
-    if packages.repo == "." {
-        return Ok(cache.to_path_buf());
-    }
+) -> Result<Option<(PathBuf, crate::model::PackageIndex)>> {
+    let base = packages.repo.trim_end_matches('/');
+    let index_url = format!("{base}/{}", packages.index);
+    let Some(text) = crate::fetch::http_get_text(&index_url)? else {
+        return Ok(None);
+    };
 
-    if is_remote_repo(&packages.repo) {
-        let dest = packages_cache_dir()?.join(&tome.name);
-        if !dest.exists() {
-            status(quiet, &format!("cloning package repo ({})", tome.name));
-            fs::create_dir_all(dest.parent().unwrap_or(&dest))?;
-            git::clone(&packages.repo, &tome.ref_name, &dest)
-                .with_context(|| format!("clone package repo for tome `{}`", tome.name))?;
+    let mut index = crate::model::PackageIndex::from_value(nuon_io::parse_nuon(&text)?)
+        .with_context(|| format!("parse package index {index_url}"))?;
+    for entry in &mut index.packages {
+        if !is_http_repo(&entry.archive) {
+            entry.archive = format!("{base}/{}", entry.archive);
         }
-        return Ok(dest);
     }
+    // Archives now carry absolute URLs, so the base directory is unused at fetch time.
+    Ok(Some((PathBuf::new(), index)))
+}
 
+/// Resolves the local directory that holds a tome's package index and (relative) archives — the
+/// publish directory an author built and the host serves. An absolute path is used directly; a
+/// relative path resolves against the tome cache.
+fn packages_repo_root(cache: &Path, packages: &TomePackages) -> PathBuf {
     let path = Path::new(&packages.repo);
     if path.is_absolute() {
-        Ok(path.to_path_buf())
+        path.to_path_buf()
     } else {
-        Ok(cache.join(path))
+        cache.join(path)
     }
 }
 
-fn is_remote_repo(repo: &str) -> bool {
-    repo.contains("://") || repo.starts_with("git@")
+fn is_http_repo(repo: &str) -> bool {
+    repo.starts_with("http://") || repo.starts_with("https://")
 }
 
-fn packages_cache_dir() -> Result<PathBuf> {
-    Ok(paths::install_root()?.join("cache").join("packages"))
-}
-
-fn sync_remote_tome_cache(tome: &TomeState, cache_path: &Path, quiet: bool) -> Result<()> {
-    if cache_path.exists() {
-        status(quiet, &format!("fetching tome ({})", tome.name));
-        fs::remove_dir_all(cache_path)
-            .with_context(|| format!("replace tome cache {}", cache_path.display()))?;
-    } else {
-        status(quiet, &format!("cloning tome ({})", tome.name));
-    }
-
-    status(
-        quiet,
-        &format!("checking out tome ({}) ref ({})", tome.name, tome.ref_name),
-    );
+fn sync_remote_tome_cache(tome: &TomeState, cache_path: &Path) -> Result<()> {
+    status(&format!("cloning tome ({})", tome.name));
+    status(&format!(
+        "checking out tome ({}) ref ({})",
+        tome.name, tome.ref_name
+    ));
     git::clone(&tome.url, &tome.ref_name, cache_path)
         .with_context(|| format!("could not sync tome `{}`", tome.name))
+}
+
+fn validate_staged_tome_cache(tome: &TomeState, cache_path: &Path) -> Result<()> {
+    let runtime = EmbeddedNuRuntime;
+    let manifest_path = cache_path.join("tome.rn");
+    if !manifest_path.exists() {
+        bail!(
+            "tome cache is missing root tome.rn: {}",
+            cache_path.display()
+        );
+    }
+    let manifest = runtime.tome_manifest(&manifest_path)?;
+    validate_tome_cache(tome, cache_path, &manifest, &runtime)
+}
+
+fn promote_tome_cache(tome: &TomeState, staged: &Path, cache_path: &Path) -> Result<()> {
+    let backup = tome_cache_backup_path(cache_path)?;
+    let had_previous = cache_path.exists();
+    if backup.exists() {
+        fs::remove_dir_all(&backup)
+            .with_context(|| format!("remove stale tome cache backup {}", backup.display()))?;
+    }
+    if had_previous {
+        fs::rename(cache_path, &backup)
+            .with_context(|| format!("back up tome cache {}", cache_path.display()))?;
+    }
+
+    if let Err(err) = fs::rename(staged, cache_path)
+        .with_context(|| format!("promote tome cache {}", cache_path.display()))
+    {
+        if had_previous {
+            let _ = fs::rename(&backup, cache_path);
+        }
+        return Err(err);
+    }
+
+    if let Err(err) = record_tome_sync_state(tome, cache_path) {
+        let _ = fs::remove_dir_all(cache_path);
+        if had_previous {
+            let _ = fs::rename(&backup, cache_path);
+        }
+        return Err(err);
+    }
+
+    if had_previous {
+        let _ = fs::remove_dir_all(&backup);
+    }
+    Ok(())
+}
+
+fn tome_cache_backup_path(cache_path: &Path) -> Result<PathBuf> {
+    let name = cache_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("tome cache path should have a name")?;
+    Ok(cache_path.with_file_name(format!("{name}.grimoire-old")))
 }
 
 fn validate_tome_cache(
@@ -582,11 +711,15 @@ fn validate_tome_cache(
 
 fn validate_tome_packages(packages: &TomePackages) -> Result<()> {
     validate_tome_url(&packages.repo).context("validate tome packages.repo")?;
-    if packages.format != "git" {
-        bail!(
-            "tome packages.format `{}` is not supported; expected `git`",
-            packages.format
-        );
+    let is_http = is_http_repo(&packages.repo);
+    match packages.format.as_str() {
+        "http" if is_http => {}
+        "local" if !is_http => {}
+        "http" => bail!("tome packages.format `http` requires an http(s) packages.repo URL"),
+        "local" => bail!("tome packages.format `local` requires a filesystem packages.repo path"),
+        other => {
+            bail!("tome packages.format `{other}` is not supported; expected `http` or `local`")
+        }
     }
     validate_relative_package_path(&packages.index, "tome packages.index")?;
     Ok(())
