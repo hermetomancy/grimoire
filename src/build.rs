@@ -13,7 +13,7 @@ use std::{
 };
 
 use crate::{
-    archive,
+    addendum, archive,
     archive::pack,
     cli::BuildArgs,
     fetch::{self, FetchedSource},
@@ -34,13 +34,16 @@ pub fn build_package(package: &str, output: &Path) -> Result<PathBuf> {
 }
 
 pub fn build_package_with_env(package: &str, output: &Path, env: &BuildEnv) -> Result<PathBuf> {
+    let original_cwd = std::env::current_dir().context("read current working directory")?;
     status(&format!("resolving rune ({package})"));
     let rune = resolve_rune(package)?;
 
     let runtime = EmbeddedNuRuntime;
-    let metadata = runtime
+    let mut metadata = runtime
         .package_metadata(&rune)
         .with_context(|| format!("read rune metadata {}", rune.display()))?;
+    addendum::patched_package_metadata(&mut metadata, tome_name_for_rune(&rune)?.as_deref(), &rune)
+        .with_context(|| format!("apply addendums to {}", rune.display()))?;
 
     let rune_dir = rune.parent().unwrap_or_else(|| Path::new("."));
     let sources = fetch::fetch_sources(&metadata.sources, rune_dir, &paths::source_cache_dir()?)
@@ -54,11 +57,39 @@ pub fn build_package_with_env(package: &str, output: &Path, env: &BuildEnv) -> R
     let sources = prepare_sources(sources, &work_dir)?;
 
     status(&format!("building ({})", rune.display()));
-    runtime
-        .build(&rune, &package_dir, &work_dir, &sources, env)
-        .with_context(|| format!("build rune {}", rune.display()))?;
+    let build_result = runtime
+        .build(
+            &rune,
+            &package_dir,
+            &work_dir,
+            &sources,
+            &metadata.build_flags,
+            env,
+        )
+        .with_context(|| format!("build rune {}", rune.display()));
+    std::env::set_current_dir(&original_cwd)
+        .with_context(|| format!("restore working directory {}", original_cwd.display()))?;
+    build_result?;
 
-    pack::pack_built_rune(&rune, &package_dir, output)
+    let archive = pack::pack_built_rune(&rune, &metadata, &package_dir, output)?;
+    drop(temp);
+    Ok(archive)
+}
+
+pub(crate) fn tome_name_for_rune(rune: &Path) -> Result<Option<String>> {
+    let rune = rune
+        .canonicalize()
+        .with_context(|| format!("resolve rune path {}", rune.display()))?;
+    for tome in tome::load_tomes()? {
+        let cache_path = tome::ensure_tome_cache(&tome)?
+            .canonicalize()
+            .with_context(|| format!("resolve tome cache for `{}`", tome.name))?;
+        let runes_dir = cache_path.join("runes");
+        if rune.starts_with(&runes_dir) {
+            return Ok(Some(tome.name));
+        }
+    }
+    Ok(None)
 }
 
 fn prepare_sources(

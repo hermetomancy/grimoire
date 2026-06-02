@@ -2,7 +2,7 @@
 //!
 //! Each test runs against its own `GRIMOIRE_ROOT` temp directory so they can run in
 //! parallel without sharing install state. The current working directory is the crate
-//! root, so relative paths like `example/runes/hello.rn` resolve as they would for a
+//! root, so relative paths like `tome-example/runes/hello.rn` resolve as they would for a
 //! user invoking grimoire from the project.
 
 use std::fs;
@@ -122,6 +122,58 @@ fn tome_add_list_remove() {
 }
 
 #[test]
+fn addendum_add_list_remove() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let addendum = TempDir::new().unwrap();
+    let addendum_path = addendum.path();
+    fs::write(
+        addendum_path.join("addendum.nuon"),
+        "{ name: localpatches, patches: [] }\n",
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &[
+            "addendum",
+            "add",
+            addendum_path.to_str().unwrap(),
+            "--ref",
+            "main",
+        ],
+    );
+    assert_success(&add, "add addendum");
+
+    let state_path = root
+        .join("state")
+        .join("addendums")
+        .join("localpatches.nuon");
+    assert!(state_path.exists(), "addendum state should exist");
+    let state = fs::read_to_string(&state_path).unwrap();
+    assert!(state.contains("name: localpatches"), "state name: {state}");
+    assert!(state.contains("ref: main"), "state ref: {state}");
+
+    let list = run(root, &["addendum", "list"]);
+    assert_success(&list, "addendum list");
+    assert!(
+        stdout(&list).contains("localpatches"),
+        "list includes addendum: {}",
+        stdout(&list)
+    );
+
+    let duplicate = run(root, &["addendum", "add", addendum_path.to_str().unwrap()]);
+    assert_failure_contains(&duplicate, "already exists", "reject duplicate addendum");
+
+    let remove = run(root, &["addendum", "remove", "localpatches"]);
+    assert_success(&remove, "remove addendum");
+    assert!(
+        !state_path.exists(),
+        "removed addendum state should be gone"
+    );
+}
+
+#[test]
 fn command_parsing() {
     let root = TempDir::new().unwrap();
     let root = root.path();
@@ -132,7 +184,7 @@ fn command_parsing() {
         root,
         &[
             "build",
-            "./example/runes/hello.rn",
+            "./tome-example/runes/hello.rn",
             &format!("--output={}", out.display()),
             "--quiet",
         ],
@@ -142,7 +194,7 @@ fn command_parsing() {
     assert!(archive.exists(), "--output=value archive should exist");
 
     // `--ref=value` form. A local tome lets `add` read its manifest name offline.
-    let add = run(root, &["tome", "add", "./example", "--ref=stable"]);
+    let add = run(root, &["tome", "add", "./tome-example", "--ref=stable"]);
     assert_success(&add, "tome add supports --ref=value");
     let state = fs::read_to_string(root.join("state").join("tomes").join("example.nuon"))
         .expect("example state");
@@ -243,7 +295,7 @@ fn install_from_example_tome() {
     let root = TempDir::new().unwrap();
     let root = root.path();
 
-    let add = run(root, &["tome", "add", "./example", "--ref", "main"]);
+    let add = run(root, &["tome", "add", "./tome-example", "--ref", "main"]);
     assert_success(&add, "tome add example");
 
     let update = run(root, &["tome", "update", "example"]);
@@ -398,7 +450,7 @@ fn example_tome_runtime_dependency() {
     let root = TempDir::new().unwrap();
     let root = root.path();
 
-    let add = run(root, &["tome", "add", "./example", "--ref", "main"]);
+    let add = run(root, &["tome", "add", "./tome-example", "--ref", "main"]);
     assert_success(&add, "tome add example");
 
     // Installing `greeter` must pull in its runtime dependency `hello`.
@@ -426,7 +478,7 @@ fn example_tome_build_dependency() {
     let root = TempDir::new().unwrap();
     let root = root.path();
 
-    let add = run(root, &["tome", "add", "./example", "--ref", "main"]);
+    let add = run(root, &["tome", "add", "./tome-example", "--ref", "main"]);
     assert_success(&add, "tome add example");
 
     // `hello` is a build dependency of `forge`: it must be installed before the build,
@@ -482,7 +534,7 @@ fn example_tome_checksummed_source() {
     let root = TempDir::new().unwrap();
     let root = root.path();
 
-    let add = run(root, &["tome", "add", "./example", "--ref", "main"]);
+    let add = run(root, &["tome", "add", "./tome-example", "--ref", "main"]);
     assert_success(&add, "tome add example");
 
     // `bundle` fetches and verifies a checksummed source before building from it.
@@ -547,6 +599,134 @@ fn source_tar_zst_is_extracted_into_build_context() {
 }
 
 #[test]
+fn source_build_supports_configure_make_install_contract() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    let sources = tome.join("sources");
+    fs::create_dir_all(&runes).unwrap();
+    fs::create_dir_all(&sources).unwrap();
+    let dist = tome.join("dist");
+    fs::create_dir_all(&dist).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'realbuild'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+
+    let source_archive = runes.join("realpkg-1.0.0.tar.zst");
+    let mut builder = open_archive(&source_archive);
+    append_file(
+        &mut builder,
+        "realpkg-1.0.0/message.txt",
+        b"built from source\n",
+        0o644,
+    );
+    append_file(
+        &mut builder,
+        "realpkg-1.0.0/configure",
+        br#"#!/usr/bin/env sh
+set -eu
+prefix=
+script_dir=$(dirname "$0")
+source_dir=$(cd "$script_dir" && pwd)
+for arg in "$@"; do
+  case "$arg" in
+    --prefix=*) prefix=${arg#--prefix=} ;;
+  esac
+done
+if [ -z "$prefix" ]; then
+  echo "missing --prefix" >&2
+  exit 2
+fi
+printf '%s\n' "$prefix" > configured-prefix.txt
+cat > build.sh <<BUILD
+#!/usr/bin/env sh
+set -eu
+cp '$source_dir/message.txt' built-message.txt
+BUILD
+cat > install.sh <<'INSTALL'
+#!/usr/bin/env sh
+set -eu
+prefix=$1
+mkdir -p "$prefix/bin"
+message=$(cat built-message.txt)
+configured=$(cat configured-prefix.txt)
+{
+  printf '%s\n' '#!/usr/bin/env sh'
+  printf "printf '%%s\\n' '%s via %s'\n" "$message" "$configured"
+} > "$prefix/bin/realpkg"
+chmod +x "$prefix/bin/realpkg"
+INSTALL
+chmod +x build.sh install.sh
+"#,
+        0o755,
+    );
+    finish_archive(builder);
+    let source_hash = sha256_file(&source_archive);
+
+    let minimake_archive_name = format!("minimake-0.1.0-{}.tar.zst", target_triple());
+    let minimake_archive = dist.join(&minimake_archive_name);
+    let mut builder = open_archive(&minimake_archive);
+    let minimake_metadata = format!(
+        "{{format: 1, name: \"minimake\", version: \"0.1.0\", target: \"{}\", bins: {{make: \"bin/make\"}}}}\n",
+        target_triple()
+    );
+    append_file(
+        &mut builder,
+        ".grimoire/package.nuon",
+        minimake_metadata.as_bytes(),
+        0o644,
+    );
+    append_file(
+        &mut builder,
+        "bin/make",
+        b"#!/usr/bin/env sh\nset -eu\ntarget=${1:-all}\ncase \"$target\" in\n  all) sh ./build.sh ;;\n  install) prefix=\"\"; for arg in \"$@\"; do case \"$arg\" in PREFIX=*) prefix=${arg#PREFIX=} ;; esac; done; if [ -z \"$prefix\" ]; then echo 'missing PREFIX' >&2; exit 2; fi; sh ./install.sh \"$prefix\" ;;\n  *) echo \"unsupported target: $target\" >&2; exit 2 ;;\nesac\n",
+        0o755,
+    );
+    finish_archive(builder);
+    let minimake_hash = sha256_file(&minimake_archive);
+    fs::write(
+        dist.join("index.nuon"),
+        format!(
+            "{{\n  packages: [\n    {{ name: \"minimake\", version: \"0.1.0\", target: \"{}\", archive: \"{minimake_archive_name}\", archive_hash: \"{minimake_hash}\", runtime_deps: [] }}\n  ]\n}}\n",
+            target_triple()
+        ),
+    )
+    .unwrap();
+
+    fs::write(
+        runes.join("realpkg.rn"),
+        format!(
+            "export const package = {{\n  name: 'realpkg'\n  version: '1.0.0'\n  sources: {{ main: {{ url: 'realpkg-1.0.0.tar.zst', sha256: '{source_hash}' }} }}\n  deps: {{ build: {{ default: ['minimake'] }}, runtime: [] }}\n  bins: {{ realpkg: 'bin/realpkg' }}\n}}\n\nexport def build [ctx] {{\n  let source_dir = ($ctx.sources.main.dir | path join 'realpkg-1.0.0')\n  let build_dir = ($ctx.package_dir | path join 'build')\n  let result = (sh -c $\"mkdir -p '($build_dir)' && cd '($build_dir)' && '($source_dir)/configure' --prefix='($ctx.prefix)' && make && make install PREFIX='($ctx.package_dir)'\" | complete)\n  if $result.exit_code != 0 {{\n    error make {{ msg: $result.stderr }}\n  }}\n}}\n"
+        ),
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "add real build tome");
+    let install = run(root, &["install", "realpkg"]);
+    assert_success(&install, "install configure/make style source package");
+
+    let output = run_shim(root, "realpkg");
+    assert_success(&output, "run realpkg");
+    let line = stdout(&output);
+    assert!(
+        line.starts_with("built from source via "),
+        "realpkg output should reflect configured source build: {line}"
+    );
+    assert!(
+        line.trim_end().ends_with("/package"),
+        "ctx.prefix/package_dir should point at the temporary staging package dir: {line}"
+    );
+}
+
+#[test]
 fn build_install_list_remove() {
     let root = TempDir::new().unwrap();
     let root = root.path();
@@ -557,7 +737,7 @@ fn build_install_list_remove() {
         root,
         &[
             "build",
-            "./example/runes/hello.rn",
+            "./tome-example/runes/hello.rn",
             "--output",
             out.to_str().unwrap(),
         ],
@@ -612,7 +792,7 @@ fn lockfile_tracks_installs_and_removals() {
         root,
         &[
             "build",
-            "./example/runes/hello.rn",
+            "./tome-example/runes/hello.rn",
             "--output",
             out.to_str().unwrap(),
         ],
@@ -666,7 +846,7 @@ fn doctor_reports_health_and_problems() {
         root,
         &[
             "build",
-            "./example/runes/hello.rn",
+            "./tome-example/runes/hello.rn",
             "--output",
             out.to_str().unwrap(),
         ],
@@ -715,7 +895,7 @@ fn install_verifies_archive_hash() {
         root,
         &[
             "build",
-            "./example/runes/hello.rn",
+            "./tome-example/runes/hello.rn",
             "--output",
             out.to_str().unwrap(),
         ],
@@ -808,6 +988,102 @@ fn build_fetches_and_verifies_sources() {
         ],
     );
     assert_failure_contains(&bad, "hash mismatch", "reject mismatched source checksum");
+}
+
+#[test]
+fn addendum_patches_source_metadata_before_install() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'patchtome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+
+    let old_payload = runes.join("old.txt");
+    let new_payload = runes.join("new.txt");
+    fs::write(
+        &old_payload,
+        b"#!/usr/bin/env sh\nprintf 'old payload\\n'\n",
+    )
+    .unwrap();
+    fs::write(
+        &new_payload,
+        b"#!/usr/bin/env sh\nprintf 'new payload\\n'\n",
+    )
+    .unwrap();
+    let old_hash = sha256_file(&old_payload);
+    let new_hash = sha256_file(&new_payload);
+
+    fs::write(
+        runes.join("patched.rn"),
+        format!(
+            "export const package = {{\n  name: 'patched'\n  version: '0.1.0'\n  summary: 'original summary'\n  sources: {{ main: {{ url: 'old.txt', sha256: '{old_hash}' }} }}\n  bins: {{ patched: 'bin/patched' }}\n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  cp $ctx.sources.main.path ($ctx.package_dir | path join 'bin' 'patched')\n}}\n"
+        ),
+    )
+    .unwrap();
+
+    let addendum = TempDir::new().unwrap();
+    let addendum = addendum.path();
+    fs::write(
+        addendum.join("addendum.nuon"),
+        format!(
+            "{{\n  name: patchset\n  patches: [\n    {{\n      tome: patchtome\n      package: patched\n      version: \"0.2.0\"\n      summary: \"patched summary\"\n      sources: {{ main: {{ url: \"new.txt\", sha256: \"{new_hash}\" }} }}\n    }}\n  ]\n}}\n"
+        ),
+    )
+    .unwrap();
+
+    let add_tome = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add_tome, "add patch tome");
+    let add_patch = run(
+        root,
+        &[
+            "addendum",
+            "add",
+            addendum.to_str().unwrap(),
+            "--ref",
+            "main",
+        ],
+    );
+    assert_success(&add_patch, "add patch addendum");
+
+    let info = run(root, &["info", "patched"]);
+    assert_success(&info, "info patched package");
+    let info_out = stdout(&info);
+    assert!(
+        info_out.contains("version: 0.2.0"),
+        "info should show patched version: {info_out}"
+    );
+    assert!(
+        info_out.contains("patched summary"),
+        "info should show patched summary: {info_out}"
+    );
+
+    let install = run(root, &["install", "patched"]);
+    assert_success(&install, "install patched package");
+    let output = run_shim(root, "patched");
+    assert_success(&output, "run patched package");
+    assert_eq!(stdout(&output).trim(), "new payload");
+
+    let state = fs::read_to_string(root.join("state").join("packages").join("patched.nuon"))
+        .expect("patched package state");
+    assert!(state.contains("version: \"0.2.0\""), "state: {state}");
+    assert!(
+        state.contains(&new_hash),
+        "state records patched source hash: {state}"
+    );
+
+    let lock = fs::read_to_string(root.join("state").join("grimoire.lock.nuon"))
+        .expect("lockfile after patched install");
+    assert!(lock.contains("patchset"), "lock records addendum: {lock}");
 }
 
 #[test]

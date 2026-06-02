@@ -9,7 +9,7 @@ use nu_protocol::{Record, Value};
 use semver::Version;
 use std::path::PathBuf;
 
-use crate::{install, model::LockFile, nu::nuon_io, paths, tome};
+use crate::{addendum, install, model::LockFile, nu::nuon_io, paths, tome};
 
 /// One package as recorded in `grimoire.lock.nuon`: enough to pin a reproducible reinstall to the
 /// exact version and verified archive hash that was last installed.
@@ -35,6 +35,7 @@ pub fn rebuild() -> Result<()> {
     let lock = LockFile::new(
         paths::target_triple(),
         tome::load_tomes()?,
+        addendum::load_addendums()?,
         install::installed_states()?,
     );
     let path = lock_path()?;

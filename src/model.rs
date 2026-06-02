@@ -25,6 +25,8 @@ pub struct PackageMetadata {
     pub sources: BTreeMap<String, Source>,
     #[serde(default)]
     pub deps: Deps,
+    #[serde(default)]
+    pub build_flags: BTreeMap<String, String>,
 }
 
 /// A declared source artifact for a source build. Every source must carry a checksum so
@@ -118,6 +120,50 @@ pub struct TomeState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddendumState {
+    pub name: String,
+    pub url: String,
+    #[serde(rename = "ref")]
+    pub ref_name: String,
+    #[serde(default)]
+    pub checked_ref: Option<String>,
+    #[serde(default)]
+    pub checked_commit: Option<String>,
+    #[serde(default)]
+    pub addendum: Option<AddendumManifest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddendumManifest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub patches: Vec<AddendumPatch>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AddendumPatch {
+    #[serde(default)]
+    pub tome: Option<String>,
+    pub package: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub bins: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    pub sources: Option<BTreeMap<String, Source>>,
+    #[serde(default)]
+    pub deps: Option<Deps>,
+    #[serde(default)]
+    pub build_flags: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TomeManifest {
     pub name: String,
     #[serde(default)]
@@ -185,6 +231,10 @@ impl PackageMetadata {
             Some(value) => parse_deps(value)?,
             None => Deps::default(),
         };
+        let build_flags = match record.get("build_flags") {
+            Some(Value::Nothing { .. }) | None => BTreeMap::new(),
+            Some(value) => expect_string_map(value, "package field `build_flags`")?,
+        };
 
         Ok(Self {
             name,
@@ -194,6 +244,7 @@ impl PackageMetadata {
             bins,
             sources,
             deps,
+            build_flags,
         })
     }
 
@@ -223,8 +274,33 @@ impl PackageMetadata {
         }
         record.push("sources", Value::record(sources, Span::unknown()));
         record.push("deps", self.deps.to_value());
+        record.push("build_flags", string_map_value(&self.build_flags));
 
         Value::record(record, Span::unknown())
+    }
+
+    pub fn apply_addendum_patch(&mut self, patch: &AddendumPatch) {
+        if let Some(version) = &patch.version {
+            self.version = version.clone();
+        }
+        if let Some(target) = &patch.target {
+            self.target = Some(target.clone());
+        }
+        if let Some(summary) = &patch.summary {
+            self.summary = Some(summary.clone());
+        }
+        if let Some(bins) = &patch.bins {
+            self.bins.extend(bins.clone());
+        }
+        if let Some(sources) = &patch.sources {
+            self.sources.extend(sources.clone());
+        }
+        if let Some(deps) = &patch.deps {
+            self.deps = deps.clone();
+        }
+        if let Some(build_flags) = &patch.build_flags {
+            self.build_flags.extend(build_flags.clone());
+        }
     }
 }
 
@@ -412,14 +488,21 @@ impl PackageState {
 pub struct LockFile {
     pub target: String,
     pub tomes: Vec<TomeState>,
+    pub addendums: Vec<AddendumState>,
     pub packages: Vec<PackageState>,
 }
 
 impl LockFile {
-    pub fn new(target: String, tomes: Vec<TomeState>, packages: Vec<PackageState>) -> Self {
+    pub fn new(
+        target: String,
+        tomes: Vec<TomeState>,
+        addendums: Vec<AddendumState>,
+        packages: Vec<PackageState>,
+    ) -> Self {
         Self {
             target,
             tomes,
+            addendums,
             packages,
         }
     }
@@ -436,9 +519,12 @@ impl LockFile {
             .collect::<Vec<_>>();
         record.push("tomes", Value::list(tomes, Span::unknown()));
 
-        // Addendums are not wired yet (TODO item 6); the field is present and empty so the
-        // lockfile shape is stable once they land.
-        record.push("addendums", Value::list(Vec::new(), Span::unknown()));
+        let addendums = self
+            .addendums
+            .iter()
+            .map(LockFile::addendum_value)
+            .collect::<Vec<_>>();
+        record.push("addendums", Value::list(addendums, Span::unknown()));
 
         let packages = self
             .packages
@@ -476,6 +562,20 @@ impl LockFile {
         Value::record(record, Span::unknown())
     }
 
+    fn addendum_value(addendum: &AddendumState) -> Value {
+        let mut record = Record::new();
+        record.push("name", Value::string(&addendum.name, Span::unknown()));
+        record.push("source_url", Value::string(&addendum.url, Span::unknown()));
+        record.push(
+            "source_commit",
+            Value::string(
+                addendum.checked_commit.as_deref().unwrap_or(""),
+                Span::unknown(),
+            ),
+        );
+        Value::record(record, Span::unknown())
+    }
+
     fn package_value(package: &PackageState) -> Value {
         let mut record = Record::new();
         record.push("name", Value::string(&package.name, Span::unknown()));
@@ -491,6 +591,182 @@ impl LockFile {
         record.push("source_hashes", string_map_value(&package.source_hashes));
         record.push("runtime_deps", string_list_value(&package.runtime_deps));
         record.push("build_deps", string_list_value(&package.build_deps));
+        Value::record(record, Span::unknown())
+    }
+}
+
+impl AddendumState {
+    pub fn from_value(value: Value) -> Result<Self> {
+        let record = expect_record(value, "addendum state")?;
+        let name = required_field_string(&record, "addendum state", "name")?;
+        let url = required_field_string(&record, "addendum state", "url")?;
+        let ref_name = required_field_string(&record, "addendum state", "ref")?;
+        let checked_ref = optional_string(&record, "checked_ref")?;
+        let checked_commit = optional_string(&record, "checked_commit")?;
+
+        Ok(Self {
+            name,
+            url,
+            ref_name,
+            checked_ref,
+            checked_commit,
+            addendum: match record.get("addendum") {
+                Some(Value::Nothing { .. }) | None => None,
+                Some(value) => Some(AddendumManifest::from_value(value.clone())?),
+            },
+        })
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut record = Record::new();
+        record.push("name", Value::string(&self.name, Span::unknown()));
+        record.push("url", Value::string(&self.url, Span::unknown()));
+        record.push("ref", Value::string(&self.ref_name, Span::unknown()));
+        if let Some(checked_ref) = &self.checked_ref {
+            record.push("checked_ref", Value::string(checked_ref, Span::unknown()));
+        }
+        if let Some(checked_commit) = &self.checked_commit {
+            record.push(
+                "checked_commit",
+                Value::string(checked_commit, Span::unknown()),
+            );
+        }
+        if let Some(addendum) = &self.addendum {
+            record.push("addendum", addendum.to_value());
+        }
+        Value::record(record, Span::unknown())
+    }
+}
+
+impl AddendumManifest {
+    pub fn from_value(value: Value) -> Result<Self> {
+        let record = expect_record(value, "addendum manifest")?;
+        let name = required_field_string(&record, "addendum manifest", "name")?;
+        validate_tome_name(&name)?;
+        let description = optional_string(&record, "description")?;
+        let patches = match record.get("patches") {
+            Some(Value::List { vals, .. }) => vals
+                .iter()
+                .map(AddendumPatch::from_value)
+                .collect::<Result<Vec<_>>>()?,
+            Some(_) => bail!("addendum manifest field `patches` must be a list"),
+            None => Vec::new(),
+        };
+
+        Ok(Self {
+            name,
+            description,
+            patches,
+        })
+    }
+
+    pub fn to_value(&self) -> Value {
+        let mut record = Record::new();
+        record.push("name", Value::string(&self.name, Span::unknown()));
+        if let Some(description) = &self.description {
+            record.push("description", Value::string(description, Span::unknown()));
+        }
+        let patches = self
+            .patches
+            .iter()
+            .map(AddendumPatch::to_value)
+            .collect::<Vec<_>>();
+        record.push("patches", Value::list(patches, Span::unknown()));
+        Value::record(record, Span::unknown())
+    }
+}
+
+impl AddendumPatch {
+    fn from_value(value: &Value) -> Result<Self> {
+        let Value::Record { val, .. } = value else {
+            bail!("addendum patch must be a record");
+        };
+        let package = required_field_string(val, "addendum patch", "package")?;
+        validate_package_name(&package)?;
+        let tome = optional_string(val, "tome")?;
+        if let Some(tome) = &tome {
+            validate_tome_name(tome)?;
+        }
+        let version = optional_string(val, "version")?;
+        if let Some(version) = &version {
+            validate_package_version(version)?;
+        }
+        let target = optional_string(val, "target")?;
+        let summary = optional_string(val, "summary")?;
+        let bins = match val.get("bins") {
+            Some(Value::Nothing { .. }) | None => None,
+            Some(value) => {
+                let bins = expect_string_map(value, "addendum patch field `bins`")?;
+                for (name, path) in &bins {
+                    validate_bin_name(name)?;
+                    validate_relative_package_path(path, &format!("bin `{name}`"))?;
+                }
+                Some(bins)
+            }
+        };
+        let sources = match val.get("sources") {
+            Some(Value::Nothing { .. }) | None => None,
+            Some(value) => Some(parse_sources(value)?),
+        };
+        let deps = match val.get("deps") {
+            Some(Value::Nothing { .. }) | None => None,
+            Some(value) => Some(parse_deps(value)?),
+        };
+        let build_flags = match val.get("build_flags") {
+            Some(Value::Nothing { .. }) | None => None,
+            Some(value) => Some(expect_string_map(
+                value,
+                "addendum patch field `build_flags`",
+            )?),
+        };
+
+        Ok(Self {
+            tome,
+            package,
+            version,
+            target,
+            summary,
+            bins,
+            sources,
+            deps,
+            build_flags,
+        })
+    }
+
+    fn to_value(&self) -> Value {
+        let mut record = Record::new();
+        if let Some(tome) = &self.tome {
+            record.push("tome", Value::string(tome, Span::unknown()));
+        }
+        record.push("package", Value::string(&self.package, Span::unknown()));
+        if let Some(version) = &self.version {
+            record.push("version", Value::string(version, Span::unknown()));
+        }
+        if let Some(target) = &self.target {
+            record.push("target", Value::string(target, Span::unknown()));
+        }
+        if let Some(summary) = &self.summary {
+            record.push("summary", Value::string(summary, Span::unknown()));
+        }
+        if let Some(bins) = &self.bins {
+            record.push("bins", string_map_value(bins));
+        }
+        if let Some(sources) = &self.sources {
+            let mut out = Record::new();
+            for (name, source) in sources {
+                let mut entry = Record::new();
+                entry.push("url", Value::string(&source.url, Span::unknown()));
+                entry.push("sha256", Value::string(&source.sha256, Span::unknown()));
+                out.push(name, Value::record(entry, Span::unknown()));
+            }
+            record.push("sources", Value::record(out, Span::unknown()));
+        }
+        if let Some(deps) = &self.deps {
+            record.push("deps", deps.to_value());
+        }
+        if let Some(build_flags) = &self.build_flags {
+            record.push("build_flags", string_map_value(build_flags));
+        }
         Value::record(record, Span::unknown())
     }
 }

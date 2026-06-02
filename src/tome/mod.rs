@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-mod git;
+pub(crate) mod git;
 
 use crate::{
     cli::{TomeAddArgs, TomeBuildArgs, TomeInitArgs, TomeRemoveArgs, TomeRuneArgs, TomeUpdateArgs},

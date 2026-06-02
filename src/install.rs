@@ -16,7 +16,7 @@ use std::{
 };
 
 use crate::{
-    archive, build,
+    addendum, archive, build,
     cli::{InstallArgs, PackageArg},
     fetch, lock,
     model::{
@@ -283,9 +283,15 @@ impl Installer {
     /// dependencies are resolved and installed first so they are present when the rune runs; the
     /// `building` guard rejects a build dependency that cycles back to the package being built.
     fn build_and_install(&mut self, rune: &Path) -> Result<InstalledArchive> {
-        let metadata = EmbeddedNuRuntime
+        let mut metadata = EmbeddedNuRuntime
             .package_metadata(rune)
             .with_context(|| format!("read rune metadata {}", rune.display()))?;
+        addendum::patched_package_metadata(
+            &mut metadata,
+            build::tome_name_for_rune(rune)?.as_deref(),
+            rune,
+        )
+        .with_context(|| format!("apply addendums to {}", rune.display()))?;
         if !self.building.insert(metadata.name.clone()) {
             bail!("build dependency cycle involving `{}`", metadata.name);
         }

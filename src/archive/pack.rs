@@ -14,18 +14,18 @@ use std::os::unix::fs::PermissionsExt;
 
 use crate::{
     archive,
-    nu::{
-        nuon_io,
-        runtime::{EmbeddedNuRuntime, RuneRuntime},
-    },
+    model::PackageMetadata,
+    nu::nuon_io,
     paths,
     progress::{status, success},
 };
 
-pub fn pack_built_rune(rune: &Path, package_dir: &Path, output: &Path) -> Result<PathBuf> {
-    status(&format!("reading rune metadata ({})", rune.display()));
-    let runtime = EmbeddedNuRuntime;
-    let metadata = runtime.package_metadata(rune)?;
+pub fn pack_built_rune(
+    rune: &Path,
+    metadata: &PackageMetadata,
+    package_dir: &Path,
+    output: &Path,
+) -> Result<PathBuf> {
     let target = paths::target_triple();
     let archive_name = format!("{}-{}-{target}.tar.zst", metadata.name, metadata.version);
     let archive_path = output.join(archive_name);
