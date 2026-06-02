@@ -83,15 +83,21 @@ pub fn info(args: PackageArg) -> Result<()> {
 }
 
 pub fn upgrade(args: UpgradeArgs) -> Result<()> {
-    let installed: BTreeMap<String, Version> = install::installed_states()?
+    let states = install::installed_states()?;
+    let held: BTreeMap<String, bool> = states
+        .iter()
+        .map(|state| (state.name.clone(), state.held))
+        .collect();
+    let installed: BTreeMap<String, Version> = states
         .into_iter()
         .filter_map(|state| Version::parse(&state.version).ok().map(|v| (state.name, v)))
         .collect();
 
-    let targets = if args.packages.is_empty() {
-        installed.keys().cloned().collect::<Vec<_>>()
-    } else {
+    let explicit = !args.packages.is_empty();
+    let targets = if explicit {
         args.packages.clone()
+    } else {
+        installed.keys().cloned().collect::<Vec<_>>()
     };
 
     if targets.is_empty() {
@@ -99,17 +105,35 @@ pub fn upgrade(args: UpgradeArgs) -> Result<()> {
         return Ok(());
     }
 
+    // Asking to upgrade a held package by name is almost certainly a mistake; fail before
+    // doing any resolver work so the user sees the friction and can `grm unhold` deliberately.
+    if explicit {
+        for name in &targets {
+            if held.get(name).copied().unwrap_or(false) {
+                bail!("`{name}` is held; run `grm unhold {name}` to allow upgrading it");
+            }
+        }
+    }
+
     // Compare the installed version against the newest a tome offers and only reinstall when a
     // strictly newer release exists, so an up-to-date package is left untouched.
-    let mut to_upgrade = Vec::new();
+    let mut to_upgrade: Vec<(String, Version, Version)> = Vec::new();
     for name in targets {
         let Some(current) = installed.get(&name) else {
             bail!("package `{name}` is not installed");
         };
+        if !explicit && held.get(&name).copied().unwrap_or(false) {
+            progress::report(&format!(
+                "{name} is held; skipping (use `grm unhold {name}` to allow)"
+            ));
+            continue;
+        }
         match solve::newest_available(&name)? {
             Some(newest) if newest > *current => {
-                progress::status(&format!("upgrading {name} {current} -> {newest}"));
-                to_upgrade.push(name);
+                if !args.dry_run {
+                    progress::status(&format!("upgrading {name} {current} -> {newest}"));
+                }
+                to_upgrade.push((name, current.clone(), newest));
             }
             _ => progress::report(&format!("{name} is up to date ({current})")),
         }
@@ -118,7 +142,17 @@ pub fn upgrade(args: UpgradeArgs) -> Result<()> {
     if to_upgrade.is_empty() {
         return Ok(());
     }
-    install::upgrade_packages(&to_upgrade)
+
+    if args.dry_run {
+        println!("plan:");
+        for (name, current, newest) in &to_upgrade {
+            println!("  ~ {name} {current} -> {newest}");
+        }
+        return Ok(());
+    }
+
+    let names: Vec<String> = to_upgrade.into_iter().map(|(name, _, _)| name).collect();
+    install::upgrade_packages(&names)
 }
 
 fn tome_packages() -> Result<Vec<TomePackage>> {

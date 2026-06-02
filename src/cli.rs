@@ -36,9 +36,14 @@ pub enum Command {
     /// Install a package by name, from a local archive, or from a rune.
     #[command(visible_aliases = ["in", "i"])]
     Install(InstallArgs),
-    /// Remove an installed package and its shims.
+    /// Remove an installed package and its shims. Runtime dependencies installed solely for
+    /// this package — that no other installed package still requires — are removed too.
     #[command(visible_aliases = ["rm", "uninstall"])]
     Remove(PackageArg),
+    /// Reclaim disk under the install root by emptying the source/archive/build caches and
+    /// any leftover transaction staging directories. Installed packages, shims, state, tomes,
+    /// addenda, and the lockfile are untouched; the next install will re-fetch what it needs.
+    Clean,
     /// List installed packages with their versions and targets.
     #[command(visible_alias = "ls")]
     List,
@@ -50,9 +55,16 @@ pub enum Command {
     Search(QueryArg),
     /// Show detailed information about a package.
     Info(PackageArg),
-    /// Upgrade installed packages to the latest available version.
+    /// Upgrade installed packages to the latest available version. Packages held with
+    /// `grm hold` are skipped (or, if named explicitly, refused with an error).
     #[command(visible_alias = "up")]
     Upgrade(UpgradeArgs),
+    /// Hold an installed package back from `grm upgrade` until it is released.
+    #[command(visible_alias = "pin")]
+    Hold(PackageArg),
+    /// Release a held package so it is eligible for `grm upgrade` again.
+    #[command(visible_alias = "unpin")]
+    Unhold(PackageArg),
     /// Manage tomes: the git repositories packages are resolved from.
     Tome {
         #[command(subcommand)]
@@ -64,6 +76,24 @@ pub enum Command {
         #[command(subcommand)]
         command: AddendumCommand,
     },
+    /// Print a shell completion script for `grm` to stdout. Redirect it where your shell
+    /// expects completions (e.g. `grm completions bash > ~/.local/share/bash-completion/completions/grm`).
+    Completions(CompletionsArgs),
+    /// Render man pages for `grm` and every subcommand into a directory.
+    Man(ManArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CompletionsArgs {
+    /// Target shell.
+    pub shell: clap_complete::Shell,
+}
+
+#[derive(Debug, Args)]
+pub struct ManArgs {
+    /// Output directory for the generated `*.1` files. Created if missing.
+    #[arg(short, long, default_value = "target/grimoire-man")]
+    pub output: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -96,6 +126,11 @@ pub struct InstallArgs {
     /// be pulled in. Fails if no lockfile exists. Ignored for a local-archive install.
     #[arg(long)]
     pub locked: bool,
+    /// Resolve and print the install plan without touching state. Shows each package the
+    /// solver chose, its version, and whether it would come from a binary archive or a
+    /// source build.
+    #[arg(long, visible_alias = "explain")]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -114,6 +149,9 @@ pub struct QueryArg {
 pub struct UpgradeArgs {
     /// Packages to upgrade. If omitted, every installed package is upgraded.
     pub packages: Vec<String>,
+    /// Show which packages would be upgraded and to which version, without touching state.
+    #[arg(long, visible_alias = "explain")]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Subcommand)]

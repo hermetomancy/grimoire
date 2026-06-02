@@ -83,6 +83,11 @@ pub struct PackageState {
     /// declared, mapped to the `sha256` each was checked against (empty for binary installs).
     #[serde(default)]
     pub source_hashes: BTreeMap<String, String>,
+    /// `true` when the user has held this package back from upgrades via `grm hold`. The
+    /// version in `state/packages/<name>.nuon` is what `grm upgrade` will skip; clear with
+    /// `grm unhold`.
+    #[serde(default)]
+    pub held: bool,
 }
 
 /// A binary package repository index (`index.nuon`): the set of pre-built archives a tome's
@@ -444,6 +449,7 @@ impl PackageState {
             Some(Value::Nothing { .. }) | None => BTreeMap::new(),
             Some(value) => expect_string_map(value, "field `source_hashes`")?,
         };
+        let held = optional_bool(&record, "held")?.unwrap_or(false);
 
         Ok(Self {
             name,
@@ -454,6 +460,7 @@ impl PackageState {
             runtime_deps,
             build_deps,
             source_hashes,
+            held,
         })
     }
 
@@ -478,6 +485,9 @@ impl PackageState {
         record.push("runtime_deps", string_list_value(&self.runtime_deps));
         record.push("build_deps", string_list_value(&self.build_deps));
         record.push("source_hashes", string_map_value(&self.source_hashes));
+        if self.held {
+            record.push("held", Value::bool(true, Span::unknown()));
+        }
         Value::record(record, Span::unknown())
     }
 }
@@ -933,6 +943,14 @@ fn optional_string(record: &Record, field: &str) -> Result<Option<String>> {
     match record.get(field) {
         Some(Value::Nothing { .. }) | None => Ok(None),
         Some(value) => expect_string(value, &format!("package field `{field}`")).map(Some),
+    }
+}
+
+fn optional_bool(record: &Record, field: &str) -> Result<Option<bool>> {
+    match record.get(field) {
+        Some(Value::Nothing { .. }) | None => Ok(None),
+        Some(Value::Bool { val, .. }) => Ok(Some(*val)),
+        Some(_) => bail!("field `{field}` must be a boolean"),
     }
 }
 

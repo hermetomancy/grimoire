@@ -9,7 +9,7 @@
 use anyhow::{Context, Result, bail};
 use semver::Version;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
@@ -46,6 +46,40 @@ struct Installer {
     /// summary and to detect the "nothing to do" case where every requested package was already
     /// satisfied and the solver produced no steps.
     installed_now: Vec<String>,
+    /// Names that were already installed when this run started. Used to tell a build dep that
+    /// just came in for this run apart from one the user (or a previous run) had installed
+    /// independently; only the former is a candidate for post-build cleanup.
+    initial_installed: BTreeSet<String>,
+    /// Build dependencies installed during this run *for* a source build, that were not
+    /// already installed when the run started. Removed at the end of a successful install —
+    /// once the build is over they are no longer load-bearing. The downloaded archive stays in
+    /// `cache/archives/`, so a future install that needs them is a cheap re-extract.
+    build_staged: BTreeSet<String>,
+    /// When true, every install path stops after planning and prints the plan to stdout —
+    /// no fetches, no builds, no state writes. Wired from `--dry-run` / `--explain`.
+    dry_run: bool,
+}
+
+impl Installer {
+    /// Snapshot the installed-name set up front so post-build cleanup can distinguish "this
+    /// run pulled in `make`" from "the user already had `make`".
+    fn new(installed: BTreeMap<String, Version>, pins: Option<solve::Pins>) -> Self {
+        let initial_installed = installed.keys().cloned().collect();
+        Self {
+            installed,
+            pins,
+            building: HashSet::new(),
+            installed_now: Vec::new(),
+            initial_installed,
+            build_staged: BTreeSet::new(),
+            dry_run: false,
+        }
+    }
+
+    fn with_dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = dry_run;
+        self
+    }
 }
 
 pub fn install(args: InstallArgs) -> Result<()> {
@@ -61,12 +95,7 @@ pub fn install(args: InstallArgs) -> Result<()> {
         installed.retain(|name, version| pins.get(name).is_some_and(|pin| &pin.version == version));
     }
 
-    let mut installer = Installer {
-        installed,
-        pins,
-        building: HashSet::new(),
-        installed_now: Vec::new(),
-    };
+    let mut installer = Installer::new(installed, pins).with_dry_run(args.dry_run);
 
     if args.from_source || args.package.ends_with(".rn") {
         installer.install_source_root(&args.package)?;
@@ -75,6 +104,12 @@ pub fn install(args: InstallArgs) -> Result<()> {
     } else {
         installer.install_named(&args.package)?;
     }
+
+    if args.dry_run {
+        return Ok(());
+    }
+
+    installer.cleanup_build_staged()?;
 
     // A resolve that reuses an already-satisfying install produces no steps, so nothing above
     // reported anything. Tell the user the request was a no-op rather than printing silence.
@@ -216,6 +251,10 @@ impl Installer {
             &self.installed,
             self.pins.as_ref(),
         )?;
+        if self.dry_run {
+            print_plan(&plan);
+            return Ok(());
+        }
         self.execute_plan(plan)
     }
 
@@ -223,6 +262,9 @@ impl Installer {
     /// installs its runtime dependencies through the solver.
     fn install_source_root(&mut self, package: &str) -> Result<()> {
         let rune = build::resolve_rune(package)?;
+        if self.dry_run {
+            return self.dry_run_source_root(&rune);
+        }
         let installed = self.build_and_install(&rune)?;
         let runtime = installed.runtime_deps.clone();
         self.record(installed);
@@ -232,10 +274,60 @@ impl Installer {
     /// Installs a local pre-built archive as the root, verifying it against `sha256` when given,
     /// then resolves and installs the runtime dependencies its embedded metadata declares.
     fn install_local_root(&mut self, package: &str, sha256: Option<String>) -> Result<()> {
+        if self.dry_run {
+            return self.dry_run_local_root(package);
+        }
         let installed = install_archive(&PathBuf::from(package), sha256)?;
         let runtime = installed.runtime_deps.clone();
         self.record(installed);
         self.install_deps(&runtime)
+    }
+
+    /// Prints the plan for a source-rune root install: the rune itself, plus the solver plan
+    /// for its build and runtime dependencies (everything that would land in the install root).
+    fn dry_run_source_root(&self, rune: &Path) -> Result<()> {
+        let mut metadata = EmbeddedNuRuntime
+            .package_metadata(rune)
+            .with_context(|| format!("read rune metadata {}", rune.display()))?;
+        addendum::patched_package_metadata(
+            &mut metadata,
+            build::tome_name_for_rune(rune)?.as_deref(),
+            rune,
+        )
+        .with_context(|| format!("apply addendums to {}", rune.display()))?;
+        println!(
+            "plan:\n  + {} {} (source rune {})",
+            metadata.name,
+            metadata.version,
+            rune.display()
+        );
+        let mut combined = metadata.deps.build_for(&paths::target_triple());
+        combined.extend(metadata.deps.runtime.clone());
+        if combined.is_empty() {
+            return Ok(());
+        }
+        let plan = solve::resolve(&combined, &self.installed, self.pins.as_ref())?;
+        print_plan_body(&plan);
+        Ok(())
+    }
+
+    /// Prints the plan for a local-archive root install: the archive itself plus the solver
+    /// plan for its embedded runtime dependencies.
+    fn dry_run_local_root(&self, package: &str) -> Result<()> {
+        let archive_path = PathBuf::from(package);
+        let metadata = inspect_archive(&archive_path)?;
+        println!(
+            "plan:\n  + {} {} (local archive {})",
+            metadata.name,
+            metadata.version,
+            archive_path.display()
+        );
+        if metadata.deps.runtime.is_empty() {
+            return Ok(());
+        }
+        let plan = solve::resolve(&metadata.deps.runtime, &self.installed, self.pins.as_ref())?;
+        print_plan_body(&plan);
+        Ok(())
     }
 
     /// Resolves `deps` into a plan and executes it. Already-installed satisfying packages are
@@ -311,8 +403,19 @@ impl Installer {
                 None => None,
             };
             let build_deps = metadata.deps.build_for(&paths::target_triple());
+            // Whatever wasn't already installed coming into this run is being pulled in
+            // *for* this build, so mark it for post-build cleanup. Names already in
+            // `initial_installed` belong to the user (or a previous run) and stay.
+            let staged: Vec<String> = build_deps
+                .iter()
+                .map(|dep| dep.name.clone())
+                .filter(|name| !self.initial_installed.contains(name))
+                .collect();
             self.install_deps(&build_deps)
                 .with_context(|| format!("install build dependencies for `{}`", metadata.name))?;
+            for name in staged {
+                self.build_staged.insert(name);
+            }
             let env = BuildEnv {
                 path_dirs: build_dep_bin_dirs(&build_deps)?,
             };
@@ -331,17 +434,81 @@ impl Installer {
         self.installed_now.push(installed.name.clone());
         self.installed.insert(installed.name, installed.version);
     }
+
+    /// Removes build dependencies pulled in solely for this run's source builds, now that the
+    /// builds have finished. A staged dep is kept if any installed package's `runtime_deps`
+    /// references it — the same gating used by `autoremove_orphans` — or if a *later* package
+    /// in this run picked it up as a runtime dep. Each removal cascades its own runtime-dep
+    /// orphans, so transitive runtime deps of a build dep get reclaimed too.
+    fn cleanup_build_staged(&mut self) -> Result<()> {
+        let staged = std::mem::take(&mut self.build_staged);
+        for name in &staged {
+            let states = installed_states()?;
+            if !states.iter().any(|state| state.name == *name) {
+                continue;
+            }
+            let still_needed = states.iter().any(|other| {
+                other.name != *name && other.runtime_deps.iter().any(|dep| dep == name)
+            });
+            if still_needed {
+                continue;
+            }
+            let removed =
+                remove_one(name).with_context(|| format!("cleanup build dependency `{name}`"))?;
+            report(&format!("removed build dependency {name}"));
+            self.installed.remove(name);
+            autoremove_orphans(removed.runtime_deps)?;
+        }
+        Ok(())
+    }
 }
 
 pub fn list() -> Result<()> {
     for state in installed_states()? {
         println!(
-            "{}\t{}\t{}",
+            "{}\t{}\t{}\t{}",
             state.name,
             state.version,
-            state.target.as_deref().unwrap_or("")
+            state.target.as_deref().unwrap_or(""),
+            if state.held { "held" } else { "" }
         );
     }
+    Ok(())
+}
+
+/// Marks `name` as held so `grm upgrade` skips it. Idempotent: holding a held package is a
+/// no-op that still reports success. Fails when the package is not installed.
+pub fn hold(args: PackageArg) -> Result<()> {
+    set_hold(&args.package, true)
+}
+
+pub fn unhold(args: PackageArg) -> Result<()> {
+    set_hold(&args.package, false)
+}
+
+fn set_hold(name: &str, held: bool) -> Result<()> {
+    let root = paths::install_root()?;
+    let state_path = root
+        .join("state")
+        .join("packages")
+        .join(format!("{name}.nuon"));
+    if !state_path.exists() {
+        bail!("package `{name}` is not installed");
+    }
+    let mut state = PackageState::from_value(nuon_io::read_nuon(&state_path)?)?;
+    if state.held == held {
+        report(&format!(
+            "{name} is already {}",
+            if held { "held" } else { "not held" }
+        ));
+        return Ok(());
+    }
+    state.held = held;
+    nuon_io::write_nuon(&state_path, &state.to_value())?;
+    report(&format!(
+        "{name} {}",
+        if held { "held" } else { "released" }
+    ));
     Ok(())
 }
 
@@ -375,17 +542,13 @@ pub fn upgrade_packages(names: &[String]) -> Result<()> {
     for name in names {
         installed.remove(name);
     }
-    let mut installer = Installer {
-        installed,
-        pins: None,
-        building: HashSet::new(),
-        installed_now: Vec::new(),
-    };
+    let mut installer = Installer::new(installed, None);
     for name in names {
         installer
             .install_named(name)
             .with_context(|| format!("upgrade `{name}`"))?;
     }
+    installer.cleanup_build_staged()?;
     Ok(())
 }
 
@@ -428,14 +591,23 @@ fn build_dep_bin_dirs(deps: &[Dependency]) -> Result<Vec<PathBuf>> {
 }
 
 pub fn remove(args: PackageArg) -> Result<()> {
+    let removed = remove_one(&args.package)?;
+    report(&format!("removed {}", args.package));
+    autoremove_orphans(removed.runtime_deps)
+}
+
+/// Removes one installed package and returns its prior state record. Each call is a complete
+/// transaction (shims, package directory, state file, lockfile) — callers chaining multiple
+/// removes do not need to coordinate rollback across them.
+fn remove_one(name: &str) -> Result<PackageState> {
     let root = paths::install_root()?;
     let state_path = root
         .join("state")
         .join("packages")
-        .join(format!("{}.nuon", args.package));
+        .join(format!("{name}.nuon"));
 
     if !state_path.exists() {
-        bail!("package `{}` is not installed", args.package);
+        bail!("package `{name}` is not installed");
     }
 
     let state = PackageState::from_value(nuon_io::read_nuon(&state_path)?)?;
@@ -488,7 +660,37 @@ pub fn remove(args: PackageArg) -> Result<()> {
     if had_package {
         let _ = fs::remove_dir_all(&backup);
     }
-    report(&format!("removed {}", args.package));
+    Ok(state)
+}
+
+/// Removes runtime dependencies left orphaned by a previous removal — packages no other
+/// installed package still lists in its `runtime_deps`. Cascades transitively: a dep that
+/// becomes orphaned mid-pass is itself a candidate. Build dependencies are not considered;
+/// once a package is installed they are no longer load-bearing for it.
+fn autoremove_orphans(initial: Vec<String>) -> Result<()> {
+    let mut queue: VecDeque<String> = initial.into();
+    let mut seen: HashSet<String> = HashSet::new();
+    while let Some(name) = queue.pop_front() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let states = installed_states()?;
+        if !states.iter().any(|state| state.name == name) {
+            continue;
+        }
+        let still_needed = states
+            .iter()
+            .any(|other| other.name != name && other.runtime_deps.iter().any(|dep| dep == &name));
+        if still_needed {
+            continue;
+        }
+        let removed =
+            remove_one(&name).with_context(|| format!("autoremove unused dependency `{name}`"))?;
+        report(&format!("autoremoved unused dependency {name}"));
+        for dep in removed.runtime_deps {
+            queue.push_back(dep);
+        }
+    }
     Ok(())
 }
 
@@ -706,6 +908,21 @@ fn write_state(
     metadata: &PackageMetadata,
     archive_hash: &str,
 ) -> Result<()> {
+    let state_dir = root.join("state").join("packages");
+    fs::create_dir_all(&state_dir)?;
+    let state_path = state_dir.join(format!("{}.nuon", metadata.name));
+
+    // A hold is user intent that survives reinstalls and upgrades — preserve it when we
+    // rewrite the state file. (Nothing else in the prior state is worth carrying forward;
+    // the install we just performed is the authoritative source for everything else.)
+    let previous_held = if state_path.exists() {
+        PackageState::from_value(nuon_io::read_nuon(&state_path)?)
+            .map(|prior| prior.held)
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
     let state = PackageState {
         name: metadata.name.clone(),
         version: metadata.version.clone(),
@@ -729,10 +946,8 @@ fn write_state(
             .iter()
             .map(|(name, source)| (name.clone(), source.sha256.clone()))
             .collect(),
+        held: previous_held,
     };
-    let state_dir = root.join("state").join("packages");
-    fs::create_dir_all(&state_dir)?;
-    let state_path = state_dir.join(format!("{}.nuon", metadata.name));
 
     // Capture the prior state so a later failure can restore it.
     let previous = if state_path.exists() {
@@ -774,6 +989,29 @@ fn rebuild_lock(tx: &mut Transaction) -> Result<()> {
         });
     }
     lock::rebuild()
+}
+
+/// Prints a complete solver plan (header + body). For a `--dry-run` whose root step is the
+/// solver-resolved package itself.
+fn print_plan(plan: &Plan) {
+    if plan.steps.is_empty() {
+        println!("plan: already satisfied (no install steps)");
+        return;
+    }
+    println!("plan:");
+    print_plan_body(plan);
+}
+
+/// Prints just the bullet list of plan steps, without the header — used when a `--dry-run`
+/// has already printed a synthetic root step (source-rune or local-archive install).
+fn print_plan_body(plan: &Plan) {
+    for step in &plan.steps {
+        let origin = match &step.origin {
+            Origin::Binary { entry, .. } => format!("binary archive {}", entry.archive),
+            Origin::Source { rune } => format!("source rune {}", rune.display()),
+        };
+        println!("  + {} {} ({})", step.name, step.version, origin);
+    }
 }
 
 /// Best-effort, RAII-style rollback for a multi-step install. Rollback actions run in

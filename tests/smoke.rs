@@ -1480,6 +1480,688 @@ fn install_selects_constrained_dependency_version() {
 }
 
 #[test]
+fn source_install_cleans_up_build_dependency_after_success() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    // `usespath` is a source rune that lists `stampdep` as a build dep and shells out to its
+    // `stamp` binary during the build. Once the build is done, `stampdep` has served its
+    // purpose; the installer should uninstall it. `usespath`'s runtime is unchanged.
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'cleantome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("stampdep.rn"),
+        "export const package = {\n  name: 'stampdep'\n  version: '0.1.0'\n  bins: { stamp: 'bin/stamp' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'from build dependency\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'stamp')\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("usespath.rn"),
+        "export const package = {\n  name: 'usespath'\n  version: '0.1.0'\n  deps: { build: { default: ['stampdep'] }, runtime: [] }\n  bins: { usespath: 'bin/usespath' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  let stamped = (stamp | str trim)\n  $\"#!/usr/bin/env sh\\nprintf '($stamped)\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'usespath')\n}\n",
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "add cleantome");
+
+    let install = run(root, &["install", "usespath"]);
+    assert_success(&install, "install usespath");
+    let install_out = stdout(&install);
+    assert!(
+        install_out.contains("removed build dependency stampdep"),
+        "should report stampdep cleanup: {install_out}"
+    );
+
+    // The just-built package still works end to end.
+    let output = run_shim(root, "usespath");
+    assert_success(&output, "run usespath");
+    assert_eq!(stdout(&output).trim(), "from build dependency");
+
+    // stampdep is fully gone — state, package dir, and shim.
+    assert!(
+        !root
+            .join("state")
+            .join("packages")
+            .join("stampdep.nuon")
+            .exists(),
+        "stampdep state should be removed"
+    );
+    assert!(
+        !root
+            .join("packages")
+            .join("stampdep")
+            .join("0.1.0")
+            .exists(),
+        "stampdep package dir should be removed"
+    );
+    assert!(
+        !root.join("bin").join("stamp").exists(),
+        "stampdep shim should be removed"
+    );
+
+    // `usespath` itself stays installed; it is the explicit target, not a build dep.
+    assert!(
+        root.join("state")
+            .join("packages")
+            .join("usespath.nuon")
+            .exists(),
+        "usespath should remain installed"
+    );
+
+    // The built archive lives in cache/builds/ so a later install of stampdep is a cheap
+    // re-extract rather than a full source rebuild.
+    let builds = root.join("cache").join("builds");
+    let cached: Vec<_> = fs::read_dir(&builds)
+        .map(|iter| {
+            iter.filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with("stampdep-"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        !cached.is_empty(),
+        "stampdep's built archive should remain in cache/builds for future reuse"
+    );
+}
+
+#[test]
+fn source_install_keeps_user_installed_build_dependency() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    // Same shape as the previous test, but the user installs `stampdep` explicitly first.
+    // The post-build cleanup must not touch packages that were installed before the run
+    // started — only the ones it pulled in itself.
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'keeptome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("stampdep.rn"),
+        "export const package = {\n  name: 'stampdep'\n  version: '0.1.0'\n  bins: { stamp: 'bin/stamp' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'from build dependency\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'stamp')\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("usespath.rn"),
+        "export const package = {\n  name: 'usespath'\n  version: '0.1.0'\n  deps: { build: { default: ['stampdep'] }, runtime: [] }\n  bins: { usespath: 'bin/usespath' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  let stamped = (stamp | str trim)\n  $\"#!/usr/bin/env sh\\nprintf '($stamped)\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'usespath')\n}\n",
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "add keeptome");
+
+    assert_success(
+        &run(root, &["install", "stampdep"]),
+        "install stampdep explicitly",
+    );
+    assert_success(&run(root, &["install", "usespath"]), "install usespath");
+
+    assert!(
+        root.join("state")
+            .join("packages")
+            .join("stampdep.nuon")
+            .exists(),
+        "explicit stampdep install must survive the post-build cleanup"
+    );
+}
+
+#[test]
+fn remove_autoremoves_orphaned_runtime_dependencies() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+
+    // Two top-level packages, `app` and `other`, that both depend on the same `lib`. After
+    // removing `app`, `lib` must stay because `other` still needs it; after removing `other`,
+    // `lib` becomes truly unreferenced and the cascade autoremove must take it out too.
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'rmcore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    for pkg in ["app", "other", "lib"] {
+        fs::write(
+            runes.join(format!("{pkg}.rn")),
+            format!("export const package = {{\n  name: '{pkg}'\n  version: '0.1.0'\n  bins: {{}}\n}}\n\nexport def build [ctx] {{ }}\n"),
+        )
+        .unwrap();
+    }
+
+    let dist = tome.join("dist");
+    let mut entries = Vec::new();
+    for (pkg, deps) in [("app", "[\"lib\"]"), ("other", "[\"lib\"]"), ("lib", "[]")] {
+        let name = format!("{pkg}-0.1.0-{triple}.tar.zst");
+        // Embed deps in the archive's package.nuon, not just the index entry: the install state
+        // record reads from the archive, and the autoremove cascade reads from that state.
+        let package_nuon = format!(
+            "{{format: 1, name: \"{pkg}\", version: \"0.1.0\", target: \"{triple}\", bins: {{{pkg}: \"bin/{pkg}\"}}, deps: {{ runtime: {deps} }}}}\n"
+        );
+        let archive_path = dist.join(&name);
+        if let Some(parent) = archive_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        let mut builder = open_archive(&archive_path);
+        append_file(
+            &mut builder,
+            ".grimoire/package.nuon",
+            package_nuon.as_bytes(),
+            0o644,
+        );
+        append_file(
+            &mut builder,
+            &format!("bin/{pkg}"),
+            format!("#!/usr/bin/env sh\nprintf '{pkg}\\n'\n").as_bytes(),
+            0o755,
+        );
+        finish_archive(builder);
+        let hash = sha256_file(&archive_path);
+        entries.push(format!(
+            "    {{ name: \"{pkg}\", version: \"0.1.0\", target: \"{triple}\", archive: \"{name}\", archive_hash: \"{hash}\", runtime_deps: {deps} }}"
+        ));
+    }
+    fs::write(
+        dist.join("index.nuon"),
+        format!("{{\n  packages: [\n{}\n  ]\n}}\n", entries.join("\n")),
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "tome add rmcore");
+    let update = run(root, &["tome", "update", "rmcore"]);
+    assert_success(&update, "tome update rmcore");
+
+    assert_success(&run(root, &["install", "app"]), "install app");
+    assert_success(&run(root, &["install", "other"]), "install other");
+
+    let lib_state = root.join("state").join("packages").join("lib.nuon");
+    assert!(lib_state.exists(), "lib should be installed as a dep");
+
+    // First removal: lib is still needed by `other`, so it must survive.
+    let remove_app = run(root, &["remove", "app"]);
+    assert_success(&remove_app, "remove app");
+    let remove_app_out = stdout(&remove_app);
+    assert!(
+        remove_app_out.contains("removed app"),
+        "should report app removal: {remove_app_out}"
+    );
+    assert!(
+        !remove_app_out.contains("autoremoved unused dependency lib"),
+        "lib must not be autoremoved while other still depends on it: {remove_app_out}"
+    );
+    assert!(lib_state.exists(), "lib should still be installed");
+
+    // Second removal: nothing else references lib now, so it must be cascaded out.
+    let remove_other = run(root, &["remove", "other"]);
+    assert_success(&remove_other, "remove other");
+    let remove_other_out = stdout(&remove_other);
+    assert!(
+        remove_other_out.contains("autoremoved unused dependency lib"),
+        "lib should be autoremoved when no package depends on it: {remove_other_out}"
+    );
+    assert!(!lib_state.exists(), "lib state should be gone");
+    assert!(
+        !root.join("packages").join("lib").join("0.1.0").exists(),
+        "lib package dir should be gone"
+    );
+    assert!(
+        !root.join("bin").join("lib").exists(),
+        "lib shim should be gone"
+    );
+}
+
+#[test]
+fn completions_and_man_render_from_cli_definition() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    // Bash completion script for `grm` — the script ships the names of our subcommands so
+    // a shell user can tab through them. Smoke check that a few of ours made it in.
+    let bash = run(root, &["completions", "bash"]);
+    assert_success(&bash, "completions bash");
+    let bash_out = stdout(&bash);
+    assert!(
+        bash_out.contains("_grm") || bash_out.contains("_grm()"),
+        "bash completion defines a function: {bash_out}"
+    );
+    for subcommand in ["install", "remove", "tome", "addendum", "hold"] {
+        assert!(
+            bash_out.contains(subcommand),
+            "completion enumerates `{subcommand}`"
+        );
+    }
+
+    // `man` writes one `.1` file per subcommand plus a `grm.1` root page.
+    let out = TempDir::new().unwrap();
+    let out = out.path().join("man");
+    let man = run(root, &["man", "--output", out.to_str().unwrap()]);
+    assert_success(&man, "man --output");
+    let root_page = fs::read_to_string(out.join("grm.1")).expect("read grm.1");
+    assert!(
+        root_page.contains(".TH grm"),
+        "grm.1 is a troff page with the expected title header: {root_page:.200}"
+    );
+    for sub in ["install", "remove", "clean", "hold"] {
+        let path = out.join(format!("grm-{sub}.1"));
+        assert!(
+            path.exists(),
+            "man page for `{sub}` should exist at {path:?}"
+        );
+    }
+}
+
+#[test]
+fn install_dry_run_prints_plan_without_touching_state() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+
+    // Tome with `app` (binary) that depends on `lib` (binary). A dry-run install of `app`
+    // must show both steps and *not* leave a state record, shim, or package directory behind.
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'drycore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    for pkg in ["app", "lib"] {
+        fs::write(
+            runes.join(format!("{pkg}.rn")),
+            format!("export const package = {{\n  name: '{pkg}'\n  version: '0.1.0'\n  bins: {{}}\n}}\n\nexport def build [ctx] {{ }}\n"),
+        )
+        .unwrap();
+    }
+    let dist = tome.join("dist");
+    let app_name = format!("app-0.1.0-{triple}.tar.zst");
+    let app = make_indexed_archive(
+        &dist.join(&app_name),
+        "app",
+        &triple,
+        "#!/usr/bin/env sh\nprintf 'app\\n'\n",
+    );
+    let app_hash = sha256_file(&app);
+    let lib_name = format!("lib-0.1.0-{triple}.tar.zst");
+    let lib = make_indexed_archive(
+        &dist.join(&lib_name),
+        "lib",
+        &triple,
+        "#!/usr/bin/env sh\nprintf 'lib\\n'\n",
+    );
+    let lib_hash = sha256_file(&lib);
+    fs::write(
+        dist.join("index.nuon"),
+        format!(
+            "{{\n  packages: [\n    {{ name: \"app\", version: \"0.1.0\", target: \"{triple}\", archive: \"{app_name}\", archive_hash: \"{app_hash}\", runtime_deps: [\"lib\"] }}\n    {{ name: \"lib\", version: \"0.1.0\", target: \"{triple}\", archive: \"{lib_name}\", archive_hash: \"{lib_hash}\", runtime_deps: [] }}\n  ]\n}}\n"
+        ),
+    )
+    .unwrap();
+
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add drycore",
+    );
+    assert_success(&run(root, &["tome", "update", "drycore"]), "tome update");
+
+    let dry = run(root, &["install", "app", "--dry-run"]);
+    assert_success(&dry, "install --dry-run");
+    let out = stdout(&dry);
+    assert!(
+        out.starts_with("plan:"),
+        "dry-run starts with plan header: {out}"
+    );
+    assert!(
+        out.contains("lib 0.1.0"),
+        "plan includes runtime dep lib: {out}"
+    );
+    assert!(out.contains("app 0.1.0"), "plan includes app: {out}");
+    assert!(
+        out.contains(&app_name) && out.contains(&lib_name),
+        "plan names the binary archives: {out}"
+    );
+
+    // Nothing was installed.
+    assert!(
+        !root
+            .join("state")
+            .join("packages")
+            .join("app.nuon")
+            .exists(),
+        "dry-run must not write state for app"
+    );
+    assert!(
+        !root
+            .join("state")
+            .join("packages")
+            .join("lib.nuon")
+            .exists(),
+        "dry-run must not write state for lib"
+    );
+    assert!(
+        !root.join("packages").join("app").exists(),
+        "dry-run must not write a package dir"
+    );
+
+    // `--explain` is an alias for `--dry-run` and produces the same output.
+    let explain = run(root, &["install", "app", "--explain"]);
+    assert_success(&explain, "install --explain");
+    assert_eq!(stdout(&dry), stdout(&explain), "alias matches");
+}
+
+#[test]
+fn dry_run_runs_while_install_root_is_locked() {
+    use fs4::fs_std::FileExt;
+
+    // Dry-run is non-mutating and must not be blocked by a concurrent mutating run holding
+    // the install-root lock — otherwise users can't preview an install while another grm is
+    // working.
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    fs::create_dir_all(root).unwrap();
+
+    let holder = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join(".grimoire-lock"))
+        .unwrap();
+    let acquired = FileExt::try_lock_exclusive(&holder).expect("acquire test-side lock");
+    assert!(acquired);
+
+    // `install --dry-run` of a missing package fails on resolution (no tomes), not on the
+    // lock — the message tells us the lock was bypassed successfully.
+    let dry = run(root, &["install", "nothing", "--dry-run"]);
+    assert!(
+        !dry.status.success(),
+        "dry-run for unknown package should fail"
+    );
+    let err = stderr(&dry);
+    assert!(
+        !err.contains("another `grm` process is mutating"),
+        "dry-run must not trip the install-root lock: {err}"
+    );
+
+    FileExt::unlock(&holder).expect("release test-side lock");
+}
+
+#[test]
+fn hold_skips_upgrade_until_released() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+
+    // A tome that starts with only v0.1.0 of `holdpkg`. After installing, we'll publish v0.2.0
+    // and walk through the hold lifecycle: implicit upgrade skips, explicit upgrade errors,
+    // unhold makes the upgrade go through.
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'holdcore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("holdpkg.rn"),
+        "export const package = {\n  name: 'holdpkg'\n  version: '0.1.0'\n  bins: {}\n}\n\nexport def build [ctx] { }\n",
+    )
+    .unwrap();
+
+    let dist = tome.join("dist");
+    let v1_name = format!("holdpkg-0.1.0-{triple}.tar.zst");
+    let v1 = make_versioned_archive(
+        &dist.join(&v1_name),
+        "holdpkg",
+        "0.1.0",
+        &triple,
+        "#!/usr/bin/env sh\nprintf 'v1\\n'\n",
+    );
+    let v1_hash = sha256_file(&v1);
+    fs::write(
+        dist.join("index.nuon"),
+        format!(
+            "{{\n  packages: [\n    {{ name: \"holdpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", runtime_deps: [] }}\n  ]\n}}\n"
+        ),
+    )
+    .unwrap();
+
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add holdcore",
+    );
+    assert_success(&run(root, &["tome", "update", "holdcore"]), "tome update");
+    assert_success(&run(root, &["install", "holdpkg"]), "install holdpkg 0.1.0");
+
+    let hold = run(root, &["hold", "holdpkg"]);
+    assert_success(&hold, "hold holdpkg");
+    assert!(
+        stdout(&hold).contains("holdpkg held"),
+        "hold reports success: {}",
+        stdout(&hold)
+    );
+
+    // Hold is reflected in the `list` output as a fourth column.
+    let list = run(root, &["list"]);
+    assert!(
+        stdout(&list).contains("holdpkg") && stdout(&list).contains("held"),
+        "list shows held marker: {}",
+        stdout(&list)
+    );
+
+    // Publish a newer release and refresh the tome so the upgrader sees it.
+    let v2_name = format!("holdpkg-0.2.0-{triple}.tar.zst");
+    let v2 = make_versioned_archive(
+        &dist.join(&v2_name),
+        "holdpkg",
+        "0.2.0",
+        &triple,
+        "#!/usr/bin/env sh\nprintf 'v2\\n'\n",
+    );
+    let v2_hash = sha256_file(&v2);
+    fs::write(
+        dist.join("index.nuon"),
+        format!(
+            "{{\n  packages: [\n    {{ name: \"holdpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", runtime_deps: [] }}\n    {{ name: \"holdpkg\", version: \"0.2.0\", target: \"{triple}\", archive: \"{v2_name}\", archive_hash: \"{v2_hash}\", runtime_deps: [] }}\n  ]\n}}\n"
+        ),
+    )
+    .unwrap();
+    assert_success(&run(root, &["tome", "update", "holdcore"]), "tome resync");
+
+    // Implicit upgrade skips with a message; the installed version is unchanged.
+    let upgrade_all = run(root, &["upgrade"]);
+    assert_success(&upgrade_all, "upgrade (all)");
+    let upgrade_out = stdout(&upgrade_all);
+    assert!(
+        upgrade_out.contains("holdpkg is held"),
+        "implicit upgrade reports skip: {upgrade_out}"
+    );
+    assert!(
+        stdout(&run(root, &["list"])).contains("holdpkg\t0.1.0"),
+        "implicit upgrade must not bump a held package: {}",
+        stdout(&run(root, &["list"]))
+    );
+
+    // Explicit upgrade is refused — silence here would be an even worse footgun.
+    let upgrade_named = run(root, &["upgrade", "holdpkg"]);
+    assert_failure_contains(
+        &upgrade_named,
+        "is held; run `grm unhold holdpkg`",
+        "explicit upgrade of held package fails",
+    );
+
+    // Release and try again — now the upgrade goes through.
+    let unhold = run(root, &["unhold", "holdpkg"]);
+    assert_success(&unhold, "unhold holdpkg");
+    assert!(
+        stdout(&unhold).contains("holdpkg released"),
+        "unhold reports release: {}",
+        stdout(&unhold)
+    );
+
+    assert_success(&run(root, &["upgrade", "holdpkg"]), "upgrade after unhold");
+    assert!(
+        stdout(&run(root, &["list"])).contains("holdpkg\t0.2.0"),
+        "post-release upgrade picks up newest: {}",
+        stdout(&run(root, &["list"]))
+    );
+}
+
+#[test]
+fn mutating_commands_refuse_when_install_root_is_locked() {
+    use fs4::fs_std::FileExt;
+
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    fs::create_dir_all(root).unwrap();
+
+    // Take the install-root lock from the test harness, simulating a concurrent `grm` that
+    // is mid-mutation. The actual command we run is a fast no-op (`clean` against an empty
+    // root) but it still has to pass through the lock acquisition, so it must fail fast.
+    let lock_path = root.join(".grimoire-lock");
+    let holder = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap();
+    let acquired = FileExt::try_lock_exclusive(&holder).expect("acquire test-side lock");
+    assert!(acquired, "test should own the lock");
+
+    let blocked = run(root, &["clean"]);
+    assert_failure_contains(
+        &blocked,
+        "another `grm` process is mutating",
+        "clean refuses while lock is held",
+    );
+
+    let list = run(root, &["list"]);
+    assert_success(&list, "read-only `list` is not gated by the lock");
+
+    // Release the lock — the next mutating command should succeed normally.
+    FileExt::unlock(&holder).expect("release test-side lock");
+    drop(holder);
+
+    let after = run(root, &["clean"]);
+    assert_success(&after, "clean succeeds after the lock is released");
+}
+
+#[test]
+fn clean_empties_caches_and_transactions() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    // Populate every directory `grm clean` is supposed to wipe with a recognizable marker.
+    let dirs = [
+        root.join("cache").join("sources"),
+        root.join("cache").join("archives"),
+        root.join("cache").join("builds"),
+        root.join("transactions"),
+    ];
+    for dir in &dirs {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("marker.bin"), vec![0u8; 4096]).unwrap();
+    }
+    // Also put a nested directory inside transactions/, which is the realistic shape: an
+    // in-flight install stages an entire `package/` subtree under a temp dir.
+    let nested = root
+        .join("transactions")
+        .join("grimoire-abcd")
+        .join("package");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("payload.bin"), vec![0u8; 8192]).unwrap();
+
+    // Things `clean` must leave alone, so we can assert it does not touch installed state.
+    let state_dir = root.join("state").join("packages");
+    fs::create_dir_all(&state_dir).unwrap();
+    let state_file = state_dir.join("keep.nuon");
+    fs::write(&state_file, b"keep me\n").unwrap();
+    let packages_file = root
+        .join("packages")
+        .join("keep")
+        .join("0.1.0")
+        .join("file");
+    fs::create_dir_all(packages_file.parent().unwrap()).unwrap();
+    fs::write(&packages_file, b"keep me too\n").unwrap();
+
+    let clean = run(root, &["clean"]);
+    assert_success(&clean, "clean");
+    let clean_out = stdout(&clean);
+    assert!(
+        clean_out.contains("cleaned") && clean_out.contains("KiB"),
+        "clean should report bytes freed: {clean_out}"
+    );
+
+    for dir in &dirs {
+        assert!(
+            dir.exists(),
+            "{} should still exist after clean",
+            dir.display()
+        );
+        let leftover: Vec<_> = fs::read_dir(dir).unwrap().collect();
+        assert!(
+            leftover.is_empty(),
+            "{} should be empty after clean, found {} entries",
+            dir.display(),
+            leftover.len()
+        );
+    }
+
+    assert!(state_file.exists(), "state files must not be touched");
+    assert!(
+        packages_file.exists(),
+        "installed packages must not be touched"
+    );
+
+    // A second clean against an already-empty layout is a no-op, not an error.
+    let again = run(root, &["clean"]);
+    assert_success(&again, "second clean");
+    let again_out = stdout(&again);
+    assert!(
+        again_out.contains("cleaned 0 entries"),
+        "second clean reports nothing freed: {again_out}"
+    );
+}
+
+#[test]
 fn tome_build_all_builds_every_rune() {
     let root = TempDir::new().unwrap();
     let root = root.path();

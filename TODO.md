@@ -20,21 +20,46 @@ order. The theme: the catalog/solver/install machinery is done, but nothing has 
 Not part of the original MVP design, but a package manager wants these before it is trustworthy
 in daily use. Listed so they are tracked, not necessarily scheduled.
 
-- **Concurrency lock.** Two `grm install`/`remove` runs against the same root can race the shared
-  state. Guard mutation with an install-root lockfile.
-- **Orphan GC / autoremove.** `remove` deletes one package; nothing reclaims dependencies left
-  unreferenced afterwards.
-- **`grm clean`.** The archive cache, build output, and `transactions/` dirs accumulate with no
-  way to reclaim space.
-- **Pin/hold.** No way to hold a package back from `upgrade`.
-- **Polish.** Shell completions, man pages, `grm` self-update, and an actual *published* `core`
-  catalog to install from.
+- **`grm self-update`.** Blocked on the release-engineering work below: until tagged, signed
+  release artifacts exist for each target, a self-update command has nothing to download.
+- **Published `core` catalog.** Same story — the runes are designed but no public tome ships
+  the prebuilt archives yet.
+
+## Trust / supply chain
+
+The README sells "safe by construction," but verification currently stops at sha256 in plaintext
+manifests, so a compromise of the tome git host or the static archive host is a full compromise.
+These close that gap.
+
+- **Signed tomes / signed `index.nuon`.** Require signed tome commits (or a signed
+  `index.nuon`) and an installer-side trust list (`grm tome add --signer …`). Likely minisign
+  or sigstore — pick before publishing the `core` tome, since signatures are easier to require
+  from day one than to retrofit.
+- **`SECURITY.md` + disclosure address.** Runes execute arbitrary build scripts; the project
+  needs a documented disclosure channel before a wider audience finds it.
+
+## Release engineering
+
+Today `.github/workflows/` has only `lint.yml`, and `cargo install grimoire` is the only install
+path the README advertises — which is in tension with the "one binary, every desktop" promise.
+
+- **Multi-OS CI matrix.** Run `cargo test` on linux/macos/windows, plus an MSRV job pinned to
+  the `rust-version` in `Cargo.toml`, alongside the existing `cargo fmt --check` and
+  `cargo clippy --all-targets -- -D warnings`.
+- **Release workflow.** Tag-triggered job that cross-builds `grm` for every supported target
+  triple and attaches the archives to a GitHub release, so users on Linux/macOS/Windows can
+  install without a Rust toolchain.
+- **`CHANGELOG.md`.** The lockfile, `index.nuon`, and `addendum.nuon` schemas are user-visible;
+  we want a changelog in place before the first breaking change ships.
 
 ## Documentation
 
 - Module-level `//!` docs cover every module and `///` rustdoc documents key types and command
   entry points, so `cargo doc --no-deps` builds warning-free. Extend coverage as the surface
-  grows; no separate prose docs for now.
+  grows.
+- Prose docs in `docs/`: a threat model (what `grm` does and does not trust, given git-native
+  catalogs + arbitrary build scripts + addenda) and an operating-layout reference (where state
+  lives under the install root, what is safe to delete, how to relocate via `GRIMOIRE_ROOT`).
 
 ## Done
 
@@ -84,6 +109,40 @@ in daily use. Listed so they are tracked, not necessarily scheduled.
     package metadata patches to rune source candidates before search/info, resolution, source
     fetching, and builds. Patched `build_flags` are exposed as inert `ctx.build_flags`; no
     addendum hooks execute.
+12. **Cascade autoremove on `grm remove`** — removing a package also removes any runtime
+    dependencies it pulled in that no other installed package still lists in its
+    `runtime_deps`, walked transitively. Build deps are not considered; once a package is
+    installed they are no longer load-bearing for it. Each cascaded remove is its own
+    transaction, so a failure mid-cascade leaves earlier removals committed and a clean state.
+14. **Ephemeral build dependencies** — a source install resolves and installs the rune's
+    `deps.build`, runs the build, then uninstalls every build dep it pulled in itself at the
+    end of the run (build deps the user already had stay; build deps now referenced by an
+    installed package's `runtime_deps` stay). The downloaded `.tar.zst` remains in
+    `cache/archives/`, so a future install that needs them is a cheap re-extract rather than
+    a re-download or re-build.
+13. **`grm clean`** — empties `cache/sources/`, `cache/archives/`, `cache/builds/`, and any
+    leftover `transactions/` staging directories under the install root, reporting bytes
+    freed. Installed packages, shims, state, tomes, addenda, and the lockfile are untouched;
+    everything cleaned is reproducible from the original sources on the next install.
+15. **Concurrency lock** — mutating CLI entry points (`install`, `remove`, `upgrade`, `clean`,
+    `hold`/`unhold`, `tome add/update/remove`, `addendum add/remove`) acquire an exclusive
+    OS-level advisory lock on `<install root>/.grimoire-lock` before doing any work and hold
+    it until the command exits, so two concurrent mutating runs can't corrupt shared state.
+    Read-only commands (`list`, `search`, `info`, `doctor`, `--dry-run` previews) skip it.
+    Crash-safe: the file lock is released by the OS at process exit, never leaves a stale
+    sentinel.
+16. **Hold / unhold** — `grm hold <pkg>` (alias `pin`) and `grm unhold <pkg>` (alias `unpin`)
+    flip a `held: true` flag on the package's state record. `grm upgrade` skips held packages
+    with a message; `grm upgrade <held>` named explicitly fails fast pointing at `grm unhold`.
+    The flag is preserved across reinstalls and shown in `grm list` as a fourth column.
+17. **`--dry-run` / `--explain`** — on `grm install` and `grm upgrade`, prints the solver's
+    resolved plan (package, version, source rune or binary archive) to stdout and exits
+    without touching state, fetching, or building. Non-mutating, so it bypasses the
+    install-root lock and can preview while another `grm` is mid-mutation.
+18. **Shell completions and man pages** — `grm completions <shell>` (bash/zsh/fish/powershell/
+    elvish) writes a completion script to stdout via `clap_complete`. `grm man --output <dir>`
+    renders `grm.1` plus a `grm-<sub>.1` per subcommand via `clap_mangen`. Both derive from
+    the same `Cli` definition the binary uses, so they stay in sync as the CLI evolves.
 
 ## Testing gaps (AGENTS.md §8)
 
