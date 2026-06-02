@@ -1,3 +1,7 @@
+//! Native git operations for tome repositories, via `gix` (no shelling out, AGENTS.md §1a):
+//! cloning a tome at a ref, fetching updates, and resolving the checked-out commit so the
+//! lockfile can pin exactly what was synced.
+
 use anyhow::{Context, Result, anyhow};
 use std::{path::Path, sync::atomic::AtomicBool};
 

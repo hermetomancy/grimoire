@@ -1,6 +1,15 @@
+//! Installing, removing, and upgrading packages.
+//!
+//! [`install`] resolves a package and its dependencies through the solver, then realizes each
+//! step — fetching and verifying a binary archive or building a rune from source — into the
+//! install root. Every install stages into a transaction directory and promotes with atomic
+//! renames, rolling back shims and state on failure (AGENTS.md §4). `--locked` constrains
+//! resolution to the lockfile's recorded versions and hashes for a reproducible reinstall.
+
 use anyhow::{Context, Result, bail};
+use semver::Version;
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
@@ -9,103 +18,134 @@ use std::{
 use crate::{
     archive, build,
     cli::{InstallArgs, PackageArg},
-    lock,
-    model::{PackageMetadata, PackageState, validate_relative_package_path, validate_target},
+    fetch, lock,
+    model::{
+        Dependency, PackageMetadata, PackageState, validate_relative_package_path, validate_sha256,
+        validate_target,
+    },
     nu::{
         nuon_io,
-        runtime::{EmbeddedNuRuntime, RuneRuntime},
+        runtime::{BuildEnv, EmbeddedNuRuntime, RuneRuntime},
     },
     paths,
-    progress::{status, success},
-    resolve,
+    progress::{report, status, success},
+    solve::{self, Origin, Plan, PlanStep},
 };
 
-/// The archive an install will consume, plus the expected hash supplied by whatever resolved
-/// it (a tome index entry) and the runtime dependencies that must also be installed. The CLI
-/// `--sha256` flag takes precedence over the resolved hash when present.
-struct ResolvedInstall {
-    archive: PathBuf,
-    expected_hash: Option<String>,
-    runtime_deps: Vec<String>,
-}
-
-/// Shared state for one top-level install and its dependency tree. `visiting` records names
-/// currently on the install stack so a cycle (or diamond) terminates instead of recursing
-/// forever. `installed` is the set of already-installed package names, read from disk once up
-/// front and updated as packages land, so dependency checks never re-scan the state directory.
-struct InstallScope {
-    visiting: HashSet<String>,
-    installed: HashSet<String>,
+/// Drives one top-level install and its dependency tree. `installed` maps already-installed
+/// package names to their versions; it is read from disk once up front, handed to the solver so
+/// it can reuse satisfying installs, and updated as packages land. `building` records names whose
+/// source build is in progress so a build-dependency cycle terminates instead of recursing.
+struct Installer {
+    installed: BTreeMap<String, Version>,
+    /// Lockfile pins for a `--locked` install: resolution is constrained to these exact
+    /// versions/hashes. `None` for an ordinary install, which resolves freely.
+    pins: Option<solve::Pins>,
+    building: HashSet<String>,
+    /// Packages actually (re)installed during this run, in install order. Used to print a final
+    /// summary and to detect the "nothing to do" case where every requested package was already
+    /// satisfied and the solver produced no steps.
+    installed_now: Vec<String>,
 }
 
 pub fn install(args: InstallArgs) -> Result<()> {
-    let installed = installed_states()?
-        .into_iter()
-        .map(|state| state.name)
-        .collect();
-    let mut scope = InstallScope {
-        visiting: HashSet::new(),
-        installed,
+    let pins = if args.locked {
+        Some(load_pins()?)
+    } else {
+        None
     };
-    install_inner(&args, &mut scope)
-}
-
-/// Installs `args.package` and its dependencies.
-fn install_inner(args: &InstallArgs, scope: &mut InstallScope) -> Result<()> {
-    if !scope.visiting.insert(args.package.clone()) {
-        return Ok(());
+    // Under `--locked`, only reuse an installed package when it matches its pin; an installed
+    // version that drifted from the lock must be re-resolved to the pinned one.
+    let mut installed = installed_versions()?;
+    if let Some(pins) = &pins {
+        installed.retain(|name, version| pins.get(name).is_some_and(|pin| &pin.version == version));
     }
 
-    let resolved = resolve_install_archive(args, scope)?;
-    let mut runtime_deps = resolved.runtime_deps.clone();
-    // A local archive reports no runtime deps from resolution; its embedded metadata is the
-    // authority. `install_archive` returns those so cycle/idempotency guards still apply.
-    let metadata = install_archive(args, resolved)?;
-    scope.installed.insert(metadata.name);
-    for dep in metadata.runtime_deps {
-        if !runtime_deps.contains(&dep) {
-            runtime_deps.push(dep);
-        }
+    let mut installer = Installer {
+        installed,
+        pins,
+        building: HashSet::new(),
+        installed_now: Vec::new(),
+    };
+
+    if args.from_source || args.package.ends_with(".rn") {
+        installer.install_source_root(&args.package)?;
+    } else if PathBuf::from(&args.package).exists() || args.package.ends_with(".tar.zst") {
+        installer.install_local_root(&args.package, args.sha256.clone())?;
+    } else {
+        installer.install_named(&args.package)?;
     }
-    install_runtime_deps(&runtime_deps, args.quiet, scope)
+
+    // A resolve that reuses an already-satisfying install produces no steps, so nothing above
+    // reported anything. Tell the user the request was a no-op rather than printing silence.
+    if installer.installed_now.is_empty() {
+        report(&format!(
+            "{} is already installed and up to date",
+            args.package
+        ));
+    }
+    Ok(())
 }
 
-/// The installed package's name and the runtime dependency names declared in its embedded
-/// metadata, returned so the caller can record it as installed and pull its runtime deps in.
+/// Loads lockfile pins for a `--locked` install. A missing lockfile is a hard error: there is
+/// nothing to reproduce, so the flag cannot be honored.
+fn load_pins() -> Result<solve::Pins> {
+    let Some(packages) = lock::read_locked_packages()? else {
+        bail!("no lockfile found; run an install first to record `grimoire.lock.nuon`");
+    };
+    Ok(packages
+        .into_iter()
+        .map(|pkg| {
+            (
+                pkg.name,
+                solve::Pin {
+                    version: pkg.version,
+                    archive_hash: pkg.archive_hash,
+                },
+            )
+        })
+        .collect())
+}
+
+/// The installed package's name, concrete version, and the runtime dependencies declared in its
+/// embedded metadata, returned so the caller can record it as installed and resolve those deps.
 struct InstalledArchive {
     name: String,
-    runtime_deps: Vec<String>,
+    version: Version,
+    runtime_deps: Vec<Dependency>,
 }
 
-/// Verifies, extracts, and promotes the resolved archive into the install root.
-fn install_archive(args: &InstallArgs, resolved: ResolvedInstall) -> Result<InstalledArchive> {
-    let archive_path = resolved.archive;
+/// Verifies, extracts, and promotes the resolved archive into the install root. `expected_hash`
+/// is the hash the archive must match before it is read (from `--sha256` or a tome index entry);
+/// `None` skips the check, which only happens for a local archive installed without `--sha256`.
+fn install_archive(archive_path: &Path, expected_hash: Option<String>) -> Result<InstalledArchive> {
     if !archive_path.exists() {
         bail!(
             "package archive `{}` does not exist",
             archive_path.display()
         );
     }
-
-    // Verify integrity before the archive is read or extracted. The expected hash comes from
-    // `--sha256` if given, otherwise from the resolving tome index entry. A mismatch is fatal.
-    let expected = args.sha256.clone().or(resolved.expected_hash);
-    status(args.quiet, "hashing archive");
-    let archive_hash = archive::archive_hash(&archive_path)?;
-    if let Some(expected) = &expected {
-        archive::verify_hash(&archive_hash, expected)
-            .with_context(|| format!("verify archive {}", archive_path.display()))?;
-        success(args.quiet, "archive hash verified");
+    if let Some(expected) = &expected_hash {
+        validate_sha256(expected, "expected archive hash")?;
     }
 
-    status(
-        args.quiet,
-        &format!("validating archive paths ({})", archive_path.display()),
-    );
-    validate_archive_paths(&archive_path)?;
+    // Verify integrity before the archive is read or extracted. A mismatch is fatal.
+    status("hashing archive");
+    let archive_hash = archive::archive_hash(archive_path)?;
+    if let Some(expected) = &expected_hash {
+        archive::verify_hash(&archive_hash, expected)
+            .with_context(|| format!("verify archive {}", archive_path.display()))?;
+        success("archive hash verified");
+    }
 
-    status(args.quiet, "reading package metadata");
-    let metadata = inspect_archive(&archive_path)?;
+    status(&format!(
+        "validating archive paths ({})",
+        archive_path.display()
+    ));
+    validate_archive_paths(archive_path)?;
+
+    status("reading package metadata");
+    let metadata = inspect_archive(archive_path)?;
     validate_target(&metadata, &paths::target_triple())?;
 
     let root = paths::install_root()?;
@@ -118,16 +158,13 @@ fn install_archive(args: &InstallArgs, resolved: ResolvedInstall) -> Result<Inst
     let staging_dir = transaction.path().join("package");
     fs::create_dir_all(&staging_dir)?;
 
-    status(
-        args.quiet,
-        &format!(
-            "extracting into transaction ({})",
-            transaction.path().display()
-        ),
-    );
-    extract_archive(&archive_path, &staging_dir)?;
+    status(&format!(
+        "extracting into transaction ({})",
+        transaction.path().display()
+    ));
+    extract_archive(archive_path, &staging_dir)?;
 
-    status(args.quiet, "validating extracted files");
+    status("validating extracted files");
     validate_bins(&metadata, &staging_dir)?;
 
     let package_dir = root
@@ -139,130 +176,155 @@ fn install_archive(args: &InstallArgs, resolved: ResolvedInstall) -> Result<Inst
     // transaction so that a failure restores the previously installed version.
     let mut tx = Transaction::new();
 
-    status(
-        args.quiet,
-        &format!("promoting package to ({})", package_dir.display()),
-    );
+    status(&format!("promoting package to ({})", package_dir.display()));
     let replaced = promote_package(&mut tx, &staging_dir, &package_dir)?;
 
-    status(args.quiet, "linking shims");
+    status("linking shims");
     link_bins(&mut tx, &metadata, &root, &package_dir)?;
 
-    status(args.quiet, "writing package state");
+    status("writing package state");
     write_state(&mut tx, &root, &metadata, &archive_hash)?;
+
+    rebuild_lock(&mut tx)?;
 
     tx.commit();
     if let Some(replaced) = replaced {
         let _ = fs::remove_dir_all(replaced);
     }
 
-    lock::rebuild()?;
-
-    success(
-        args.quiet,
-        &format!("installed {} {}", metadata.name, metadata.version),
-    );
-    println!(
+    report(&format!(
         "installed {} {} into {}",
         metadata.name,
         metadata.version,
         root.display()
-    );
+    ));
+    let version = Version::parse(&metadata.version)
+        .with_context(|| format!("package version `{}` is not valid semver", metadata.version))?;
     Ok(InstalledArchive {
         name: metadata.name,
+        version,
         runtime_deps: metadata.deps.runtime,
     })
 }
 
-fn resolve_install_archive(
-    args: &InstallArgs,
-    scope: &mut InstallScope,
-) -> Result<ResolvedInstall> {
-    if args.from_source || args.package.ends_with(".rn") {
-        return source_install(&args.package, args.quiet, scope);
+impl Installer {
+    /// Installs `name` and its transitive runtime dependencies. The solver picks a concrete
+    /// version for every package in the graph and orders the plan so dependencies install first.
+    fn install_named(&mut self, name: &str) -> Result<()> {
+        let plan = solve::resolve(
+            &[Dependency::any(name)],
+            &self.installed,
+            self.pins.as_ref(),
+        )?;
+        self.execute_plan(plan)
     }
 
-    let package_path = PathBuf::from(&args.package);
-    if package_path.exists() || args.package.ends_with(".tar.zst") {
-        // A local archive carries its dependency list inside `.grimoire/package.nuon`, which
-        // `install_archive` reads later; runtime deps are picked up from that metadata there.
-        return Ok(ResolvedInstall {
-            archive: package_path,
-            expected_hash: None,
-            runtime_deps: Vec::new(),
-        });
+    /// Builds `package` (a rune path or known name) from source as the root, then resolves and
+    /// installs its runtime dependencies through the solver.
+    fn install_source_root(&mut self, package: &str) -> Result<()> {
+        let rune = build::resolve_rune(package)?;
+        let installed = self.build_and_install(&rune)?;
+        let runtime = installed.runtime_deps.clone();
+        self.record(installed);
+        self.install_deps(&runtime)
     }
 
-    // A bare package name: prefer a verified binary archive, fall back to a source build.
-    if let Some(resolved) = resolve::resolve_binary(&args.package, args.quiet)? {
-        return Ok(ResolvedInstall {
-            archive: resolved.path,
-            expected_hash: Some(resolved.entry.archive_hash),
-            runtime_deps: resolved.entry.runtime_deps,
-        });
+    /// Installs a local pre-built archive as the root, verifying it against `sha256` when given,
+    /// then resolves and installs the runtime dependencies its embedded metadata declares.
+    fn install_local_root(&mut self, package: &str, sha256: Option<String>) -> Result<()> {
+        let installed = install_archive(&PathBuf::from(package), sha256)?;
+        let runtime = installed.runtime_deps.clone();
+        self.record(installed);
+        self.install_deps(&runtime)
     }
 
-    source_install(&args.package, args.quiet, scope)
-}
-
-/// Builds `package` from source after installing its build dependencies. Build deps must be
-/// present before the rune runs, so they are installed up front; runtime deps come back to the
-/// caller to be installed alongside the package.
-fn source_install(package: &str, quiet: bool, scope: &mut InstallScope) -> Result<ResolvedInstall> {
-    let metadata = read_rune_metadata(package, quiet)?;
-    install_build_deps(&metadata, quiet, scope)?;
-    Ok(ResolvedInstall {
-        archive: build_from_source(package, quiet)?,
-        expected_hash: None,
-        runtime_deps: metadata.deps.runtime.clone(),
-    })
-}
-
-fn read_rune_metadata(package: &str, quiet: bool) -> Result<PackageMetadata> {
-    let rune = build::resolve_rune(package, quiet)?;
-    EmbeddedNuRuntime
-        .package_metadata(&rune)
-        .with_context(|| format!("read rune metadata {}", rune.display()))
-}
-
-fn install_build_deps(
-    metadata: &PackageMetadata,
-    quiet: bool,
-    scope: &mut InstallScope,
-) -> Result<()> {
-    for dep in metadata.deps.build_for(&paths::target_triple()) {
-        install_dep(&dep, quiet, scope)
-            .with_context(|| format!("install build dependency `{dep}`"))?;
+    /// Resolves `deps` into a plan and executes it. Already-installed satisfying packages are
+    /// reused by the solver and produce no step.
+    fn install_deps(&mut self, deps: &[Dependency]) -> Result<()> {
+        if deps.is_empty() {
+            return Ok(());
+        }
+        let plan = solve::resolve(deps, &self.installed, self.pins.as_ref())?;
+        self.execute_plan(plan)
     }
-    Ok(())
-}
 
-fn install_runtime_deps(deps: &[String], quiet: bool, scope: &mut InstallScope) -> Result<()> {
-    for dep in deps {
-        install_dep(dep, quiet, scope)
-            .with_context(|| format!("install runtime dependency `{dep}`"))?;
+    fn execute_plan(&mut self, plan: Plan) -> Result<()> {
+        for step in plan.steps {
+            self.execute_step(step)?;
+        }
+        Ok(())
     }
-    Ok(())
-}
 
-/// Installs a dependency by name unless it is already installed. Resolution is name-based:
-/// there is no version solver yet, so the latest archive a tome offers (or a source build) is
-/// taken. The scope's `visiting` set guards against cycles across the whole dependency tree.
-fn install_dep(name: &str, quiet: bool, scope: &mut InstallScope) -> Result<()> {
-    if scope.installed.contains(name) {
-        return Ok(());
+    /// Realizes one planned step: fetch and verify a binary archive, or build a rune from source.
+    /// Runtime dependencies are separate, earlier steps in the plan, so they are already
+    /// installed by the time a step runs.
+    fn execute_step(&mut self, step: PlanStep) -> Result<()> {
+        let installed = match step.origin {
+            Origin::Binary { root, entry } => {
+                let archive = fetch::fetch_verified(
+                    &entry.archive,
+                    &root,
+                    &entry.archive_hash,
+                    &paths::archive_cache_dir()?,
+                    &format!("archive `{}` {}", entry.name, entry.version),
+                )?;
+                install_archive(&archive, Some(entry.archive_hash))
+                    .with_context(|| format!("install `{}` {}", step.name, step.version))?
+            }
+            Origin::Source { rune } => self
+                .build_and_install(&rune)
+                .with_context(|| format!("install `{}` {} from source", step.name, step.version))?,
+        };
+        self.record(installed);
+        Ok(())
     }
-    let args = InstallArgs {
-        package: name.to_owned(),
-        from_source: false,
-        sha256: None,
-        quiet,
-    };
-    install_inner(&args, scope)
-}
 
-fn build_from_source(package: &str, quiet: bool) -> Result<PathBuf> {
-    build::build_package(package, &paths::build_output_dir()?, quiet)
+    /// Builds the rune at `rune` from source and installs the resulting archive. Build
+    /// dependencies are resolved and installed first so they are present when the rune runs; the
+    /// `building` guard rejects a build dependency that cycles back to the package being built.
+    fn build_and_install(&mut self, rune: &Path) -> Result<InstalledArchive> {
+        let metadata = EmbeddedNuRuntime
+            .package_metadata(rune)
+            .with_context(|| format!("read rune metadata {}", rune.display()))?;
+        if !self.building.insert(metadata.name.clone()) {
+            bail!("build dependency cycle involving `{}`", metadata.name);
+        }
+        let result = (|| {
+            let expected_hash = match &self.pins {
+                Some(pins) => Some(
+                    pins.get(&metadata.name)
+                        .with_context(|| {
+                            format!(
+                                "`{}` is required but is not recorded in the lockfile; cannot install --locked",
+                                metadata.name
+                            )
+                        })?
+                        .archive_hash
+                        .clone(),
+                ),
+                None => None,
+            };
+            let build_deps = metadata.deps.build_for(&paths::target_triple());
+            self.install_deps(&build_deps)
+                .with_context(|| format!("install build dependencies for `{}`", metadata.name))?;
+            let env = BuildEnv {
+                path_dirs: build_dep_bin_dirs(&build_deps)?,
+            };
+            let archive = build::build_package_with_env(
+                &rune.to_string_lossy(),
+                &paths::build_output_dir()?,
+                &env,
+            )?;
+            install_archive(&archive, expected_hash)
+        })();
+        self.building.remove(&metadata.name);
+        result
+    }
+
+    fn record(&mut self, installed: InstalledArchive) {
+        self.installed_now.push(installed.name.clone());
+        self.installed.insert(installed.name, installed.version);
+    }
 }
 
 pub fn list() -> Result<()> {
@@ -296,6 +358,67 @@ pub fn installed_states() -> Result<Vec<PackageState>> {
     }
     states.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(states)
+}
+
+/// Reinstalls each package in `names` at the newest available version, for `upgrade`. The named
+/// packages are dropped from the known-installed set so the solver re-resolves them to the newest
+/// candidate instead of reusing the currently installed (older) version; every other installed
+/// package is still reused to satisfy dependencies.
+pub fn upgrade_packages(names: &[String]) -> Result<()> {
+    let mut installed = installed_versions()?;
+    for name in names {
+        installed.remove(name);
+    }
+    let mut installer = Installer {
+        installed,
+        pins: None,
+        building: HashSet::new(),
+        installed_now: Vec::new(),
+    };
+    for name in names {
+        installer
+            .install_named(name)
+            .with_context(|| format!("upgrade `{name}`"))?;
+    }
+    Ok(())
+}
+
+/// Installed package names mapped to their concrete versions, for the solver. Recorded state
+/// versions were validated as semver when written, so an unparsable one is skipped defensively.
+fn installed_versions() -> Result<BTreeMap<String, Version>> {
+    let mut versions = BTreeMap::new();
+    for state in installed_states()? {
+        if let Ok(version) = Version::parse(&state.version) {
+            versions.insert(state.name, version);
+        }
+    }
+    Ok(versions)
+}
+
+fn build_dep_bin_dirs(deps: &[Dependency]) -> Result<Vec<PathBuf>> {
+    let root = paths::install_root()?;
+    let states = installed_states()?;
+    let mut dirs = Vec::new();
+    for dep in deps {
+        let Some(state) = states.iter().find(|state| state.name == dep.name) else {
+            continue;
+        };
+        for path in state.bins.values() {
+            let bin = root
+                .join("packages")
+                .join(&state.name)
+                .join(&state.version)
+                .join(path);
+            let Some(parent) = bin.parent() else {
+                continue;
+            };
+            let dir = parent.to_path_buf();
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+    }
+    Ok(dirs)
 }
 
 pub fn remove(args: PackageArg) -> Result<()> {
@@ -353,13 +476,13 @@ pub fn remove(args: PackageArg) -> Result<()> {
     }
     fs::remove_file(&state_path)?;
 
-    lock::rebuild()?;
+    rebuild_lock(&mut tx)?;
 
     tx.commit();
     if had_package {
         let _ = fs::remove_dir_all(&backup);
     }
-    println!("removed {}", args.package);
+    report(&format!("removed {}", args.package));
     Ok(())
 }
 
@@ -527,11 +650,16 @@ fn write_shim(shim: &Path, source: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn write_shim(shim: &Path, source: &Path) -> Result<()> {
-    fs::write(
-        shim,
-        format!("@echo off\r\n\"{}\" %*\r\n", source.display()),
-    )
-    .with_context(|| format!("write shim {}", shim.display()))
+    fs::write(shim, windows_shim_contents(source))
+        .with_context(|| format!("write shim {}", shim.display()))
+}
+
+/// The body of a Windows `.cmd` shim that forwards all arguments to the real executable.
+/// Factored out (and compiled on Windows or under test) so its exact contents can be unit-tested
+/// on any host: a batch shim must silence echo, quote the target path, and pass `%*`.
+#[cfg(any(windows, test))]
+fn windows_shim_contents(source: &Path) -> String {
+    format!("@echo off\r\n\"{}\" %*\r\n", source.display())
 }
 
 enum PreviousShim {
@@ -578,8 +706,18 @@ fn write_state(
         target: metadata.target.clone(),
         archive_hash: archive_hash.to_owned(),
         bins: metadata.bins.clone(),
-        runtime_deps: metadata.deps.runtime.clone(),
-        build_deps: metadata.deps.build_for(&paths::target_triple()),
+        runtime_deps: metadata
+            .deps
+            .runtime
+            .iter()
+            .map(|dep| dep.name.clone())
+            .collect(),
+        build_deps: metadata
+            .deps
+            .build_for(&paths::target_triple())
+            .iter()
+            .map(|dep| dep.name.clone())
+            .collect(),
         source_hashes: metadata
             .sources
             .iter()
@@ -611,8 +749,29 @@ fn write_state(
     nuon_io::write_nuon(&state_path, &state.to_value())
 }
 
+fn rebuild_lock(tx: &mut Transaction) -> Result<()> {
+    let lock_path = lock::lock_path()?;
+    let previous = if lock_path.exists() {
+        Some(fs::read(&lock_path)?)
+    } else {
+        None
+    };
+    {
+        let lock_path = lock_path.clone();
+        tx.on_rollback(move || match &previous {
+            Some(bytes) => {
+                let _ = fs::write(&lock_path, bytes);
+            }
+            None => {
+                let _ = fs::remove_file(&lock_path);
+            }
+        });
+    }
+    lock::rebuild()
+}
+
 /// Best-effort, RAII-style rollback for a multi-step install. Rollback actions run in
-/// reverse registration order when the transaction is dropped without [`commit`]ting,
+/// reverse registration order when the transaction is dropped without [`commit`](Transaction::commit)ting,
 /// e.g. when an install step returns an error via `?`.
 #[derive(Default)]
 struct Transaction {
@@ -670,4 +829,29 @@ fn make_executable(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn make_executable(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_shim_forwards_arguments_to_target() {
+        let shim =
+            windows_shim_contents(Path::new(r"C:\grimoire\packages\hello\0.1.0\bin\hello.exe"));
+        // CRLF line endings so cmd.exe parses the batch file correctly on Windows.
+        assert!(shim.starts_with("@echo off\r\n"), "shim: {shim:?}");
+        assert!(shim.ends_with("\r\n"), "shim: {shim:?}");
+        // The target path is quoted (so spaces are tolerated) and `%*` forwards every argument.
+        assert!(
+            shim.contains("\"C:\\grimoire\\packages\\hello\\0.1.0\\bin\\hello.exe\" %*"),
+            "shim: {shim:?}"
+        );
+        // No stray un-quoted invocation that would break on a spaced path.
+        assert_eq!(
+            shim.matches('"').count(),
+            2,
+            "exactly one quoted target: {shim:?}"
+        );
+    }
 }

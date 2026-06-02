@@ -1,3 +1,7 @@
+//! Reading and writing NUON documents through the Nushell engine. All of Grimoire's on-disk
+//! state — package state, indexes, the lockfile — is NUON, parsed to and serialized from
+//! `nu_protocol::Value` here so the data layer stays declarative and inert (AGENTS.md §3).
+
 use anyhow::{Result, anyhow};
 use nu_protocol::{Value, engine::EngineState};
 use std::{fs, io::Write, path::Path};
