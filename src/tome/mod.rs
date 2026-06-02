@@ -7,11 +7,12 @@ use std::{
 mod git;
 
 use crate::{
-    cli::{TomeAddArgs, TomeRemoveArgs, TomeUpdateArgs},
+    cli::{TomeAddArgs, TomeBuildArgs, TomeInitArgs, TomeRemoveArgs, TomeRuneArgs, TomeUpdateArgs},
     index,
     model::{
-        IndexEntry, TomeManifest, TomePackages, TomeState, validate_relative_package_path,
-        validate_tome_name, validate_tome_ref, validate_tome_url,
+        IndexEntry, PackageIndex, TomeManifest, TomePackages, TomeState, validate_package_name,
+        validate_package_version, validate_relative_package_path, validate_tome_name,
+        validate_tome_ref, validate_tome_url,
     },
     nu::{
         nuon_io,
@@ -50,6 +51,195 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
     nuon_io::write_nuon(&state_path, &state.to_value())?;
     println!("added tome {name}");
     Ok(())
+}
+
+/// Scaffolds a new tome: a self-naming `tome.rn` manifest, empty `runes/` and `sources/`
+/// directories, and an empty `index.nuon`. The result is ready for `grm tome rune` to add
+/// package definitions, and for `grm tome add <path>` once it holds at least one rune.
+pub fn init(args: TomeInitArgs) -> Result<()> {
+    validate_tome_name(&args.name)?;
+
+    let root = &args.path;
+    let manifest_path = root.join("tome.rn");
+    if manifest_path.exists() {
+        bail!("{} already contains a tome.rn", root.display());
+    }
+
+    fs::create_dir_all(root.join("runes"))?;
+    fs::create_dir_all(root.join("sources"))?;
+
+    let description = args
+        .description
+        .unwrap_or_else(|| format!("{} tome", args.name));
+    fs::write(
+        &manifest_path,
+        tome_manifest_template(&args.name, &description),
+    )?;
+
+    let index_path = root.join("index.nuon");
+    if !index_path.exists() {
+        fs::write(&index_path, "{\n  packages: []\n}\n")?;
+    }
+
+    println!("created tome {} in {}", args.name, root.display());
+    println!(
+        "next: add a package with `grm tome rune <name> --path {}`",
+        root.display()
+    );
+    Ok(())
+}
+
+/// Scaffolds a starter rune (`runes/<name>.rn`) in an existing tome. The template is a valid,
+/// buildable package definition with placeholders for the author to fill in.
+pub fn rune(args: TomeRuneArgs) -> Result<()> {
+    validate_package_name(&args.name)?;
+    validate_package_version(&args.version)?;
+
+    let root = &args.path;
+    if !root.join("tome.rn").exists() {
+        bail!("{} is not a tome (missing tome.rn)", root.display());
+    }
+
+    let runes_dir = root.join("runes");
+    fs::create_dir_all(&runes_dir)?;
+    let rune_path = runes_dir.join(format!("{}.rn", args.name));
+    if rune_path.exists() {
+        bail!("rune already exists: {}", rune_path.display());
+    }
+
+    fs::write(&rune_path, rune_template(&args.name, &args.version))?;
+    println!("created rune {} in {}", args.name, rune_path.display());
+    Ok(())
+}
+
+/// Builds a tome's rune into a `.tar.zst` under `packages/` and registers (or replaces) its
+/// entry in the tome's package index, so the prebuilt archive can be published from the tome.
+/// Only a local package repo (`packages.repo = "."`) is supported for now.
+pub fn build(args: TomeBuildArgs) -> Result<()> {
+    validate_package_name(&args.package)?;
+
+    let root = &args.path;
+    let manifest_path = root.join("tome.rn");
+    if !manifest_path.exists() {
+        bail!("{} is not a tome (missing tome.rn)", root.display());
+    }
+
+    let manifest = EmbeddedNuRuntime.tome_manifest(&manifest_path)?;
+    let packages = manifest.packages.as_ref().with_context(|| {
+        format!(
+            "tome `{}` declares no `packages` index to publish into",
+            manifest.name
+        )
+    })?;
+    if packages.repo != "." {
+        bail!(
+            "publishing to external package repos is not supported yet (packages.repo must be \".\")"
+        );
+    }
+
+    let rune_path = root.join("runes").join(format!("{}.rn", args.package));
+    if !rune_path.exists() {
+        bail!("rune not found: {}", rune_path.display());
+    }
+
+    let packages_dir = root.join("packages");
+    let archive =
+        crate::build::build_package(&rune_path.to_string_lossy(), &packages_dir, args.quiet)?;
+    let archive_hash = crate::archive::archive_hash(&archive)?;
+    let archive_file = archive
+        .file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("archive path has no file name: {}", archive.display()))?;
+
+    let metadata = EmbeddedNuRuntime.package_metadata(&rune_path)?;
+    let target = paths::target_triple();
+    let entry = IndexEntry {
+        name: metadata.name.clone(),
+        version: metadata.version.clone(),
+        target: target.clone(),
+        archive: format!("packages/{archive_file}"),
+        archive_hash,
+        runtime_deps: metadata.deps.runtime.clone(),
+    };
+
+    let index_path = root.join(&packages.index);
+    let mut catalog = if index_path.exists() {
+        PackageIndex::from_value(nuon_io::read_nuon(&index_path)?)?
+    } else {
+        PackageIndex {
+            packages: Vec::new(),
+        }
+    };
+    catalog.upsert(entry);
+    nuon_io::write_nuon(&index_path, &catalog.to_value())?;
+
+    println!(
+        "built {} {} ({target}) into {}",
+        metadata.name,
+        metadata.version,
+        archive.display()
+    );
+    println!("registered in {}", index_path.display());
+    Ok(())
+}
+
+fn tome_manifest_template(name: &str, description: &str) -> String {
+    const TEMPLATE: &str = r#"export const tome = {
+  name: "{NAME}"
+  description: "{DESCRIPTION}"
+
+  packages: {
+    repo: "."
+    format: "git"
+    index: "index.nuon"
+  }
+}
+"#;
+    TEMPLATE
+        .replace("{NAME}", name)
+        .replace("{DESCRIPTION}", &escape_nu_string(description))
+}
+
+fn rune_template(name: &str, version: &str) -> String {
+    const TEMPLATE: &str = r##"export const package = {
+  name: "{NAME}"
+  version: "{VERSION}"
+  summary: "TODO: one-line summary of {NAME}"
+  targets: ["linux-x86_64-gnu" "macos-aarch64-darwin" "windows-x86_64-gnu"]
+
+  # Declare sources here; each is fetched and checksum-verified before `build` runs.
+  # sources: {
+  #   main: {
+  #     url: "https://example.com/{NAME}-{VERSION}.tar.gz"
+  #     sha256: "sha256:..."
+  #   }
+  # }
+  sources: {}
+
+  deps: {
+    build: {}
+    runtime: []
+  }
+
+  bins: { {NAME}: "bin/{NAME}" }
+}
+
+export def build [ctx] {
+  # Assemble the package under `$ctx.package_dir`. Verified sources are available at
+  # `$ctx.sources.<name>.path`. Replace this stub with the real build steps.
+  let bin_dir = ($ctx.package_dir | path join "bin")
+  mkdir $bin_dir
+  "#!/usr/bin/env sh\nprintf '{NAME} is not implemented yet\n'\n" | save ($bin_dir | path join "{NAME}")
+}
+"##;
+    TEMPLATE
+        .replace("{NAME}", name)
+        .replace("{VERSION}", version)
+}
+
+/// Escapes a value for embedding inside a double-quoted Nushell string in a generated `.rn`.
+fn escape_nu_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Reads the `name` a tome declares for itself in its root `tome.rn`. Local sources are read

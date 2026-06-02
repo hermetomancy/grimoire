@@ -39,31 +39,54 @@ forked, pinned, reviewed, and rolled back like any other code.
 cargo install grimoire
 ```
 
+This installs the `grm` command.
+
 ## Quick start
 
 ```sh
 # Add a catalog of packages (a "tome")
-grimoire tome add https://github.com/example/core-runes.git --ref main
+grm tome add https://github.com/example/core-runes.git --ref main
 
 # Find and inspect packages
-grimoire search hello
-grimoire info hello
+grm search hello
+grm info hello
 
 # Install, upgrade, and remove
-grimoire install hello
-grimoire upgrade hello
-grimoire remove hello
+grm install hello
+grm upgrade hello
+grm remove hello
 
 # Build from source explicitly
-grimoire install hello --from-source
+grm install hello --from-source
 
 # See what's installed and check your setup
-grimoire list
-grimoire doctor
+grm list
+grm doctor
 ```
+
+Most commands have short aliases, so the above can be terser — `grm in hello`,
+`grm rm hello`, `grm up`, `grm s hello`, `grm ls`. Run `grm --help` to see them all.
 
 Progress messages go to stderr; results go to stdout. Add `--quiet` (`-q`) to silence
 progress while keeping the result.
+
+## Authoring a tome
+
+Create your own catalog and start packaging software:
+
+```sh
+grm tome init mytome --path ./mytome   # scaffold a tome
+grm tome rune widget --path ./mytome   # add a package definition (rune)
+grm tome add ./mytome                  # register it locally to test
+grm install widget --from-source
+grm tome build widget --path ./mytome  # publish a prebuilt archive
+```
+
+`grm tome init` writes a `tome.rn` manifest alongside `runes/`, `sources/`, and an empty
+`index.nuon`. `grm tome rune` drops a templated rune you fill in with the package's
+sources, dependencies, and build steps. `grm tome build` compiles a rune into a verified
+archive under `packages/` and records it in the tome's `index.nuon`, so others can install
+the prebuilt package straight from your tome instead of building from source.
 
 ## Concepts
 

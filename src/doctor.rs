@@ -34,7 +34,7 @@ fn check_tomes() -> Result<usize> {
         if !cache.exists() {
             problems += 1;
             eprintln!(
-                "grimoire: tome `{}` is not synced (run `grimoire tome update {}`)",
+                "grimoire: tome `{}` is not synced (run `grm tome update {}`)",
                 state.name, state.name
             );
         } else if !cache.join("runes").exists() {

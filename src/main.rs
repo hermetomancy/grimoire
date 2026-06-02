@@ -34,6 +34,9 @@ fn run(cli: Cli) -> Result<()> {
         Command::Info(args) => query::info(args),
         Command::Upgrade(args) => query::upgrade(args),
         Command::Tome { command } => match command {
+            TomeCommand::Init(args) => tome::init(args),
+            TomeCommand::Rune(args) => tome::rune(args),
+            TomeCommand::Build(args) => tome::build(args),
             TomeCommand::Add(args) => tome::add(args),
             TomeCommand::Update(args) => tome::update(args),
             TomeCommand::Remove(args) => tome::remove(args),
