@@ -1,4 +1,4 @@
-//! End-to-end smoke tests that drive the built `grimoire` binary.
+//! End-to-end smoke tests that drive the built `grm` binary.
 //!
 //! Each test runs against its own `GRIMOIRE_ROOT` temp directory so they can run in
 //! parallel without sharing install state. The current working directory is the crate
@@ -13,7 +13,7 @@ use std::process::{Command, Output};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-const BIN: &str = env!("CARGO_BIN_EXE_grimoire");
+const BIN: &str = env!("CARGO_BIN_EXE_grm");
 
 type ZstdFileEncoder = zstd::stream::write::Encoder<'static, fs::File>;
 
@@ -272,6 +272,114 @@ fn install_from_example_tome() {
 
     let remove_tome = run(root, &["tome", "remove", "example"]);
     assert_success(&remove_tome, "remove example");
+}
+
+#[test]
+fn tome_init_rune_authoring_flow() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    // Author a tome from scratch: scaffold the tome skeleton, then add a package rune to it.
+    let workspace = TempDir::new().unwrap();
+    let tome_dir = workspace.path().join("mytome");
+    let tome_path = tome_dir.to_str().unwrap();
+
+    let init = run(
+        root,
+        &[
+            "tome",
+            "init",
+            "mytome",
+            "--path",
+            tome_path,
+            "--description",
+            "Authoring smoke test",
+        ],
+    );
+    assert_success(&init, "tome init");
+    assert!(tome_dir.join("tome.rn").exists(), "tome.rn scaffolded");
+    assert!(tome_dir.join("runes").is_dir(), "runes/ scaffolded");
+    assert!(
+        tome_dir.join("index.nuon").exists(),
+        "index.nuon scaffolded"
+    );
+
+    let rune = run(root, &["tome", "rune", "widget", "--path", tome_path]);
+    assert_success(&rune, "tome rune");
+    assert!(
+        tome_dir.join("runes").join("widget.rn").exists(),
+        "widget rune scaffolded"
+    );
+
+    // The scaffolded tome is valid: it can be added and the rune builds and installs.
+    let add = run(root, &["tome", "add", tome_path, "--ref", "main"]);
+    assert_success(&add, "tome add authored");
+
+    let install = run(root, &["install", "widget", "--from-source"]);
+    assert_success(&install, "install authored widget");
+
+    let widget = run_shim(root, "widget");
+    assert_success(&widget, "run authored widget");
+    assert_eq!(
+        stdout(&widget).trim(),
+        "widget is not implemented yet",
+        "authored widget stub output"
+    );
+}
+
+#[test]
+fn tome_build_publishes_prebuilt_into_index() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let workspace = TempDir::new().unwrap();
+    let tome_dir = workspace.path().join("mytome");
+    let tome_path = tome_dir.to_str().unwrap();
+
+    let init = run(root, &["tome", "init", "mytome", "--path", tome_path]);
+    assert_success(&init, "tome init");
+    let rune = run(root, &["tome", "rune", "widget", "--path", tome_path]);
+    assert_success(&rune, "tome rune");
+
+    // Build the rune into the tome's package repo and register it in the index.
+    let build = run(root, &["tome", "build", "widget", "--path", tome_path]);
+    assert_success(&build, "tome build");
+
+    let target = target_triple();
+    let archive = tome_dir
+        .join("packages")
+        .join(format!("widget-0.1.0-{target}.tar.zst"));
+    assert!(archive.exists(), "built archive should exist: {archive:?}");
+
+    let archive_rel = format!("packages/widget-0.1.0-{target}.tar.zst");
+    let index = fs::read_to_string(tome_dir.join("index.nuon")).unwrap();
+    assert!(index.contains("widget"), "index lists widget: {index}");
+    assert!(
+        index.contains(&archive_rel),
+        "index records archive path: {index}"
+    );
+
+    // The published prebuilt archive is installable without --from-source.
+    let add = run(root, &["tome", "add", tome_path, "--ref", "main"]);
+    assert_success(&add, "tome add authored");
+    let install = run(root, &["install", "widget"]);
+    assert_success(&install, "install prebuilt widget");
+    let widget = run_shim(root, "widget");
+    assert_eq!(
+        stdout(&widget).trim(),
+        "widget is not implemented yet",
+        "prebuilt widget stub output"
+    );
+
+    // A rebuild replaces the entry in place rather than duplicating it.
+    let rebuild = run(root, &["tome", "build", "widget", "--path", tome_path]);
+    assert_success(&rebuild, "tome build rebuild");
+    let index = fs::read_to_string(tome_dir.join("index.nuon")).unwrap();
+    assert_eq!(
+        index.matches(&archive_rel).count(),
+        1,
+        "rebuild should upsert, not duplicate: {index}"
+    );
 }
 
 #[test]
