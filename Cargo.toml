@@ -32,10 +32,12 @@ clap_complete = "4.6"
 clap_mangen = "0.3"
 dirs = "6"
 fs4 = "0.13"
-gix = { version = "0.84.0", features = ["blocking-network-client"] }
+flate2 = "1"
+gix = { version = "0.84.0", features = ["blocking-network-client", "blocking-http-transport-reqwest-rust-tls"] }
 indicatif = "0.17"
 minisign-verify = "0.2"
 owo-colors = "4"
+os_pipe = "1.2"
 nu-cmd-lang = "0.113.1"
 nu-command = "0.113.1"
 nu-engine = { version = "0.113.1", features = ["os"] }
@@ -47,8 +49,10 @@ serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.10"
 tar = "0.4"
 tempfile = "3"
+terminal_size = "0.4"
 ureq = "2"
 walkdir = "2"
+xz2 = "0.1"
 zstd = "0.13"
 
 [dev-dependencies]
@@ -57,4 +61,5 @@ minisign = "0.9"
 sha2 = "0.10"
 tar = "0.4"
 tempfile = "3"
+xz2 = "0.1"
 zstd = "0.13"

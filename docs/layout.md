@@ -5,18 +5,18 @@ describes what's in it, what's safe to delete, and how to move it.
 
 ## Install root
 
-By default the install root is the platform's user data directory plus `grimoire/`:
-
-| Platform | Default install root |
-| --- | --- |
-| Linux | `~/.local/share/grimoire` |
-| macOS | `~/Library/Application Support/grimoire` |
-| Windows | `%APPDATA%\grimoire` |
+By default the install root is `~/.grimoire` on every platform (like `~/.cargo` or `~/.rustup`).
 
 Override it by setting `GRIMOIRE_ROOT` to an absolute path. The override is honored by every
 command and is the recommended way to run multiple isolated installs (for example, a test
 profile alongside your daily one). Grimoire never writes outside this root and never asks
 for elevation.
+
+> **The install root must not contain spaces.** Source builds break otherwise: autotools records
+> the absolute paths of build tools (`MKDIR_P`, `INSTALL`, …) and Makefiles use them unquoted, so a
+> path like `~/Library/Application Support/…` splits at the space. This is the main reason the root
+> is a plain `~/.grimoire` rather than the platform data directory, and why a source build fails
+> early if `GRIMOIRE_ROOT` points somewhere with a space.
 
 ## Directory tree
 

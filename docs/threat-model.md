@@ -10,12 +10,15 @@ so users and tome authors can make informed decisions.
   binary archive is sha256-verified before it is read, extracted, or executed. A mismatch
   aborts the operation. This covers transparent proxies, corrupt CDN caches, partial
   downloads, and bit-rot in the on-disk cache.
-- **Archive path-traversal and symlink attacks.** Tar members with absolute paths, `..`
-  components, or symbolic/hard links are rejected before extraction. A malicious archive
-  cannot write outside its package directory.
-- **Privilege escalation.** Grimoire installs into a user-local root under the platform data
-  directory (or `GRIMOIRE_ROOT`). It never writes to system paths and never asks for
-  elevation, so a compromised package cannot directly modify system state.
+- **Archive path-traversal and symlink attacks.** Tar members with absolute paths or `..`
+  components are rejected before extraction, as are hard links. Symlinks are allowed in package
+  archives *only* when their target resolves within the package (validated against the same root
+  rules); an absolute or escaping target is rejected, and no member may be nested under a symlink.
+  Source tarballs are stricter still — they reject symlinks and hard links outright. A malicious
+  archive therefore cannot write outside its package directory or point a link at host paths.
+- **Privilege escalation.** Grimoire installs into a user-local root (`~/.grimoire`, or
+  `GRIMOIRE_ROOT`). It never writes to system paths and never asks for elevation, so a compromised
+  package cannot directly modify system state.
 - **Silent rune drift.** Tome syncs record the git ref and commit hash; the lockfile records
   the commit a build was resolved against. `grm install --locked` rejects anything not in the
   lock, so a reproducible install fails closed rather than silently picking up a moved tag.

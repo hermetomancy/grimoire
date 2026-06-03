@@ -12,12 +12,25 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::thread;
 
+use flate2::{Compression, write::GzEncoder};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use xz2::write::XzEncoder;
 
 const BIN: &str = env!("CARGO_BIN_EXE_grm");
+const CORE_READINESS_PACKAGES: &[&str] = &[
+    "bash",
+    "make",
+    "coreutils",
+    "sed",
+    "grep",
+    "gawk",
+    "diffutils",
+];
 
 type ZstdFileEncoder = zstd::stream::write::Encoder<'static, fs::File>;
+type GzipFileEncoder = GzEncoder<fs::File>;
+type XzFileEncoder = XzEncoder<fs::File>;
 
 fn run(root: &Path, args: &[&str]) -> Output {
     Command::new(BIN)
@@ -80,6 +93,23 @@ fn sha256_file(path: &Path) -> String {
         hasher.update(&buf[..read]);
     }
     format!("sha256:{:x}", hasher.finalize())
+}
+
+fn archive_member_text(path: &Path, member: &str) -> String {
+    let file = fs::File::open(path).expect("open package archive");
+    let decoder = zstd::stream::read::Decoder::new(file).expect("decode package archive");
+    let mut archive = tar::Archive::new(decoder);
+    for entry in archive.entries().expect("read package archive entries") {
+        let mut entry = entry.expect("read package archive entry");
+        if entry.path().expect("read archive path").as_ref() == Path::new(member) {
+            let mut text = String::new();
+            entry
+                .read_to_string(&mut text)
+                .expect("read archive member text");
+            return text;
+        }
+    }
+    panic!("archive member {member} was not found");
 }
 
 fn run_shim(root: &Path, name: &str) -> Output {
@@ -244,6 +274,11 @@ fn install_from_configured_tome() {
 
     let update = run(root, &["tome", "update", "core"]);
     assert_success(&update, "tome update local core");
+    assert!(
+        stdout(&update).contains("updated tome core (main "),
+        "update reports checked ref and commits: {}",
+        stdout(&update)
+    );
 
     let state = fs::read_to_string(root.join("state").join("tomes").join("core.nuon")).unwrap();
     assert!(state.contains("checked_ref: main"), "checked ref: {state}");
@@ -530,6 +565,72 @@ fn build_dependency_bins_are_on_build_path() {
 }
 
 #[test]
+fn build_dependency_bins_take_precedence_over_host_tools() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'prectome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("managedmake.rn"),
+        "export const package = {\n  name: 'managedmake'\n  version: '0.1.0'\n  bins: { make: 'bin/make' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'managed make\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'make')\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("usesmake.rn"),
+        "export const package = {\n  name: 'usesmake'\n  version: '0.1.0'\n  deps: { build: { default: ['managedmake'] }, runtime: [] }\n  bins: { usesmake: 'bin/usesmake' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  let made = (make | str trim)\n  $\"#!/usr/bin/env sh\\nprintf '($made)\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'usesmake')\n}\n",
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "add precedence tome");
+    let install = run(root, &["install", "usesmake"]);
+    assert_success(&install, "install package using managed make");
+
+    let output = run_shim(root, "usesmake");
+    assert_success(&output, "run usesmake");
+    assert_eq!(stdout(&output).trim(), "managed make");
+}
+
+#[test]
+fn doctor_reports_managed_core_ready_after_minimal_core_install() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+    let tome = make_fake_core_tome(&triple);
+    let tome_path = tome.path();
+
+    let add = run(
+        root,
+        &["tome", "add", tome_path.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "add fake core tome");
+
+    for package in CORE_READINESS_PACKAGES {
+        let install = run(root, &["install", package]);
+        assert_success(&install, &format!("install core package {package}"));
+    }
+
+    let doctor = run(root, &["doctor"]);
+    assert_success(&doctor, "doctor after core readiness install");
+    let out = stdout(&doctor);
+    assert!(
+        out.contains("managed core userland: ready (7/7)"),
+        "doctor reports managed core readiness: {out}"
+    );
+}
+
+#[test]
 fn example_tome_checksummed_source() {
     let root = TempDir::new().unwrap();
     let root = root.path();
@@ -552,6 +653,23 @@ fn example_tome_checksummed_source() {
 
 #[test]
 fn source_tar_zst_is_extracted_into_build_context() {
+    source_archive_is_extracted_into_build_context("payload.tar.zst", TestArchiveKind::TarZst);
+}
+
+#[test]
+fn source_tar_gz_is_extracted_into_build_context() {
+    source_archive_is_extracted_into_build_context("payload.tar.gz", TestArchiveKind::TarGz);
+}
+
+#[test]
+fn source_tar_xz_is_extracted_into_build_context() {
+    source_archive_is_extracted_into_build_context("payload.tar.xz", TestArchiveKind::TarXz);
+}
+
+fn source_archive_is_extracted_into_build_context(
+    archive_name: &str,
+    archive_kind: TestArchiveKind,
+) {
     let root = TempDir::new().unwrap();
     let root = root.path();
     let out = TempDir::new().unwrap();
@@ -559,22 +677,15 @@ fn source_tar_zst_is_extracted_into_build_context() {
     let src = TempDir::new().unwrap();
     let src = src.path();
 
-    let source_archive = src.join("payload.tar.zst");
-    let mut builder = open_archive(&source_archive);
-    append_file(
-        &mut builder,
-        "payload/message.txt",
-        b"hello from extracted source\n",
-        0o644,
-    );
-    finish_archive(builder);
+    let source_archive = src.join(archive_name);
+    write_test_source_archive(&source_archive, archive_kind);
     let source_hash = sha256_file(&source_archive);
 
     let rune = src.join("extractor.rn");
     fs::write(
         &rune,
         format!(
-            "export const package = {{\n  name: 'extractor'\n  version: '0.1.0'\n  sources: {{ main: {{ url: 'payload.tar.zst', sha256: '{source_hash}' }} }}\n  bins: {{ extractor: 'bin/extractor' }}\n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  let message = (open --raw ($ctx.sources.main.dir | path join 'payload' 'message.txt') | str trim)\n  $\"#!/usr/bin/env sh\\nprintf '($message)\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'extractor')\n}}\n"
+            "export const package = {{\n  name: 'extractor'\n  version: '0.1.0'\n  sources: {{ main: {{ url: '{archive_name}', sha256: '{source_hash}' }} }}\n  bins: {{ extractor: 'bin/extractor' }}\n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  let message = (open --raw ($ctx.sources.main.dir | path join 'payload' 'message.txt') | str trim)\n  $\"#!/usr/bin/env sh\\nprintf '($message)\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'extractor')\n}}\n"
         ),
     )
     .unwrap();
@@ -650,13 +761,13 @@ printf '%s\n' "$prefix" > configured-prefix.txt
 {
   printf '%s\n' '#!/usr/bin/env sh'
   printf '%s\n' 'set -eu'
-  printf '%s\n' 'prefix=$1'
+  printf '%s\n' 'destdir=$1'
   printf '%s\n' 'IFS= read -r message < built-message.txt'
   printf '%s\n' 'IFS= read -r configured < configured-prefix.txt'
   printf '%s\n' '{'
   printf '%s\n' "  printf '%s\n' '#!/usr/bin/env sh'"
   printf '%s\n' "  printf \"printf '%%s\\\\n' '%s via %s'\\n\" \"\$message\" \"\$configured\""
-  printf '%s\n' '} > "$prefix/realpkg"'
+  printf '%s\n' '} > "$destdir$configured/realpkg"'
 } > install.sh
 "#,
         0o755,
@@ -680,7 +791,7 @@ printf '%s\n' "$prefix" > configured-prefix.txt
     append_file(
         &mut builder,
         "bin/make",
-        b"#!/usr/bin/env sh\nset -eu\ntarget=${1:-all}\ncase \"$target\" in\n  all) sh ./build.sh ;;\n  install) prefix=\"\"; for arg in \"$@\"; do case \"$arg\" in PREFIX=*) prefix=${arg#PREFIX=} ;; esac; done; if [ -z \"$prefix\" ]; then echo 'missing PREFIX' >&2; exit 2; fi; sh ./install.sh \"$prefix\" ;;\n  *) echo \"unsupported target: $target\" >&2; exit 2 ;;\nesac\n",
+        b"#!/usr/bin/env sh\nset -eu\ntarget=${1:-all}\ncase \"$target\" in\n  all) sh ./build.sh ;;\n  install) destdir=\"\"; for arg in \"$@\"; do case \"$arg\" in DESTDIR=*) destdir=${arg#DESTDIR=} ;; esac; done; if [ -z \"$destdir\" ]; then echo 'missing DESTDIR' >&2; exit 2; fi; sh ./install.sh \"$destdir\" ;;\n  *) echo \"unsupported target: $target\" >&2; exit 2 ;;\nesac\n",
         0o755,
     );
     finish_archive(builder);
@@ -697,7 +808,7 @@ printf '%s\n' "$prefix" > configured-prefix.txt
     fs::write(
         runes.join("realpkg.rn"),
         format!(
-            "export const package = {{\n  name: 'realpkg'\n  version: '1.0.0'\n  sources: {{ main: {{ url: 'realpkg-1.0.0.tar.zst', sha256: '{source_hash}' }} }}\n  deps: {{ build: {{ default: ['minimake'] }}, runtime: [] }}\n  bins: {{ realpkg: 'realpkg' }}\n}}\n\nexport def build [ctx] {{\n  let source_dir = ($ctx.sources.main.dir | path join 'realpkg-1.0.0')\n  let build_dir = ($ctx.package_dir | path join 'build')\n  mkdir $build_dir\n  let result = (sh -c $\"cd '($build_dir)' && SOURCE_DIR='($source_dir)' '($source_dir)/configure' --prefix='($ctx.prefix)' && make && make install PREFIX='($ctx.package_dir)'\" | complete)\n  if $result.exit_code != 0 {{\n    error make {{ msg: $result.stderr }}\n  }}\n}}\n"
+            "export const package = {{\n  name: 'realpkg'\n  version: '1.0.0'\n  sources: {{ main: {{ url: 'realpkg-1.0.0.tar.zst', sha256: '{source_hash}' }} }}\n  deps: {{ build: {{ default: ['minimake'] }}, runtime: [] }}\n  bins: {{ realpkg: 'realpkg' }}\n}}\n\nexport def build [ctx] {{\n  let source_dir = ($ctx.sources.main.dir | path join 'realpkg-1.0.0')\n  let build_dir = ($ctx.package_dir | path join 'build')\n  let staged_prefix = ($ctx.package_dir | path join ($ctx.prefix | str replace -r '^/' ''))\n  mkdir $build_dir\n  mkdir $staged_prefix\n  let result = (sh -c $\"cd '($build_dir)' && SOURCE_DIR='($source_dir)' '($source_dir)/configure' --prefix='($ctx.prefix)' && make && make install DESTDIR='($ctx.package_dir)'\" | complete)\n  if $result.exit_code != 0 {{\n    error make {{ msg: $result.stderr }}\n  }}\n}}\n"
         ),
     )
     .unwrap();
@@ -710,6 +821,20 @@ printf '%s\n' "$prefix" > configured-prefix.txt
     let install = run(root, &["install", "realpkg"]);
     assert_success(&install, "install configure/make style source package");
 
+    let built_archive = root
+        .join("cache")
+        .join("builds")
+        .join(format!("realpkg-1.0.0-{}.tar.zst", target_triple()));
+    let package_metadata = archive_member_text(&built_archive, ".grimoire/package.nuon");
+    assert!(
+        package_metadata.contains("store_path"),
+        "built archive metadata should record its final store path: {package_metadata}"
+    );
+    assert!(
+        package_metadata.contains("packages/realpkg/1.0.0"),
+        "store path should be the final package prefix: {package_metadata}"
+    );
+
     let output = run_shim(root, "realpkg");
     assert_success(&output, "run realpkg");
     let line = stdout(&output);
@@ -718,8 +843,58 @@ printf '%s\n' "$prefix" > configured-prefix.txt
         "realpkg output should reflect configured source build: {line}"
     );
     assert!(
-        line.trim_end().ends_with("/package"),
-        "ctx.prefix/package_dir should point at the temporary staging package dir: {line}"
+        line.trim_end().ends_with("/packages/realpkg/1.0.0"),
+        "ctx.prefix should point at the final package prefix, not the temporary staging dir: {line}"
+    );
+    assert!(
+        !line.trim_end().ends_with("/package"),
+        "ctx.prefix should not leak the temporary staging package dir: {line}"
+    );
+}
+
+#[test]
+fn source_build_failure_surfaces_diagnostic_and_output_tail() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::create_dir_all(tome.join("dist")).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'brokentome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+
+    // A build whose external command writes a recognizable error to stderr and exits non-zero —
+    // as the build's *final* statement. This must abort the build (surfacing the exit code and the
+    // output tail), not silently succeed and pack a broken archive. Regression test for a failing
+    // trailing external being swallowed because the result was never drained / exit-checked.
+    fs::write(
+        runes.join("brokenpkg.rn"),
+        "export const package = {\n  name: 'brokenpkg'\n  version: '1.0.0'\n  sources: {}\n  deps: { build: {}, runtime: [] }\n  bins: { brokenpkg: 'brokenpkg' }\n}\n\nexport def build [ctx] {\n  sh -c \"echo 'configure: error: no acceptable C compiler found in $PATH' >&2; exit 1\"\n}\n",
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "add broken build tome");
+
+    let install = run(root, &["install", "brokenpkg"]);
+    // The Nushell diagnostic names the exit code instead of the opaque default message...
+    assert_failure_contains(
+        &install,
+        "external command exited with code 1",
+        "build failure reports the exit code",
+    );
+    // ...and the build's own stderr (the real cause) is carried up in the output tail.
+    assert_failure_contains(
+        &install,
+        "no acceptable C compiler found",
+        "build failure surfaces the underlying build output",
     );
 }
 
@@ -779,6 +954,82 @@ fn build_install_list_remove() {
 }
 
 #[test]
+fn built_archive_installs_under_a_different_root() {
+    let build_root = TempDir::new().unwrap();
+    let build_root = build_root.path();
+    let install_root = TempDir::new().unwrap();
+    let install_root = install_root.path();
+    let out = TempDir::new().unwrap();
+    let out = out.path();
+
+    let build = run(
+        build_root,
+        &[
+            "build",
+            "./tome-example/runes/hello.rn",
+            "--output",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert_success(&build, "build hello in first root");
+
+    let archive = out.join(format!("hello-0.1.0-{}.tar.zst", target_triple()));
+    let metadata = archive_member_text(&archive, ".grimoire/package.nuon");
+    assert!(
+        metadata.contains("store_path") && metadata.contains("packages/hello/0.1.0"),
+        "built archive should record a portable root-relative store path: {metadata}"
+    );
+
+    let install = run(install_root, &["install", archive.to_str().unwrap()]);
+    assert_success(&install, "install built archive into second root");
+    assert_success(&run_shim(install_root, "hello"), "run portable install");
+}
+
+#[test]
+fn install_rejects_archive_with_wrong_store_path() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let out = TempDir::new().unwrap();
+    let archive = out
+        .path()
+        .join(format!("wrongpath-1.0.0-{}.tar.zst", target_triple()));
+
+    let mut builder = open_archive(&archive);
+    let metadata = format!(
+        "{{format: 1, name: \"wrongpath\", version: \"1.0.0\", target: \"{}\", store_path: \"/wrong/store/path\", bins: {{wrongpath: \"bin/wrongpath\"}}}}\n",
+        target_triple()
+    );
+    append_file(
+        &mut builder,
+        ".grimoire/package.nuon",
+        metadata.as_bytes(),
+        0o644,
+    );
+    append_file(
+        &mut builder,
+        "bin/wrongpath",
+        b"#!/usr/bin/env sh\nprintf 'wrong path\\n'\n",
+        0o755,
+    );
+    finish_archive(builder);
+
+    let install = run(root, &["install", archive.to_str().unwrap()]);
+    assert_failure_contains(
+        &install,
+        "metadata store_path",
+        "reject wrong archive store path",
+    );
+    assert!(
+        !root
+            .join("packages")
+            .join("wrongpath")
+            .join("1.0.0")
+            .exists(),
+        "package with wrong store_path should not be promoted"
+    );
+}
+
+#[test]
 fn lockfile_tracks_installs_and_removals() {
     let root = TempDir::new().unwrap();
     let root = root.path();
@@ -833,6 +1084,10 @@ fn doctor_reports_health_and_problems() {
     assert!(
         empty_out.contains("installed packages: 0"),
         "doctor counts packages: {empty_out}"
+    );
+    assert!(
+        empty_out.contains("managed core userland: incomplete (0/7, missing bash, make, coreutils, sed, grep, gawk, diffutils)"),
+        "doctor reports missing managed core tools: {empty_out}"
     );
     assert!(
         empty_out.contains("health: ok"),
@@ -2209,6 +2464,93 @@ fn hold_skips_upgrade_until_released() {
 }
 
 #[test]
+fn upgrade_syncs_configured_tomes_before_resolving_versions() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let dist = tome.join("dist");
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'upcore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("uppkg.rn"),
+        "export const package = {\n  name: 'uppkg'\n  version: '0.1.0'\n  bins: { uppkg: 'bin/uppkg' }\n}\n\nexport def build [ctx] { }\n",
+    )
+    .unwrap();
+
+    let v1_name = format!("uppkg-0.1.0-{triple}.tar.zst");
+    let v1 = make_versioned_archive(
+        &dist.join(&v1_name),
+        "uppkg",
+        "0.1.0",
+        &triple,
+        "#!/usr/bin/env sh\nprintf 'v1\\n'\n",
+    );
+    let v1_hash = sha256_file(&v1);
+    fs::write(
+        dist.join("index.nuon"),
+        format!(
+            "{{\n  packages: [\n    {{ name: \"uppkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", runtime_deps: [] }}\n  ]\n}}\n"
+        ),
+    )
+    .unwrap();
+
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add upcore",
+    );
+    assert_success(
+        &run(root, &["tome", "update", "upcore"]),
+        "initial tome sync",
+    );
+    assert_success(&run(root, &["install", "uppkg"]), "install uppkg 0.1.0");
+
+    let v2_name = format!("uppkg-0.2.0-{triple}.tar.zst");
+    let v2 = make_versioned_archive(
+        &dist.join(&v2_name),
+        "uppkg",
+        "0.2.0",
+        &triple,
+        "#!/usr/bin/env sh\nprintf 'v2\\n'\n",
+    );
+    let v2_hash = sha256_file(&v2);
+    fs::write(
+        dist.join("index.nuon"),
+        format!(
+            "{{\n  packages: [\n    {{ name: \"uppkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", runtime_deps: [] }}\n    {{ name: \"uppkg\", version: \"0.2.0\", target: \"{triple}\", archive: \"{v2_name}\", archive_hash: \"{v2_hash}\", runtime_deps: [] }}\n  ]\n}}\n"
+        ),
+    )
+    .unwrap();
+
+    let upgrade = run(root, &["upgrade", "uppkg"]);
+    assert_success(
+        &upgrade,
+        "upgrade should sync tome and install newest package",
+    );
+    assert!(
+        stdout(&upgrade).contains("updated tome upcore"),
+        "upgrade should report the tome sync: {}",
+        stdout(&upgrade)
+    );
+    assert!(
+        stdout(&run(root, &["list"])).contains("uppkg\t0.2.0"),
+        "upgrade should see the freshly synced index: {}",
+        stdout(&run(root, &["list"]))
+    );
+    assert_eq!(stdout(&run_shim(root, "uppkg")).trim(), "v2");
+}
+
+#[test]
 fn mutating_commands_refuse_when_install_root_is_locked() {
     use fs4::fs_std::FileExt;
 
@@ -2488,18 +2830,92 @@ fn reject_bad_archive_path() {
 }
 
 #[test]
-fn reject_symlink_archive() {
+fn reject_symlink_archive_with_escaping_target() {
     let root = TempDir::new().unwrap();
     let root = root.path();
     let out = TempDir::new().unwrap();
 
+    // A symlink pointing outside the package (`bin/badlink -> /tmp`) must be refused: internal
+    // symlinks are now preserved, but an escaping target could leak host paths into the install.
     let archive = make_symlink_archive(out.path());
     let install = run(root, &["install", archive.to_str().unwrap()]);
-    assert_failure_contains(&install, "contains a symlink", "reject symlink archive");
+    assert_failure_contains(
+        &install,
+        "escapes the package",
+        "reject escaping symlink archive",
+    );
     assert!(
         !root.join("packages").join("badlink").join("0.1.0").exists(),
         "rejected package dir should not exist"
     );
+}
+
+#[test]
+fn reject_archive_member_nested_under_symlink() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let out = TempDir::new().unwrap();
+
+    // `lib -> sub` is an in-package (valid) symlink, but a member `lib/evil` underneath it would
+    // be written *through* the link during extraction; that whole shape must be refused.
+    let archive = make_nested_symlink_archive(out.path());
+    let install = run(root, &["install", archive.to_str().unwrap()]);
+    assert_failure_contains(
+        &install,
+        "nested under symlink",
+        "reject member nested under symlink",
+    );
+}
+
+#[test]
+fn source_build_preserves_internal_symlink() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let out = TempDir::new().unwrap();
+    let out = out.path();
+    let src = TempDir::new().unwrap();
+    let src = src.path();
+
+    // A build that emits a real binary plus an in-package symlink alias (like gawk's `awk`).
+    let rune = src.join("aliased.rn");
+    fs::write(
+        &rune,
+        "export const package = {\n  name: 'aliased'\n  version: '0.1.0'\n  sources: {}\n  bins: { real: 'bin/real', alias: 'bin/alias' }\n}\n\nexport def build [ctx] {\n  let bin = ($ctx.package_dir | path join 'bin')\n  mkdir $bin\n  \"#!/usr/bin/env sh\\nprintf 'real tool\\n'\\n\" | save ($bin | path join 'real')\n  ^ln -s real ($bin | path join 'alias')\n}\n",
+    )
+    .unwrap();
+
+    let build = run(
+        root,
+        &[
+            "build",
+            rune.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert_success(&build, "build package with internal symlink");
+
+    let archive = out.join(format!("aliased-0.1.0-{}.tar.zst", target_triple()));
+    let install = run(root, &["install", archive.to_str().unwrap()]);
+    assert_success(&install, "install package with internal symlink");
+
+    // The alias is preserved as a symlink in the installed package, not dereferenced into a copy.
+    let installed_alias = root
+        .join("packages")
+        .join("aliased")
+        .join("0.1.0")
+        .join("bin")
+        .join("alias");
+    let meta = fs::symlink_metadata(&installed_alias).expect("installed alias exists");
+    assert!(
+        meta.file_type().is_symlink(),
+        "installed `alias` should remain a symlink"
+    );
+
+    // And it resolves: invoking the alias shim runs the real tool.
+    let output = run_shim(root, "alias");
+    assert_success(&output, "run alias shim");
+    assert_eq!(stdout(&output).trim(), "real tool");
 }
 
 #[test]
@@ -2650,6 +3066,47 @@ fn make_fake_tome() -> TempDir {
     dir
 }
 
+fn make_fake_core_tome(triple: &str) -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let dist = dir.path().join("dist");
+    let runes = dir.path().join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::create_dir_all(&dist).unwrap();
+
+    fs::write(
+        dir.path().join("tome.rn"),
+        "export const tome = {\n  name: 'core'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+
+    let mut entries = String::from("{\n  packages: [\n");
+    for package in CORE_READINESS_PACKAGES {
+        fs::write(
+            runes.join(format!("{package}.rn")),
+            format!(
+                "export const package = {{\n  name: '{package}'\n  version: '0.1.0'\n  bins: {{ {package}: 'bin/{package}' }}\n}}\n\nexport def build [ctx] {{ }}\n"
+            ),
+        )
+        .unwrap();
+        let archive_name = format!("{package}-0.1.0-{triple}.tar.zst");
+        let archive = make_versioned_archive(
+            &dist.join(&archive_name),
+            package,
+            "0.1.0",
+            triple,
+            &format!("#!/usr/bin/env sh\nprintf '{package}\\n'\n"),
+        );
+        let archive_hash = sha256_file(&archive);
+        entries.push_str(&format!(
+            "    {{ name: \"{package}\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{archive_hash}\", runtime_deps: [] }}\n"
+        ));
+    }
+    entries.push_str("  ]\n}\n");
+    fs::write(dist.join("index.nuon"), entries).unwrap();
+
+    dir
+}
+
 /// Serves the files in `dir` over a minimal HTTP/1.1 server on an ephemeral local port and
 /// returns the base URL. A request for `/name` returns that file (200) or 404 if absent. The
 /// listener thread is detached and lives for the rest of the test process.
@@ -2704,12 +3161,77 @@ fn open_archive(path: &Path) -> tar::Builder<ZstdFileEncoder> {
     tar::Builder::new(encoder)
 }
 
+fn open_gzip_archive(path: &Path) -> tar::Builder<GzipFileEncoder> {
+    let file = fs::File::create(path).expect("create archive");
+    let encoder = GzEncoder::new(file, Compression::default());
+    tar::Builder::new(encoder)
+}
+
+fn open_xz_archive(path: &Path) -> tar::Builder<XzFileEncoder> {
+    let file = fs::File::create(path).expect("create archive");
+    let encoder = XzEncoder::new(file, 6);
+    tar::Builder::new(encoder)
+}
+
 fn finish_archive(builder: tar::Builder<ZstdFileEncoder>) {
     let encoder = builder.into_inner().expect("finish tar");
     encoder.finish().expect("finish zstd");
 }
 
-fn append_file(builder: &mut tar::Builder<ZstdFileEncoder>, path: &str, data: &[u8], mode: u32) {
+fn finish_gzip_archive(builder: tar::Builder<GzipFileEncoder>) {
+    let encoder = builder.into_inner().expect("finish tar");
+    encoder.finish().expect("finish gzip");
+}
+
+fn finish_xz_archive(builder: tar::Builder<XzFileEncoder>) {
+    let encoder = builder.into_inner().expect("finish tar");
+    encoder.finish().expect("finish xz");
+}
+
+#[derive(Debug, Clone, Copy)]
+#[allow(clippy::enum_variant_names)] // all fixtures are tarballs; the prefix is meaningful
+enum TestArchiveKind {
+    TarGz,
+    TarXz,
+    TarZst,
+}
+
+fn write_test_source_archive(path: &Path, kind: TestArchiveKind) {
+    match kind {
+        TestArchiveKind::TarGz => {
+            let mut builder = open_gzip_archive(path);
+            append_file(
+                &mut builder,
+                "payload/message.txt",
+                b"hello from extracted source\n",
+                0o644,
+            );
+            finish_gzip_archive(builder);
+        }
+        TestArchiveKind::TarXz => {
+            let mut builder = open_xz_archive(path);
+            append_file(
+                &mut builder,
+                "payload/message.txt",
+                b"hello from extracted source\n",
+                0o644,
+            );
+            finish_xz_archive(builder);
+        }
+        TestArchiveKind::TarZst => {
+            let mut builder = open_archive(path);
+            append_file(
+                &mut builder,
+                "payload/message.txt",
+                b"hello from extracted source\n",
+                0o644,
+            );
+            finish_archive(builder);
+        }
+    }
+}
+
+fn append_file<W: Write>(builder: &mut tar::Builder<W>, path: &str, data: &[u8], mode: u32) {
     let mut header = tar::Header::new_gnu();
     header.set_size(data.len() as u64);
     header.set_mode(mode);
@@ -2872,6 +3394,41 @@ fn make_symlink_archive(out: &Path) -> PathBuf {
     builder
         .append_link(&mut header, "bin/badlink", "/tmp")
         .expect("append symlink");
+    finish_archive(builder);
+    archive
+}
+
+fn make_nested_symlink_archive(out: &Path) -> PathBuf {
+    fs::create_dir_all(out).unwrap();
+    let archive = out.join(format!("nested-0.1.0-{}.tar.zst", target_triple()));
+    let mut builder = open_archive(&archive);
+    let package_nuon = format!(
+        "{{format: 1, name: \"nested\", version: \"0.1.0\", target: \"{}\", bins: {{}}}}\n",
+        target_triple()
+    );
+    append_file(
+        &mut builder,
+        ".grimoire/package.nuon",
+        package_nuon.as_bytes(),
+        0o644,
+    );
+    append_file(
+        &mut builder,
+        ".grimoire/rune.rn",
+        b"export const package = {}\n",
+        0o644,
+    );
+
+    // `lib -> sub` has an in-package target (so the target check passes), but the member
+    // `lib/evil` underneath it would extract through the link.
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Symlink);
+    header.set_size(0);
+    header.set_mode(0o777);
+    builder
+        .append_link(&mut header, "lib", "sub")
+        .expect("append symlink");
+    append_file(&mut builder, "lib/evil", b"x\n", 0o644);
     finish_archive(builder);
     archive
 }
