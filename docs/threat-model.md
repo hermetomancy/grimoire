@@ -22,21 +22,38 @@ so users and tome authors can make informed decisions.
 - **Failed-install corruption.** Installs stage into a transaction directory and promote
   with atomic renames; a failure after promotion (shim writes, state writes) rolls back to
   the prior version rather than leaving a half-installed package.
+- **A compromised static archive host (signed tomes).** A tome may sign its `index.nuon` with
+  [minisign](https://jedisct1.github.io/minisign/) and declare the public key in its
+  manifest (`packages.signer`). Grimoire then requires a valid `index.nuon.minisig` over the
+  index before trusting it, and because the index records every archive's sha256, that
+  signature transitively authenticates every binary package. The signing key is **pinned on
+  first use**: once a tome has been added with a signer, a later sync that drops the
+  signature, fails verification, or presents a *different* key is refused (key rotation needs
+  a deliberate remove + re-add). An attacker who later compromises the static host therefore
+  cannot substitute a tampered index without the author's private key.
+- **Concurrent mutation.** Mutating commands (`install`, `remove`, `upgrade`, `clean`,
+  `hold`/`unhold`, `tome add/update/remove`, `addendum add/remove`) take an exclusive
+  install-root lock for their duration, so two runs against the same root cannot race shared
+  state; the second fails fast. The lock is released by the OS at process exit, so a crash
+  leaves no stale lock.
 
 ## What Grimoire does *not* protect against
 
 These are explicit non-goals today; addressing them is tracked in
 [`TODO.md`](../TODO.md).
 
-- **A compromised tome git host.** Tome contents are trusted on faith: anyone with push
-  access to the tome's git repository can change rune sources, sha256 values, and build
-  scripts, and Grimoire will execute the result. Tome commit signatures and an
-  installer-side signer trust list are planned but not yet enforced.
-- **A compromised static archive host.** `index.nuon` itself is not signed. An attacker who
-  controls the host can serve an `index.nuon` that points at archives with attacker-chosen
-  sha256 values, and Grimoire will accept them (the checksum check verifies that what was
-  *served* matches what the *index says* — not that either reflects the tome author's
-  intent). Signed indexes are planned.
+- **A compromised tome git host.** Tome *source* contents are still trusted on faith: anyone
+  with push access to the git repository can change rune sources, declared sha256 values, and
+  build scripts, and Grimoire will execute the result. Index signing (above) covers the
+  published binary index, but signing the source runes themselves is planned, not yet built.
+- **An unsigned tome.** Signature verification is opt-in: a tome that declares no
+  `packages.signer` publishes an unsigned index, and Grimoire installs from it exactly as
+  before (verify-if-present). Until you add a tome whose signer you trust, the static-host
+  protection above does not apply.
+- **First-use trust.** Trust-on-first-use only protects against compromise *after* you first
+  add a tome. An attacker controlling the host at the moment of the first `grm tome add` is
+  trusted, since that is the key that gets pinned. For higher assurance, verify the published
+  key out of band before adding (an explicit `--signer` pin is planned).
 - **Malicious build scripts.** Runes are Nushell code that runs with the user's full
   privileges during a source build. Grimoire fetches and checksums inputs, but does not
   sandbox the `build` function. Treat installing from an untrusted tome as equivalent to
@@ -49,9 +66,6 @@ These are explicit non-goals today; addressing them is tracked in
 - **Supply-chain attacks on Grimoire itself.** Grimoire is currently installed via
   `cargo install grimoire`, which trusts crates.io and the Rust toolchain. Signed release
   artifacts for direct download are planned.
-- **Concurrent mutation.** Two `grm install` or `grm remove` runs against the same install
-  root can race shared state. Until an install-root lockfile lands, do not run multiple
-  mutating commands concurrently.
 
 ## Practical guidance
 
@@ -62,6 +76,8 @@ These are explicit non-goals today; addressing them is tracked in
   forking and pinning when the upstream is not under your control.
 - **Treat `--from-source` as code execution.** It is. Do not run source builds from tomes
   you would not run a shell script from.
-- **Report security issues privately.** See [`SECURITY.md`](../SECURITY.md) (planned) for
-  the disclosure address. In the interim, open a minimal-detail issue asking for a contact
-  and continue privately.
+- **Prefer signed tomes, and verify the signer key out of band.** When a tome publishes a
+  `packages.signer`, Grimoire pins it on first add and enforces it thereafter; confirming that
+  key through a second channel before the first add closes the trust-on-first-use gap.
+- **Report security issues privately.** See [`SECURITY.md`](../SECURITY.md) for how to
+  disclose.

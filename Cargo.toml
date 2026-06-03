@@ -34,6 +34,7 @@ dirs = "6"
 fs4 = "0.13"
 gix = { version = "0.84.0", features = ["blocking-network-client"] }
 indicatif = "0.17"
+minisign-verify = "0.2"
 owo-colors = "4"
 nu-cmd-lang = "0.113.1"
 nu-command = "0.113.1"
@@ -52,6 +53,7 @@ zstd = "0.13"
 
 [dev-dependencies]
 fs4 = "0.13"
+minisign = "0.9"
 sha2 = "0.10"
 tar = "0.4"
 tempfile = "3"

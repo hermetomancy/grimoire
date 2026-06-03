@@ -5,7 +5,26 @@
 
 use anyhow::{Context, Result};
 
-use crate::{install, lock, paths, tome};
+use crate::{install, lock, paths, tome, toolchain};
+
+const CORE_USERLAND_TOOLS: &[&str] = &[
+    "make",
+    "pkg-config",
+    "m4",
+    "autoconf",
+    "automake",
+    "libtool",
+    "gettext",
+    "bash",
+    "coreutils",
+    "sed",
+    "gawk",
+    "grep",
+    "tar",
+    "gzip",
+    "xz",
+    "zstd",
+];
 
 /// Reports Grimoire's environment and validates local state. Health results (counts, the
 /// environment summary) go to stdout; per-item problems go to stderr (AGENTS.md §7). A clean
@@ -19,6 +38,7 @@ pub fn doctor() -> Result<()> {
     let mut problems = 0_usize;
     problems += check_tomes()?;
     problems += check_packages()?;
+    problems += check_source_build_readiness()?;
     check_lock(&mut problems)?;
 
     if problems == 0 {
@@ -27,6 +47,39 @@ pub fn doctor() -> Result<()> {
         println!("health: {problems} problem(s) found");
     }
     Ok(())
+}
+
+fn check_source_build_readiness() -> Result<usize> {
+    let readiness = toolchain::source_build_readiness()?;
+    let managed = installed_core_tool_count()?;
+    println!(
+        "source builds: host boundary {}, managed core tools {}/{}",
+        if readiness.is_ready() {
+            "ok"
+        } else {
+            "missing"
+        },
+        managed,
+        CORE_USERLAND_TOOLS.len()
+    );
+
+    if readiness.is_ready() {
+        return Ok(0);
+    }
+
+    eprintln!(
+        "grimoire: source builds need a host compiler boundary for now; missing {}",
+        readiness.missing_required.join(", ")
+    );
+    Ok(1)
+}
+
+fn installed_core_tool_count() -> Result<usize> {
+    let states = install::installed_states()?;
+    Ok(CORE_USERLAND_TOOLS
+        .iter()
+        .filter(|name| states.iter().any(|state| state.name == **name))
+        .count())
 }
 
 fn check_tomes() -> Result<usize> {

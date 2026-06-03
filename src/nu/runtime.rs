@@ -20,6 +20,7 @@ use crate::{
     fetch::FetchedSource,
     model::{PackageMetadata, TomeManifest},
     nu::nuon_io,
+    toolchain::HostTool,
 };
 
 pub trait RuneRuntime {
@@ -39,9 +40,37 @@ pub trait RuneRuntime {
 #[derive(Debug, Default)]
 pub struct EmbeddedNuRuntime;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct BuildEnv {
     pub path_dirs: Vec<PathBuf>,
+    pub host_tools: Vec<HostTool>,
+    pub inherit_host_path: bool,
+}
+
+impl BuildEnv {
+    /// Stage-0 authoring/bootstrap builds inherit the host PATH. Source installs use
+    /// [`BuildEnv::managed`] instead so they do not accidentally depend on random host tools.
+    pub fn bootstrap() -> Self {
+        Self {
+            path_dirs: Vec::new(),
+            host_tools: Vec::new(),
+            inherit_host_path: true,
+        }
+    }
+
+    pub fn managed(path_dirs: Vec<PathBuf>, host_tools: Vec<HostTool>) -> Self {
+        Self {
+            path_dirs,
+            host_tools,
+            inherit_host_path: false,
+        }
+    }
+}
+
+impl Default for BuildEnv {
+    fn default() -> Self {
+        Self::bootstrap()
+    }
 }
 
 impl RuneRuntime for EmbeddedNuRuntime {
@@ -72,7 +101,8 @@ impl RuneRuntime for EmbeddedNuRuntime {
             .canonicalize()
             .with_context(|| format!("resolve work dir {}", work_dir.display()))?;
 
-        let path_entries = build_path_entries(&env.path_dirs);
+        let host_tool_dir = prepare_host_tool_dir(work_dir.as_path(), &env.host_tools)?;
+        let path_entries = build_path_entries(env, host_tool_dir.as_deref());
         let path = build_path_string(&path_entries);
         let context = build_context(
             &package_dir,
@@ -256,12 +286,51 @@ fn nuon_string(value: &str) -> Result<String> {
     nuon_io::to_nuon_string(&Value::string(value, nu_protocol::Span::unknown()))
 }
 
-fn build_path_entries(path_dirs: &[PathBuf]) -> Vec<PathBuf> {
-    let mut entries = path_dirs.to_vec();
-    if let Some(existing) = std::env::var_os("PATH") {
+fn build_path_entries(env: &BuildEnv, host_tool_dir: Option<&Path>) -> Vec<PathBuf> {
+    let mut entries = env.path_dirs.clone();
+    if let Some(dir) = host_tool_dir {
+        entries.push(dir.to_path_buf());
+    }
+    if env.inherit_host_path {
+        let Some(existing) = std::env::var_os("PATH") else {
+            return entries;
+        };
         entries.extend(std::env::split_paths(&existing));
     }
     entries
+}
+
+fn prepare_host_tool_dir(work_dir: &Path, host_tools: &[HostTool]) -> Result<Option<PathBuf>> {
+    if host_tools.is_empty() {
+        return Ok(None);
+    }
+
+    let dir = work_dir.join(".grimoire-host-tools");
+    fs::create_dir_all(&dir).with_context(|| format!("create host tool dir {}", dir.display()))?;
+    for tool in host_tools {
+        link_host_tool(&dir.join(&tool.name), &tool.path)?;
+    }
+    Ok(Some(dir))
+}
+
+#[cfg(unix)]
+fn link_host_tool(link: &Path, source: &Path) -> Result<()> {
+    if link.exists() {
+        fs::remove_file(link).with_context(|| format!("replace host tool {}", link.display()))?;
+    }
+    std::os::unix::fs::symlink(source, link)
+        .with_context(|| format!("link host tool {} -> {}", link.display(), source.display()))
+}
+
+#[cfg(windows)]
+fn link_host_tool(link: &Path, source: &Path) -> Result<()> {
+    let link = match source.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if link.extension().is_none() => link.with_extension(ext),
+        _ => link.to_path_buf(),
+    };
+    fs::copy(source, &link)
+        .with_context(|| format!("copy host tool {} -> {}", source.display(), link.display()))?;
+    Ok(())
 }
 
 fn build_path_string(path_entries: &[PathBuf]) -> Option<String> {

@@ -115,6 +115,35 @@ fetch the index and checksum-verified archives over HTTP. For local testing, set
 filesystem path with `format: "local"`. Either way, the git repository carries only your runes
 and `tome.rn` — never the built binaries.
 
+### Signing a tome (optional but recommended)
+
+The package index records the checksum of every archive, so signing the index authenticates
+every prebuilt package at once. Grimoire verifies [minisign](https://jedisct1.github.io/minisign/)
+signatures; you sign with the standard `minisign` tool (Grimoire never holds your private key).
+
+```sh
+minisign -G                                    # one-time: generate a keypair
+grm tome build --all --path ./mytome           # (re)build dist/index.nuon
+minisign -S -m ./mytome/dist/index.nuon        # writes dist/index.nuon.minisig
+```
+
+Then declare the public key in `tome.rn` so installers know what to expect, publishing
+`index.nuon` and `index.nuon.minisig` together:
+
+```nu
+packages: {
+  repo: "https://example.com/mytome"
+  format: "http"
+  index: "index.nuon"
+  signer: "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3"  # `minisign -p` output
+}
+```
+
+The first time a user adds the tome, Grimoire pins this key (trust on first use); from then on
+every sync must carry a valid signature from it, and a changed key is refused until the user
+re-adds the tome. Tomes without a `signer` keep working unsigned. Re-sign whenever you rebuild
+the index — a stale signature will be rejected.
+
 ### Source build context
 
 During a source build, Grimoire fetches every declared source, verifies its `sha256`, prepares a
@@ -227,9 +256,11 @@ catalog model of per-user installers — while staying OS-independent and conven
 ## Status
 
 Grimoire is in early development. Installing (prebuilt and from source), building,
-version-aware dependency resolution, publishing prebuilt archives over HTTP, removal,
-upgrades, lockfiles with reproducible `--locked` installs, addenda, and health checks are working
-today.
+version-aware dependency resolution, publishing prebuilt archives over HTTP, removal with
+dependency autoremove, upgrades with hold/unhold, `--dry-run` plans, lockfiles with reproducible
+`--locked` installs, addenda, minisign-signed package indexes (trust-on-first-use), an
+install-root concurrency lock, cache cleanup, shell completions/man pages, and health checks are
+working today.
 
 ## License
 

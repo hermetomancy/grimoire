@@ -122,6 +122,12 @@ pub struct TomeState {
     pub checked_commit: Option<String>,
     #[serde(default)]
     pub tome: Option<TomeManifest>,
+    /// The minisign public key this tome's package index is verified against, pinned on first
+    /// sync (trust-on-first-use). `None` for an unsigned tome that has never advertised a
+    /// signer. Once set, a sync that presents a different key — or an index that no longer
+    /// verifies — is refused. See `src/signing.rs`.
+    #[serde(default)]
+    pub signer_pubkey: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +188,12 @@ pub struct TomePackages {
     pub repo: String,
     pub format: String,
     pub index: String,
+    /// The minisign public key (the single-line `untrusted comment`-less base64 string
+    /// `minisign -p` emits) the tome author signs `index` with. When present, the index must
+    /// carry a valid `<index>.minisig` signature; when absent, the tome publishes an unsigned
+    /// index and installs proceed without signature verification.
+    #[serde(default)]
+    pub signer: Option<String>,
 }
 
 impl Deps {
@@ -800,6 +812,7 @@ impl TomeState {
                 Some(Value::Nothing { .. }) | None => None,
                 Some(value) => Some(TomeManifest::from_value(value.clone())?),
             },
+            signer_pubkey: optional_string(&record, "signer_pubkey")?,
         })
     }
 
@@ -819,6 +832,9 @@ impl TomeState {
         }
         if let Some(tome) = &self.tome {
             record.push("tome", tome.to_value());
+        }
+        if let Some(signer) = &self.signer_pubkey {
+            record.push("signer_pubkey", Value::string(signer, Span::unknown()));
         }
         Value::record(record, Span::unknown())
     }
@@ -865,6 +881,7 @@ impl TomePackages {
             repo: required_field_string(val, "tome packages", "repo")?,
             format: required_field_string(val, "tome packages", "format")?,
             index: required_field_string(val, "tome packages", "index")?,
+            signer: optional_string(val, "signer")?,
         })
     }
 
@@ -873,6 +890,9 @@ impl TomePackages {
         record.push("repo", Value::string(&self.repo, Span::unknown()));
         record.push("format", Value::string(&self.format, Span::unknown()));
         record.push("index", Value::string(&self.index, Span::unknown()));
+        if let Some(signer) = &self.signer {
+            record.push("signer", Value::string(signer, Span::unknown()));
+        }
         Value::record(record, Span::unknown())
     }
 }

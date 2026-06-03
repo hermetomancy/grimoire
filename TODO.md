@@ -6,14 +6,28 @@ The README is an end-user overview; this is what is designed but not built yet, 
 order. The theme: the catalog/solver/install machinery is done, but nothing has actually
 *compiled* a real package — closing that gap comes first.
 
-1. **A `core` tome + host-toolchain precheck.**
+1. **Strict managed-build dogfooding (`core` tome + host compiler precheck).**
    - Ship a minimal `core` tome of prebuilt, relocatable build tools (`make`, `pkg-config`, `m4`,
      `autoconf`, `automake`, `libtool`, `gettext`, `bash`, `coreutils`, `sed`, `gawk`, `grep`,
-     `tar`, `gzip`, `xz`).
-   - Lean on the **host** C toolchain (cc/binutils/libc) for the MVP rather than redistributing
-     it; add a `doctor`-style precheck that fails a source build early with a clear message when
-     `cc`/`make`/`sh`/`tar` are missing. Self-hosting the toolchain (prebuilt gcc/glibc) is a
-     later, much larger effort gated on relocatability work (RPATH/loader patching).
+     `tar`, `gzip`, `xz`, `zstd`).
+   - Use the **host** C toolchain (cc/binutils/libc/system SDK) only as the explicit stage-0
+     compiler boundary. Source builds should otherwise prefer the Grimoire-managed `core` tools
+     and run in a strict build environment: build-dependency `bin/` directories first, then only
+     an allowlisted host fallback for the compiler/linker/system SDK pieces we have not packaged.
+   - Add a `doctor`-style precheck that fails source builds early with a clear message when the
+     host compiler boundary is missing, and separately reports whether the managed `core`
+     userland is installed and usable for source builds.
+   - Bootstrap flow: use the host toolchain to build stage-0 `core` archives, install those
+     archives through Grimoire, then rebuild at least one source package (eventually `core`
+     itself) using the installed `core` tools plus the allowlisted host compiler boundary.
+
+2. **1.0 self-hosting goal: managed compiler + Grimoire builds Grimoire.**
+   - Package a relocatable compiler/linker/runtime story for each supported platform (`clang`/`lld`,
+     `zig`, GCC/binutils/libc, or another reviewed approach). This is gated on platform-specific
+     relocatability work such as RPATH/loader handling, macOS SDK handling, and Windows ABI policy.
+   - Once the compiler boundary is managed by `core`, package the Rust toolchain enough for
+     Grimoire to build itself through Grimoire. Treat this as a 1.0 milestone, not the first
+     dogfooding implementation.
 
 ## Hardening / real-world gaps
 
@@ -27,16 +41,19 @@ in daily use. Listed so they are tracked, not necessarily scheduled.
 
 ## Trust / supply chain
 
-The README sells "safe by construction," but verification currently stops at sha256 in plaintext
-manifests, so a compromise of the tome git host or the static archive host is a full compromise.
-These close that gap.
+Signed binary indexes (below, Done #19) close the static-archive-host gap. These remaining items
+extend the same model to source runes and addenda and harden the trust-establishment step.
 
-- **Signed tomes / signed `index.nuon`.** Require signed tome commits (or a signed
-  `index.nuon`) and an installer-side trust list (`grm tome add --signer …`). Likely minisign
-  or sigstore — pick before publishing the `core` tome, since signatures are easier to require
-  from day one than to retrofit.
-- **`SECURITY.md` + disclosure address.** Runes execute arbitrary build scripts; the project
-  needs a documented disclosure channel before a wider audience finds it.
+- **Signed source runes.** Index signing covers the published binary index, but a tome's
+  *source* runes are still trusted on faith. Sign a generated digest of the runes (each rune's
+  sha256) with the same minisign machinery, verified on source resolve against the pinned key.
+- **Signed addenda.** An addendum can swap a source URL + sha256, so it is as dangerous as a
+  tome. Apply the index/digest signing model symmetrically: `addendum.nuon` declares a signer,
+  the addendum publishes a signature, and the key is TOFU-pinned in `AddendumState`.
+- **Stronger trust establishment.** An explicit `grm tome add --signer <key>` to pin out of
+  band (defeating the first-use attack), deliberate key-rotation acceptance (a signed rotation
+  statement, or a `grm tome resign`-style re-pin), and an optional `require_signatures` policy
+  / a signed-required `core` once the ecosystem has signed catalogs.
 
 ## Release engineering
 
@@ -143,6 +160,15 @@ path the README advertises — which is in tension with the "one binary, every d
     elvish) writes a completion script to stdout via `clap_complete`. `grm man --output <dir>`
     renders `grm.1` plus a `grm-<sub>.1` per subcommand via `clap_mangen`. Both derive from
     the same `Cli` definition the binary uses, so they stay in sync as the CLI evolves.
+19. **Signed package index (minisign) + TOFU (Phase 1 of trust/supply-chain)** — a tome may
+    declare a minisign public key in its manifest (`packages.signer`) and publish a detached
+    `index.nuon.minisig`. `grm` verifies the signature over the index before parsing it or
+    fetching any archive; since the index already records every archive's sha256, the signature
+    transitively authenticates every binary package (`src/signing.rs`, verify-only via
+    `minisign-verify` — authors sign with the standard `minisign` tool). The key is pinned on
+    first sync (trust-on-first-use, stored as `signer_pubkey` in tome state); a later sync that
+    drops the signature, fails to verify, or advertises a different key is refused. Unsigned
+    tomes keep working (verify-if-present). Plus `SECURITY.md` and a threat-model update.
 
 ## Testing gaps (AGENTS.md §8)
 
