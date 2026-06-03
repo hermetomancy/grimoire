@@ -1732,13 +1732,13 @@ fn install_selects_constrained_dependency_version() {
 }
 
 #[test]
-fn source_install_cleans_up_build_dependency_after_success() {
+fn source_install_keeps_pulled_build_dependency_after_success() {
     let root = TempDir::new().unwrap();
     let root = root.path();
 
     // `usespath` is a source rune that lists `stampdep` as a build dep and shells out to its
-    // `stamp` binary during the build. Once the build is done, `stampdep` has served its
-    // purpose; the installer should uninstall it. `usespath`'s runtime is unchanged.
+    // `stamp` binary during the build. Build dependencies are kept after a successful source
+    // install so the managed build userland remains available for later builds.
     let tome = TempDir::new().unwrap();
     let tome = tome.path();
     let runes = tome.join("runes");
@@ -1765,39 +1765,32 @@ fn source_install_cleans_up_build_dependency_after_success() {
     );
     assert_success(&add, "add cleantome");
 
-    let install = run(root, &["install", "usespath"]);
-    assert_success(&install, "install usespath");
-    let install_out = stdout(&install);
-    assert!(
-        install_out.contains("removed build dependency stampdep"),
-        "should report stampdep cleanup: {install_out}"
-    );
+    assert_success(&run(root, &["install", "usespath"]), "install usespath");
 
     // The just-built package still works end to end.
     let output = run_shim(root, "usespath");
     assert_success(&output, "run usespath");
     assert_eq!(stdout(&output).trim(), "from build dependency");
 
-    // stampdep is fully gone — state, package dir, and shim.
+    // stampdep remains installed — state, package dir, and shim — because it is part of the
+    // managed build environment now.
     assert!(
-        !root
-            .join("state")
+        root.join("state")
             .join("packages")
             .join("stampdep.nuon")
             .exists(),
-        "stampdep state should be removed"
+        "stampdep state should remain"
     );
     assert!(
-        !root
-            .join("packages")
+        root.join("packages")
             .join("stampdep")
             .join("0.1.0")
             .exists(),
-        "stampdep package dir should be removed"
+        "stampdep package dir should remain"
     );
     assert!(
-        !root.join("bin").join("stamp").exists(),
-        "stampdep shim should be removed"
+        root.join("bin").join("stamp").exists(),
+        "stampdep shim should remain"
     );
 
     // `usespath` itself stays installed; it is the explicit target, not a build dep.
@@ -1809,8 +1802,7 @@ fn source_install_cleans_up_build_dependency_after_success() {
         "usespath should remain installed"
     );
 
-    // The built archive lives in cache/builds/ so a later install of stampdep is a cheap
-    // re-extract rather than a full source rebuild.
+    // The built archive still lives in cache/builds/ for reproducible locked/source rebuilds.
     let builds = root.join("cache").join("builds");
     let cached: Vec<_> = fs::read_dir(&builds)
         .map(|iter| {
@@ -1835,9 +1827,8 @@ fn source_install_keeps_user_installed_build_dependency() {
     let root = TempDir::new().unwrap();
     let root = root.path();
 
-    // Same shape as the previous test, but the user installs `stampdep` explicitly first.
-    // The post-build cleanup must not touch packages that were installed before the run
-    // started — only the ones it pulled in itself.
+    // Same shape as the previous test, but the user installs `stampdep` explicitly first. Keeping
+    // build deps after source installs means this should behave the same either way.
     let tome = TempDir::new().unwrap();
     let tome = tome.path();
     let runes = tome.join("runes");
@@ -1875,7 +1866,7 @@ fn source_install_keeps_user_installed_build_dependency() {
             .join("packages")
             .join("stampdep.nuon")
             .exists(),
-        "explicit stampdep install must survive the post-build cleanup"
+        "explicit stampdep install must remain after the source build"
     );
 }
 
