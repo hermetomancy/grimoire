@@ -6,7 +6,7 @@
 //! of the codebase works with already-checked data.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 
 use anyhow::{Context, Result, bail};
 use nu_protocol::{Record, Span, Value};
@@ -17,6 +17,8 @@ pub struct PackageMetadata {
     pub name: String,
     pub version: String,
     pub target: Option<String>,
+    #[serde(default)]
+    pub store_path: Option<String>,
     #[serde(default)]
     pub summary: Option<String>,
     #[serde(default)]
@@ -229,6 +231,7 @@ impl PackageMetadata {
         }
 
         let summary = optional_string(&record, "summary")?;
+        let store_path = optional_string(&record, "store_path")?;
         // A package with no executables (e.g. a library) is valid: `bins` defaults to empty.
         let bins = match record.get("bins") {
             Some(value) => expect_string_map(value, "package field `bins`")?,
@@ -257,6 +260,7 @@ impl PackageMetadata {
             name,
             version,
             target,
+            store_path,
             summary,
             bins,
             sources,
@@ -265,12 +269,20 @@ impl PackageMetadata {
         })
     }
 
-    pub fn archive_value(&self, target: &str) -> Value {
+    pub fn archive_value(&self, target: &str, store_path: Option<&Path>) -> Value {
         let mut record = Record::new();
         record.push("format", Value::int(1, Span::unknown()));
         record.push("name", Value::string(&self.name, Span::unknown()));
         record.push("version", Value::string(&self.version, Span::unknown()));
         record.push("target", Value::string(target, Span::unknown()));
+        if let Some(store_path) = store_path {
+            record.push(
+                "store_path",
+                Value::string(store_path.display().to_string(), Span::unknown()),
+            );
+        } else if let Some(store_path) = &self.store_path {
+            record.push("store_path", Value::string(store_path, Span::unknown()));
+        }
 
         let mut bins = Record::new();
         for (name, path) in &self.bins {
@@ -1158,8 +1170,34 @@ pub fn validate_package_version(version: &str) -> Result<()> {
         .with_context(|| format!("package version `{version}` is not valid semver"))
 }
 
+/// A bin name becomes a shim *file name* under `<root>/bin` — a bare symlink on unix, a
+/// `<name>.cmd` file on windows — and is never interpreted as code (shim bodies reference the
+/// target path, not the name). So, unlike package/tome identifiers, a bin name only has to be a
+/// safe single path component that works on both platforms. We allow the extra punctuation real
+/// command names use (notably `[` from coreutils) but reject path separators, control characters,
+/// the `.`/`..` directory names, a leading `.` (hidden shims), and the characters Windows forbids
+/// in file names so a name valid on one platform cannot fail to install on another.
 fn validate_bin_name(name: &str) -> Result<()> {
-    validate_ident(name, "bin name")
+    const WINDOWS_RESERVED: &str = "<>:\"/\\|?*";
+
+    if name.is_empty() {
+        bail!("bin name must not be empty");
+    }
+    if name == "." || name == ".." {
+        bail!("bin name `{name}` is not a valid file name");
+    }
+    if name.starts_with('.') {
+        bail!("bin name `{name}` must not start with `.`");
+    }
+    for c in name.chars() {
+        if !c.is_ascii_graphic() {
+            bail!("bin name `{name}` contains unsupported character (must be printable ASCII)");
+        }
+        if WINDOWS_RESERVED.contains(c) {
+            bail!("bin name `{name}` contains unsupported character `{c}`");
+        }
+    }
+    Ok(())
 }
 
 fn validate_ident(value: &str, label: &str) -> Result<()> {
@@ -1253,6 +1291,42 @@ mod tests {
             assert!(
                 validate_package_name(name).is_ok(),
                 "package name `{name}` should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_bin_name_accepts_real_command_names() {
+        // Plain names plus the punctuation real tools use, including coreutils `[` and names
+        // that lead with a digit or symbol — none of which are valid package identifiers.
+        for name in [
+            "ls",
+            "g++",
+            "py3-tools",
+            "[",
+            "7z",
+            "2to3",
+            "x86_64-gcc",
+            "a+b",
+        ] {
+            assert!(
+                validate_bin_name(name).is_ok(),
+                "bin name `{name}` should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_bin_name_rejects_unsafe_file_names() {
+        // Path separators, traversal, hidden shims, Windows-reserved characters, whitespace,
+        // control characters, and non-ASCII all break the "safe cross-platform file name" rule.
+        for name in [
+            "", "a/b", "a\\b", ".", "..", ".hidden", "a:b", "a*b", "a?b", "a|b", "a<b", "a>b",
+            "a\"b", "a b", "a\tb", "café",
+        ] {
+            assert!(
+                validate_bin_name(name).is_err(),
+                "bin name `{name}` should be rejected"
             );
         }
     }

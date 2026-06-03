@@ -6,7 +6,7 @@
 //! renames, rolling back shims and state on failure (AGENTS.md §4). `--locked` constrains
 //! resolution to the lockfile's recorded versions and hashes for a reproducible reinstall.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use semver::Version;
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
@@ -185,6 +185,8 @@ fn install_archive(archive_path: &Path, expected_hash: Option<String>) -> Result
     validate_target(&metadata, &paths::target_triple())?;
 
     let root = paths::install_root()?;
+    let package_dir = paths::package_dir(&metadata.name, &metadata.version)?;
+    validate_store_path(&metadata, &package_dir, &metadata.name, &metadata.version)?;
 
     let transactions_dir = root.join("transactions");
     fs::create_dir_all(&transactions_dir)?;
@@ -202,11 +204,6 @@ fn install_archive(archive_path: &Path, expected_hash: Option<String>) -> Result
 
     status("validating extracted files");
     validate_bins(&metadata, &staging_dir)?;
-
-    let package_dir = root
-        .join("packages")
-        .join(&metadata.name)
-        .join(&metadata.version);
 
     // Everything from here mutates shared install state. Stage each step against a
     // transaction so that a failure restores the previously installed version.
@@ -713,34 +710,90 @@ fn inspect_archive(path: &Path) -> Result<PackageMetadata> {
     bail!("package archive is missing .grimoire/package.nuon");
 }
 
-/// Validates every archive member *before* extraction (AGENTS.md §5.2): member paths must
-/// stay inside the extraction root, and symlinks/hard links are rejected outright (§5.3) so a
-/// malicious link can never be followed during `unpack`.
+fn validate_store_path(
+    metadata: &PackageMetadata,
+    expected: &Path,
+    name: &str,
+    version: &str,
+) -> Result<()> {
+    let Some(store_path) = &metadata.store_path else {
+        return Ok(());
+    };
+    let actual = Path::new(store_path);
+    let relative = paths::package_relative_dir(name, version);
+    if actual != expected && actual != relative {
+        bail!(
+            "package metadata store_path `{}` does not match install destination `{}` or relative package path `{}`",
+            store_path,
+            expected.display(),
+            relative.display()
+        );
+    }
+    Ok(())
+}
+
+/// Validates every archive member *before* extraction (AGENTS.md §5.2–§5.3): member paths must
+/// stay inside the extraction root; symlinks are allowed only when their target also resolves
+/// within the package (so a link can never point outside the install prefix), and no member may
+/// be nested *under* a symlink (which would let extraction write through the link). Hard links
+/// are still rejected outright. With these guarantees the subsequent `unpack` into a fresh
+/// staging directory cannot be lured outside the destination.
 fn validate_archive_paths(path: &Path) -> Result<()> {
     let file = File::open(path)?;
     let decoder = zstd::stream::read::Decoder::new(file)?;
     let mut archive = tar::Archive::new(decoder);
     let mut bad = Vec::new();
+    let mut members: Vec<PathBuf> = Vec::new();
+    let mut symlinks: BTreeSet<PathBuf> = BTreeSet::new();
 
     for entry in archive.entries()? {
         let entry = entry?;
-        let member = entry.path()?.display().to_string();
-        if !archive::validate_archive_member_path(&entry.path()?) {
+        let member_path = entry.path()?.into_owned();
+        let member = member_path.display().to_string();
+        if !archive::validate_archive_member_path(&member_path) {
             bad.push(member);
             continue;
         }
 
         let entry_type = entry.header().entry_type();
-        if entry_type.is_symlink() {
-            bail!("archive contains a symlink, which is not accepted yet: {member}");
-        }
         if entry_type.is_hard_link() {
             bail!("archive contains a hard link, which is not accepted yet: {member}");
         }
+        if entry_type.is_symlink() {
+            let target = entry
+                .link_name()?
+                .ok_or_else(|| anyhow!("archive symlink `{member}` is missing a target"))?;
+            if !archive::validate_symlink_target(&member_path, &target) {
+                bail!(
+                    "archive symlink `{member}` has a target that escapes the package: {}",
+                    target.display()
+                );
+            }
+            symlinks.insert(member_path.clone());
+        }
+        members.push(member_path);
     }
 
     if !bad.is_empty() {
         bail!("archive contains unsafe paths: {}", bad.join(", "));
+    }
+
+    // A member nested under a symlink would be extracted *through* that link; reject it so the
+    // validated targets are the only paths `unpack` can ever follow.
+    if !symlinks.is_empty() {
+        for member in &members {
+            if let Some(ancestor) = member
+                .ancestors()
+                .skip(1)
+                .find(|ancestor| symlinks.contains(*ancestor))
+            {
+                bail!(
+                    "archive member `{}` is nested under symlink `{}`",
+                    member.display(),
+                    ancestor.display()
+                );
+            }
+        }
     }
 
     Ok(())

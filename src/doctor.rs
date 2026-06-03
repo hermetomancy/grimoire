@@ -8,22 +8,13 @@ use anyhow::{Context, Result};
 use crate::{install, lock, paths, tome, toolchain};
 
 const CORE_USERLAND_TOOLS: &[&str] = &[
-    "make",
-    "pkg-config",
-    "m4",
-    "autoconf",
-    "automake",
-    "libtool",
-    "gettext",
     "bash",
+    "make",
     "coreutils",
     "sed",
-    "gawk",
     "grep",
-    "tar",
-    "gzip",
-    "xz",
-    "zstd",
+    "gawk",
+    "diffutils",
 ];
 
 /// Reports Grimoire's environment and validates local state. Health results (counts, the
@@ -51,17 +42,15 @@ pub fn doctor() -> Result<()> {
 
 fn check_source_build_readiness() -> Result<usize> {
     let readiness = toolchain::source_build_readiness()?;
-    let managed = installed_core_tool_count()?;
     println!(
-        "source builds: host boundary {}, managed core tools {}/{}",
+        "source builds: host compiler boundary {}",
         if readiness.is_ready() {
             "ok"
         } else {
             "missing"
-        },
-        managed,
-        CORE_USERLAND_TOOLS.len()
+        }
     );
+    report_managed_core_readiness()?;
 
     if readiness.is_ready() {
         return Ok(0);
@@ -74,12 +63,31 @@ fn check_source_build_readiness() -> Result<usize> {
     Ok(1)
 }
 
-fn installed_core_tool_count() -> Result<usize> {
+fn report_managed_core_readiness() -> Result<()> {
+    let missing = missing_core_tools()?;
+    let installed = CORE_USERLAND_TOOLS.len() - missing.len();
+    if missing.is_empty() {
+        println!(
+            "managed core userland: ready ({installed}/{})",
+            CORE_USERLAND_TOOLS.len()
+        );
+    } else {
+        println!(
+            "managed core userland: incomplete ({installed}/{}, missing {})",
+            CORE_USERLAND_TOOLS.len(),
+            missing.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn missing_core_tools() -> Result<Vec<String>> {
     let states = install::installed_states()?;
     Ok(CORE_USERLAND_TOOLS
         .iter()
-        .filter(|name| states.iter().any(|state| state.name == **name))
-        .count())
+        .filter(|name| !states.iter().any(|state| state.name == **name))
+        .map(|name| (*name).to_owned())
+        .collect())
 }
 
 fn check_tomes() -> Result<usize> {

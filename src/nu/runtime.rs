@@ -6,20 +6,25 @@
 
 use anyhow::{Context, Result, anyhow};
 use nu_protocol::{
-    PipelineData, Record, Span, Value,
+    PipelineData, Record, ShellError, Span, Value,
     debugger::WithoutDebug,
     engine::{Stack, StateWorkingSet},
+    process::check_exit_status_future,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fs,
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    thread,
 };
 
 use crate::{
     fetch::FetchedSource,
     model::{PackageMetadata, TomeManifest},
     nu::nuon_io,
+    paths, progress,
     toolchain::HostTool,
 };
 
@@ -29,8 +34,7 @@ pub trait RuneRuntime {
     fn build(
         &self,
         rune: &Path,
-        package_dir: &Path,
-        work_dir: &Path,
+        dirs: &BuildDirs,
         sources: &BTreeMap<String, FetchedSource>,
         build_flags: &BTreeMap<String, String>,
         env: &BuildEnv,
@@ -45,6 +49,13 @@ pub struct BuildEnv {
     pub path_dirs: Vec<PathBuf>,
     pub host_tools: Vec<HostTool>,
     pub inherit_host_path: bool,
+}
+
+#[derive(Debug)]
+pub struct BuildDirs {
+    pub package_dir: PathBuf,
+    pub final_prefix: PathBuf,
+    pub work_dir: PathBuf,
 }
 
 impl BuildEnv {
@@ -85,8 +96,7 @@ impl RuneRuntime for EmbeddedNuRuntime {
     fn build(
         &self,
         rune: &Path,
-        package_dir: &Path,
-        work_dir: &Path,
+        dirs: &BuildDirs,
         sources: &BTreeMap<String, FetchedSource>,
         build_flags: &BTreeMap<String, String>,
         env: &BuildEnv,
@@ -94,18 +104,22 @@ impl RuneRuntime for EmbeddedNuRuntime {
         let rune = rune
             .canonicalize()
             .with_context(|| format!("resolve rune {}", rune.display()))?;
-        let package_dir = package_dir
+        let package_dir = dirs
+            .package_dir
             .canonicalize()
-            .with_context(|| format!("resolve package dir {}", package_dir.display()))?;
-        let work_dir = work_dir
+            .with_context(|| format!("resolve package dir {}", dirs.package_dir.display()))?;
+        let final_prefix = normalize_final_prefix(&dirs.final_prefix);
+        let work_dir = dirs
+            .work_dir
             .canonicalize()
-            .with_context(|| format!("resolve work dir {}", work_dir.display()))?;
+            .with_context(|| format!("resolve work dir {}", dirs.work_dir.display()))?;
 
         let host_tool_dir = prepare_host_tool_dir(work_dir.as_path(), &env.host_tools)?;
         let path_entries = build_path_entries(env, host_tool_dir.as_deref());
         let path = build_path_string(&path_entries);
         let context = build_context(
             &package_dir,
+            &final_prefix,
             &work_dir,
             sources,
             build_flags,
@@ -131,6 +145,7 @@ impl RuneRuntime for EmbeddedNuRuntime {
 /// already-fetched, checksum-verified cache locations (AGENTS.md §5.1).
 fn build_context(
     package_dir: &Path,
+    final_prefix: &Path,
     work_dir: &Path,
     sources: &BTreeMap<String, FetchedSource>,
     build_flags: &BTreeMap<String, String>,
@@ -140,9 +155,11 @@ fn build_context(
     let mut ctx = Record::new();
     ctx.push("package_dir", path_value(package_dir));
     ctx.push("work_dir", path_value(work_dir));
-    // Grimoire installs are relocatable and user-local: the install prefix a rune should
-    // configure against is the package's own staging dir, not a system path like `/usr`.
-    ctx.push("prefix", path_value(package_dir));
+    // `prefix` is the final intended location the package should bake into configure-time
+    // metadata. `package_dir` remains the staging root used as DESTDIR.
+    ctx.push("prefix", path_value(final_prefix));
+    ctx.push("store_path", path_value(final_prefix));
+    ctx.push("target", Value::string(paths::target_triple(), span));
 
     let mut sources_record = Record::new();
     for (name, source) in sources {
@@ -168,6 +185,10 @@ fn build_context(
     if let Some(path) = path {
         env.push("PATH", Value::string(path, span));
     }
+    env.push(
+        "GRIMOIRE_VERBOSITY",
+        Value::string(progress::verbosity_name(), span),
+    );
     ctx.push("env", Value::record(env, span));
 
     Value::record(ctx, span)
@@ -175,6 +196,10 @@ fn build_context(
 
 fn path_value(path: &Path) -> Value {
     Value::string(path.display().to_string(), Span::unknown())
+}
+
+fn normalize_final_prefix(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn exported_const(path: &Path, name: &str) -> Result<Value> {
@@ -185,7 +210,10 @@ fn exported_const(path: &Path, name: &str) -> Result<Value> {
     nu_parser::parse(&mut working_set, path.to_str(), &source, false);
 
     if let Some(err) = working_set.parse_errors.first() {
-        return Err(anyhow!("could not parse {}: {err}", path.display()));
+        return Err(anyhow!(
+            "could not parse {}: {err} ({err:?})",
+            path.display()
+        ));
     }
 
     let var_id = working_set
@@ -214,7 +242,8 @@ fn eval_nu_source(
         "PWD".to_string(),
         Value::string(cwd.display().to_string(), nu_protocol::Span::unknown()),
     );
-    let mut stack = Stack::new();
+    let mut streamer = BuildLogStreamer::start()?;
+    let mut stack = streamer.configure_stack(Stack::new())?;
     stack.add_env_var(
         "PWD".to_string(),
         Value::string(cwd.display().to_string(), nu_protocol::Span::unknown()),
@@ -246,19 +275,171 @@ fn eval_nu_source(
     engine_state
         .merge_delta(delta)
         .context("merge embedded Nushell build runner")?;
-    let output = nu_engine::eval_block::<WithoutDebug>(
+    let eval_result = nu_engine::eval_block::<WithoutDebug>(
         &engine_state,
         &mut stack,
         &block,
         PipelineData::empty(),
-    )
-    .context("evaluate embedded Nushell build runner")?;
+    );
+    // Drop the stack to close our copies of the pipe writers; the child still holds its ends until
+    // it exits, which the exit-status check below waits for.
+    drop(stack);
 
-    if let PipelineData::Value(Value::Error { error, .. }, ..) = output.body {
-        return Err(anyhow!("embedded Nushell build failed: {error}"));
+    // Resolve the outcome before joining the log readers. Returning `eval_block`'s result is not
+    // enough: a build whose *final* command is a failing external (e.g. a `sh -c "./configure ..."`
+    // that exits non-zero) leaves the failure in the pipeline's exit status, not as an error value.
+    // Draining the body and checking each element's exit status — exactly what Nushell's own
+    // `eval_source` does for pipefail — surfaces it, so a failed build aborts instead of packing a
+    // broken archive. `complete`-captured commands mark themselves handled and do not trip this.
+    let outcome = match eval_result {
+        Err(error) => Err(error),
+        Ok(output) => match output.body {
+            PipelineData::Value(Value::Error { error, .. }, ..) => Err(*error),
+            body => match body.drain() {
+                Ok(()) => check_exit_status_future(output.exit),
+                Err(error) => Err(error),
+            },
+        },
+    };
+    let tail = streamer.finish();
+
+    outcome.map_err(|error| build_failure(&error, &tail))
+}
+
+/// Turns a build-time [`ShellError`] into a reportable error: a one-line Nushell diagnostic
+/// (exit code / signal where we have it, otherwise the error's own message) followed by the tail
+/// of the build's own stdout/stderr, which is where the actual `configure`/compiler error lives.
+fn build_failure(error: &ShellError, tail: &[String]) -> anyhow::Error {
+    let mut message = format!(
+        "embedded Nushell build failed: {}",
+        describe_shell_error(error)
+    );
+    if !tail.is_empty() {
+        message.push_str("\nlast build output:");
+        for line in tail {
+            message.push_str("\n    ");
+            message.push_str(line);
+        }
+    }
+    anyhow!(message)
+}
+
+/// The terse `Display` of [`ShellError`] collapses external-command failures to "External command
+/// had a non-zero exit code". Pull the diagnostic detail (exit code / signal) out of the variants
+/// that carry it so the surfaced error names what actually happened.
+fn describe_shell_error(error: &ShellError) -> String {
+    match error {
+        ShellError::NonZeroExitCode { exit_code, .. } => {
+            format!("external command exited with code {exit_code}")
+        }
+        #[cfg(unix)]
+        ShellError::TerminatedBySignal {
+            signal_name,
+            signal,
+            ..
+        } => format!("external command was terminated by {signal_name} ({signal})"),
+        other => other.to_string(),
+    }
+}
+
+/// How many trailing build-output lines to retain for error reports. Enough to capture a typical
+/// `configure`/compiler failure without dumping the whole log into the error.
+const BUILD_TAIL_LINES: usize = 40;
+
+/// Shared ring buffer of the most recent build-output lines, filled by the reader threads
+/// regardless of verbosity so a failed build can report what went wrong.
+type BuildTail = Arc<Mutex<VecDeque<String>>>;
+
+struct BuildLogStreamer {
+    stdout: Option<thread::JoinHandle<()>>,
+    stderr: Option<thread::JoinHandle<()>>,
+    stdout_writer: Option<std::fs::File>,
+    stderr_writer: Option<std::fs::File>,
+    tail: BuildTail,
+}
+
+impl BuildLogStreamer {
+    fn start() -> Result<Self> {
+        let (stdout_reader, stdout_writer) = os_pipe::pipe().context("create build stdout pipe")?;
+        let (stderr_reader, stderr_writer) = os_pipe::pipe().context("create build stderr pipe")?;
+        let tail: BuildTail = Arc::new(Mutex::new(VecDeque::with_capacity(BUILD_TAIL_LINES)));
+        Ok(Self {
+            stdout: Some(spawn_build_log_reader(stdout_reader, Arc::clone(&tail))),
+            stderr: Some(spawn_build_log_reader(stderr_reader, Arc::clone(&tail))),
+            stdout_writer: Some(pipe_writer_file(stdout_writer)),
+            stderr_writer: Some(pipe_writer_file(stderr_writer)),
+            tail,
+        })
     }
 
-    Ok(())
+    fn configure_stack(&mut self, stack: Stack) -> Result<Stack> {
+        let stdout = self
+            .stdout_writer
+            .take()
+            .context("build stdout writer was already consumed")?;
+        let stderr = self
+            .stderr_writer
+            .take()
+            .context("build stderr writer was already consumed")?;
+        Ok(stack.reset_pipes().stdout_file(stdout).stderr_file(stderr))
+    }
+
+    /// Joins the reader threads (so the tail holds all drained output) and returns the retained
+    /// trailing lines for error reporting.
+    fn finish(mut self) -> Vec<String> {
+        if let Some(handle) = self.stdout.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.stderr.take() {
+            let _ = handle.join();
+        }
+        match self.tail.lock() {
+            Ok(tail) => tail.iter().cloned().collect(),
+            Err(poisoned) => poisoned.into_inner().iter().cloned().collect(),
+        }
+    }
+}
+
+impl Drop for BuildLogStreamer {
+    fn drop(&mut self) {
+        if let Some(handle) = self.stdout.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.stderr.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn spawn_build_log_reader(reader: os_pipe::PipeReader, tail: BuildTail) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        for line in BufReader::new(reader).lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            if let Ok(mut tail) = tail.lock() {
+                if tail.len() == BUILD_TAIL_LINES {
+                    tail.pop_front();
+                }
+                tail.push_back(line.clone());
+            }
+            progress::build_log_line(&line);
+        }
+    })
+}
+
+#[cfg(unix)]
+fn pipe_writer_file(writer: os_pipe::PipeWriter) -> std::fs::File {
+    use std::os::fd::OwnedFd;
+
+    OwnedFd::from(writer).into()
+}
+
+#[cfg(windows)]
+fn pipe_writer_file(writer: os_pipe::PipeWriter) -> std::fs::File {
+    use std::os::windows::io::OwnedHandle;
+
+    OwnedHandle::from(writer).into()
 }
 
 struct WorkingDirectoryGuard {

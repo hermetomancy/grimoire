@@ -5,49 +5,62 @@
 <h1 align="center">Grimoire</h1>
 
 <p align="center">
-  A fast, git-native, cross-platform package manager with reproducible installs.
+  An imperative package manager growing toward a fixed-store, rollback-able distro model.
 </p>
 
 ---
 
-Grimoire installs and manages software on Linux, macOS, and Windows from a single
-self-contained binary. It installs prebuilt packages instantly when they exist and
-builds from source when they don't — without asking you to install a compiler,
-a shell, or any other tooling first.
+Grimoire is a self-contained Rust package manager for Linux, macOS, and Windows that embeds Nushell
+to run package recipes called **runes**. It installs verified prebuilt packages when they exist,
+builds from source when they do not, and manages package catalogs as ordinary git repositories
+called **tomes**.
 
-Packages live in ordinary git repositories, so the catalog you install from can be
-forked, pinned, reviewed, and rolled back like any other code.
+The long-term target is sharper than a user-local package manager: Grimoire is designed to become
+both a secondary package manager on existing systems and the primary package manager of its own
+Linux distribution. The destination is a fixed content-addressed store at `/grm/store`, profiles,
+generations, rollback, garbage collection, imperative recipes, and a signed binary cache.
+
+Today, Grimoire still uses a user-local install root and profile-like shims. That current layout is
+documented in [docs/layout.md](docs/layout.md). The future store model is documented in
+[docs/design/store-and-distro-model.md](docs/design/store-and-distro-model.md).
 
 ## Highlights
 
-- **One binary, every desktop.** Runs natively on Linux, macOS, and Windows. No WSL,
-  no external tools to install before you can install software.
-- **Prebuilt or from source.** Grimoire grabs a verified prebuilt package when one
-  matches your system, and falls back to a source build only when it has to.
-- **No admin rights needed.** Everything installs into a user-local directory, and
-  executables are exposed through shims you can drop on your `PATH`.
-- **Reproducible by default.** A lockfile records exactly what was installed — versions,
-  checksums, sources, and dependencies — so an install can be reproduced or audited.
-- **Safe by construction.** Every download is checksum-verified before it is trusted,
-  and archives are validated before extraction.
-- **Git-native catalogs.** Package sets are git repositories you can fork, pin to a
-  commit, diff, and roll back.
-- **Data-only overlays.** Addenda patch package metadata without executing hooks, so local
-  source/checksum/dependency overrides stay reviewable.
+- **Imperative runes.** Package recipes are Nushell `build` functions, closer to PKGBUILDs or
+  ebuilds than to a functional package DSL.
+- **Git-native catalogs.** Tomes are git repositories you can fork, diff, pin, and update.
+- **Binary-first installs.** Grimoire prefers a signed/checksum-verified prebuilt package for your
+  target and falls back to source builds when needed.
+- **Native machinery.** Grimoire does not shell out to `git`, `tar`, `zstd`, `curl`, or `nu` for
+  its own work; those capabilities are linked Rust crates or the embedded Nushell engine.
+- **Managed build dependencies.** Source builds install declared build dependencies, put their
+  `bin/` directories on `PATH`, and clean up build-only dependencies afterwards.
+- **Reproducible state.** Lockfiles record installed packages, versions, hashes, dependencies, tome
+  commits, and addenda.
+- **Trustable binaries.** Tome indexes can be minisign-signed and TOFU-pinned, so an index
+  signature authenticates every archive hash it publishes.
+- **Future fixed store.** The roadmap moves from today's user-local layout to `/grm/store`,
+  profiles, generations, rollback, and GC roots.
 
 ## Install
+
+During early development, install from source:
 
 ```sh
 cargo install grimoire
 ```
 
-This installs the `grm` command.
+This installs the `grm` command. Release archives and `grm self-update` are planned once signed
+multi-platform releases exist.
 
-## Quick start
+## Quick Start
 
 ```sh
-# Add a catalog of packages (a "tome")
-grm tome add https://github.com/example/core-runes.git --ref main
+# Add a package catalog
+grm tome add https://github.com/grimoire-of-glass/tome-core --ref main
+
+# Keep catalogs fresh
+grm tome update
 
 # Find and inspect packages
 grm search hello
@@ -55,163 +68,197 @@ grm info hello
 
 # Install, upgrade, and remove
 grm install hello
-grm upgrade hello
+grm upgrade          # also updates configured tomes first
 grm remove hello     # also removes runtime deps nothing else still needs
 
-# Preview what an install or upgrade would do without touching state
+# Preview without touching state
 grm install hello --dry-run
 grm upgrade --dry-run
 
-# Hold a package back from upgrade until you release it
+# Hold a package back from upgrade
 grm hold hello
 grm unhold hello
 
-# Reclaim disk space (caches and stale transaction dirs; installs untouched)
-grm clean
-
-# Shell completions and man pages
-grm completions bash > ~/.local/share/bash-completion/completions/grm
-grm man --output ./man
-
-# Build from source explicitly
-grm install hello --from-source
-
-# Reproduce exactly what the lockfile records
-grm install hello --locked
-
-# See what's installed and check your setup
+# Check and clean
 grm list
 grm doctor
+grm clean
 ```
 
-Most commands have short aliases, so the above can be terser — `grm in hello`,
-`grm rm hello`, `grm up`, `grm s hello`, `grm ls`. Run `grm --help` to see them all.
+Common aliases exist: `grm in hello`, `grm rm hello`, `grm up`, `grm s hello`, `grm ls`. Run
+`grm --help` for the full command tree.
 
-Progress messages go to stderr; results go to stdout. Add `--quiet` (`-q`) to silence
-progress while keeping the result.
+Progress and diagnostics go to stderr; command results go to stdout. Use `--quiet` / `-q` to
+suppress progress, or `--verbose` for persistent progress lines and full build output.
 
-## Authoring a tome
+## Authoring Tomes
 
-Create your own catalog and start packaging software:
+Create a catalog and package a program:
 
 ```sh
-grm tome init mytome --path ./mytome   # scaffold a tome
-grm tome rune widget --path ./mytome   # add a package definition (rune)
-grm tome add ./mytome                  # register it locally to test
+grm tome init mytome --path ./mytome
+grm tome rune widget --path ./mytome
+grm tome add ./mytome --ref main
 grm install widget --from-source
-grm tome build widget --path ./mytome  # build a prebuilt archive into dist/
-grm tome build --all --path ./mytome   # build every rune in the tome
+
+# Publish prebuilt packages into the tome's dist/ directory
+grm tome build widget --path ./mytome
+grm tome build --all --path ./mytome
 ```
 
-`grm tome init` writes a `tome.rn` manifest alongside `runes/`, `sources/`, a git-ignored
-`dist/`, and a `.gitignore`. `grm tome rune` drops a templated rune you fill in with the
-package's sources, dependencies, and build steps.
+`grm tome init` creates:
 
-`grm tome build` compiles a rune into a verified archive and records it in `dist/index.nuon`.
-The `dist/` directory is the publishing unit: it holds the index plus every prebuilt archive
-and is kept out of git. To publish, upload the whole `dist/` directory to a static webserver
-and point the manifest's `packages.repo` at that base URL (`format: "http"`); installers then
-fetch the index and checksum-verified archives over HTTP. For local testing, set `repo` to a
-filesystem path with `format: "local"`. Either way, the git repository carries only your runes
-and `tome.rn` — never the built binaries.
+- `tome.rn`: the tome manifest
+- `runes/`: package recipes
+- `sources/`: optional local source payloads
+- `dist/`: git-ignored package index + prebuilt archives
+- `.gitignore`
 
-### Signing a tome (optional but recommended)
-
-The package index records the checksum of every archive, so signing the index authenticates
-every prebuilt package at once. Grimoire verifies [minisign](https://jedisct1.github.io/minisign/)
-signatures; you sign with the standard `minisign` tool (Grimoire never holds your private key).
-
-```sh
-minisign -G                                    # one-time: generate a keypair
-grm tome build --all --path ./mytome           # (re)build dist/index.nuon
-minisign -S -m ./mytome/dist/index.nuon        # writes dist/index.nuon.minisig
-```
-
-Then declare the public key in `tome.rn` so installers know what to expect, publishing
-`index.nuon` and `index.nuon.minisig` together:
+`grm tome build` writes a `.tar.zst` archive and upserts it into `dist/index.nuon`. To publish,
+upload `dist/` to a static host and point `tome.rn` at it:
 
 ```nu
 packages: {
   repo: "https://example.com/mytome"
   format: "http"
   index: "index.nuon"
-  signer: "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3"  # `minisign -p` output
 }
 ```
 
-The first time a user adds the tome, Grimoire pins this key (trust on first use); from then on
-every sync must carry a valid signature from it, and a changed key is refused until the user
-re-adds the tome. Tomes without a `signer` keep working unsigned. Re-sign whenever you rebuild
-the index — a stale signature will be rejected.
+For local testing, use `format: "local"` and a filesystem path.
 
-### Source build context
+## Signing a Tome
 
-During a source build, Grimoire fetches every declared source, verifies its `sha256`, prepares a
-temporary build workspace, installs build dependencies, then calls the rune's `build` function with
-a `ctx` record. The build function should assemble the package under `ctx.package_dir`; Grimoire
-packs that directory into the final `.tar.zst`.
+The package index records each archive's checksum, so signing the index authenticates every
+prebuilt package it names. Grimoire verifies minisign signatures; authors sign with `minisign`.
 
-The build context fields are:
+```sh
+minisign -G
+grm tome build --all --path ./mytome
+minisign -S -m ./mytome/dist/index.nuon
+```
 
-- `ctx.sources.<name>.path`: the verified source artifact, keyed by the name used in
-  `package.sources`. This is the cached file Grimoire checked against the declared checksum.
-- `ctx.sources.<name>.dir`: for `.tar.zst` and `.tzst` sources, the directory where Grimoire
-  natively extracted the archive after validating every member path and rejecting links. For other
-  source types this is `null`.
-- `ctx.env.PATH`: the build PATH visible to Nushell and external commands run by the package's
-  build script. Grimoire prepends each installed build dependency's `bin/` directory, then appends
-  the host PATH.
-- `ctx.package_dir`: the staging root that becomes the installed package. Put files here exactly as
-  they should appear after install, for example `bin/tool`, `lib/...`, or `share/...`.
-- `ctx.work_dir`: a scratch directory for the build. It contains Grimoire-prepared sources and may
-  be used for temporary build output.
-- `ctx.prefix`: the install prefix to pass to conventional build systems. It currently points at
-  the same path as `ctx.package_dir`, so configure-style builds can use `./configure
-  --prefix=$ctx.prefix` followed by `make install PREFIX=$ctx.package_dir`.
-- `ctx.build_flags`: inert string key/value data from the rune's `build_flags` metadata after
-  addenda have been applied. Runes may read it to choose configure options or feature flags.
-
-For a typical archived source package, a rune build might look like:
+Declare the public key in `tome.rn`:
 
 ```nu
-export def build [ctx] {
-  let src = ($ctx.sources.main.dir | path join "widget-1.2.3")
-  cd $src
-  ./configure $"--prefix=($ctx.prefix)"
-  make
-  make install $"PREFIX=($ctx.package_dir)"
+packages: {
+  repo: "https://example.com/mytome"
+  format: "http"
+  index: "index.nuon"
+  signer: "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3"
 }
 ```
+
+On first sync, Grimoire pins the key. Later syncs must verify with the same key; a missing
+signature, invalid signature, or changed key is refused. Unsigned tomes still work, but official
+and security-sensitive tomes should be signed.
+
+## Rune Build Context
+
+A rune exports package metadata and, when source builds are supported, a `build` function:
+
+```nu
+export const package = {
+  name: "widget"
+  version: "1.2.3"
+  sources: {
+    main: {
+      url: "https://example.com/widget-1.2.3.tar.gz"
+      sha256: "sha256:..."
+    }
+  }
+  deps: {
+    build: { default: ["make"] }
+    runtime: []
+  }
+  bins: { widget: "bin/widget" }
+}
+
+export def build [ctx] {
+  let src = ($ctx.sources.main.dir | path join "widget-1.2.3")
+  sh -c $"
+    set -eu
+    cd '($src)'
+    ./configure --prefix='($ctx.prefix)'
+    make
+    make install PREFIX='($ctx.package_dir)'
+  "
+}
+```
+
+Current context fields:
+
+- `ctx.sources.<name>.path`: verified source artifact.
+- `ctx.sources.<name>.dir`: native extraction directory for `.tar.gz`, `.tar.xz`, and `.tar.zst`
+  sources after path/link validation.
+- `ctx.env.PATH`: build dependency `bin/` directories plus the allowed host boundary.
+- `ctx.package_dir`: current staging/package root.
+- `ctx.work_dir`: scratch build directory.
+- `ctx.prefix`: currently the package staging prefix. This is scheduled to change to the final
+  intended prefix as part of the store migration.
+- `ctx.target`: current target triple, for target-specific build choices.
+- `ctx.build_flags`: inert string key/value build options after addenda are applied.
+
+### Upcoming Build Contract Change
+
+The fixed-store model requires a stricter contract:
+
+```text
+ctx.prefix      = final store path known before build
+ctx.package_dir = staging root
+```
+
+Configure-style builds should then use:
+
+```sh
+./configure --prefix="$ctx.prefix"
+make
+make install DESTDIR="$ctx.package_dir"
+```
+
+That is the next major compatibility step because binaries must bake their final store path, not a
+temporary staging directory.
 
 ## Concepts
 
-- **Runes** are package definitions. Each rune declares a package — its version, sources,
-  dependencies, and the executables it provides — and, when needed, how to build it from
-  source. Dependencies can pin a version requirement (`{ name: "lib", version: ">=1.2" }`),
-  and Grimoire resolves a set of versions that satisfies every constraint in the graph.
-- **Tomes** are catalogs of runes: ordinary git repositories you add, update, and pin.
-- **Packages** install as self-contained archives with embedded metadata and checksums.
-  Source builds and prebuilt downloads both produce the same kind of archive, so installs
-  behave identically either way.
-- **Addenda** are customization layers that patch a tome's package metadata without forking it,
-  in the spirit of overlays. They are inert NUON data: no hooks or scripts run from an addendum.
+- **Runes** are package definitions: metadata plus optional imperative source-build logic.
+- **Tomes** are git-backed catalogs of runes and package indexes.
+- **Addenda** are data-only overlays that patch package metadata without executing hooks.
+- **Binary indexes** list prebuilt archives, hashes, targets, and dependencies.
+- **The future store** is `/grm/store/<hash>-<name>-<version>`, with activation through profiles
+  and generations rather than direct mutation of installed package directories.
+
+## Future Store Model
+
+The target architecture borrows the store/generation ideas from Nix and Guix, while keeping rune
+authoring closer to Arch/Gentoo:
+
+- Packages live at fixed content-addressed paths under `/grm/store`.
+- Profiles are symlink trees that expose a selected package set.
+- Every install, remove, or upgrade creates a new generation.
+- Rollback repoints to an older generation; it does not rebuild.
+- GC roots keep retained generations alive.
+- Binaries are trusted through signed binhosts.
+- On the Grimoire distro target, executable FHS paths like `/bin` and `/usr/bin` are generated as
+  symlink views, while libraries stay isolated in the store.
+
+Read the full design in [docs/design/store-and-distro-model.md](docs/design/store-and-distro-model.md).
 
 ## Addenda
 
-An addendum repository has an `addendum.nuon` file at its root:
+An addendum repository has an `addendum.nuon` at its root:
 
 ```nuon
 {
   name: mypatches
   patches: [
     {
-      tome: example
+      tome: core
       package: hello
-      version: "0.2.0"
-      summary: "hello with a local source override"
+      version: "2.12.1"
       sources: {
         main: {
-          url: "hello-0.2.0.tar.zst"
+          url: "hello-2.12.1.tar.gz"
           sha256: "sha256:..."
         }
       }
@@ -227,40 +274,42 @@ An addendum repository has an `addendum.nuon` file at its root:
 }
 ```
 
-`tome` is optional; when omitted, the patch applies to any rune with the matching package name.
-Scalar fields (`version`, `summary`, `target`) replace the rune's metadata, `sources`, `bins`, and
-`build_flags` merge by key, and `deps` replaces the rune's dependency policy. Addenda are managed with
-`grm addendum add <git-url-or-local-path>`, `grm addendum list`, and `grm addendum remove <name>`.
+Manage addenda with:
 
-## How it compares
+```sh
+grm addendum add <git-url-or-local-path>
+grm addendum list
+grm addendum remove <name>
+```
 
-Grimoire borrows the fast archive-first install model of system package managers, the
-source-definition and layering ideas of functional package managers, and the git-backed
-catalog model of per-user installers — while staying OS-independent and conventional.
+Addenda are inert NUON data. They can patch package metadata, but they cannot run hooks.
 
-| Tool | Main focus | Catalog model | Grimoire difference |
-| --- | --- | --- | --- |
-| **Pacman** | Fast binary installs | Distribution repositories | Same archive-first speed, but OS-independent definitions and source builds as a first-class fallback. |
-| **Scoop** | Lightweight Windows app installs | Git buckets of manifests | Generalizes buckets into cross-platform tomes with prebuilt-package repos and layering. |
-| **Chocolatey** | Windows software + automation | Central feed (+ private feeds) | No central feed assumed; git repositories are the native distribution unit. |
-| **Homebrew** | Developer packages on macOS/Linux | Git taps of formulae | Keeps git-backed catalogs but runs natively on Windows too, with first-class customization layers. |
-| **Nix** | Reproducible builds & environments | Declarative repos / channels | Source definitions, pins, and overlays without requiring a full functional store model. |
+## Comparison
 
-## Further reading
+| Tool | What Grimoire Borrows | What Grimoire Changes |
+| --- | --- | --- |
+| Nix / Guix | Fixed store, generations, rollback, binary cache direction | Imperative runes instead of a functional package language |
+| Gentoo / Portage | Source builds, feature flags, overlays, binhost trust model | Store/generation rollback as a first-class goal |
+| Arch / Pacman | Fast binary packages and simple user experience | Git-native tomes and source fallback |
+| Homebrew | Git-backed package catalogs and developer ergonomics | Fixed-store trajectory and Linux distro ambitions |
+| GoboLinux | Per-package-version store spirit and FHS symlink friendliness | Content addressing, generations, signed binhost |
 
-- [Threat model](docs/threat-model.md) — what `grm` does and does not protect against,
-  given git-native catalogs and arbitrary build scripts.
-- [Operating layout](docs/layout.md) — where state lives under the install root, what's
-  safe to delete, and how to relocate via `GRIMOIRE_ROOT`.
+## Further Reading
+
+- [Target store + distro design](docs/design/store-and-distro-model.md)
+- [Current operating layout](docs/layout.md)
+- [Threat model](docs/threat-model.md)
+- [TODO roadmap](TODO.md)
 
 ## Status
 
-Grimoire is in early development. Installing (prebuilt and from source), building,
-version-aware dependency resolution, publishing prebuilt archives over HTTP, removal with
-dependency autoremove, upgrades with hold/unhold, `--dry-run` plans, lockfiles with reproducible
-`--locked` installs, addenda, minisign-signed package indexes (trust-on-first-use), an
-install-root concurrency lock, cache cleanup, shell completions/man pages, and health checks are
-working today.
+Grimoire is early but functional. Current support includes git-native tomes, source builds,
+verified downloads, binary indexes, signed indexes with TOFU pinning, version-aware dependency
+resolution, build dependencies, addenda, lockfiles, locked installs, holds, dry-run plans,
+autoremove, health checks, shell completions, man pages, live build output, and cache cleanup.
+
+The next architectural step is the store-prep build contract: final prefix separate from staging,
+so the eventual `/grm/store` migration does not require rewriting every rune twice.
 
 ## License
 

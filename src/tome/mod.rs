@@ -357,8 +357,16 @@ pub fn update(args: TomeUpdateArgs) -> Result<()> {
     }
 
     for tome in tomes {
-        sync_tome_cache(&tome)?;
-        report(&format!("updated tome {}", tome.name));
+        let sync = sync_tome_cache(&tome)?;
+        report(&sync.report_line());
+    }
+    Ok(())
+}
+
+pub fn update_all_configured() -> Result<()> {
+    for tome in load_tomes()? {
+        let sync = sync_tome_cache(&tome)?;
+        report(&sync.report_line());
     }
     Ok(())
 }
@@ -422,7 +430,44 @@ pub fn ensure_tome_cache(tome: &TomeState) -> Result<PathBuf> {
     Ok(cache_path)
 }
 
-fn sync_tome_cache(tome: &TomeState) -> Result<()> {
+#[derive(Debug)]
+struct TomeSyncReport {
+    name: String,
+    ref_name: String,
+    from_commit: Option<String>,
+    to_commit: Option<String>,
+}
+
+impl TomeSyncReport {
+    fn report_line(&self) -> String {
+        if self.from_commit.is_some()
+            && self.to_commit.is_some()
+            && self.from_commit == self.to_commit
+        {
+            return format!(
+                "tome {} already at latest ({} {})",
+                self.name,
+                self.ref_name,
+                short_commit(self.to_commit.as_deref())
+            );
+        }
+        format!(
+            "updated tome {} ({} {} -> {})",
+            self.name,
+            self.ref_name,
+            short_commit(self.from_commit.as_deref()),
+            short_commit(self.to_commit.as_deref())
+        )
+    }
+}
+
+fn short_commit(commit: Option<&str>) -> String {
+    commit
+        .map(|commit| commit.chars().take(7).collect())
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn sync_tome_cache(tome: &TomeState) -> Result<TomeSyncReport> {
     let cache_dir = tome_cache_dir()?;
     let cache_path = tome_cache_path(&tome.name)?;
     fs::create_dir_all(&cache_dir)?;
@@ -442,7 +487,13 @@ fn sync_tome_cache(tome: &TomeState) -> Result<()> {
     }
 
     validate_staged_tome_cache(tome, &staged)?;
-    promote_tome_cache(tome, &staged, &cache_path)
+    let to_commit = promote_tome_cache(tome, &staged, &cache_path)?;
+    Ok(TomeSyncReport {
+        name: tome.name.clone(),
+        ref_name: tome.ref_name.clone(),
+        from_commit: tome.checked_commit.clone(),
+        to_commit,
+    })
 }
 
 fn is_local_tome_source(url: &str) -> bool {
@@ -497,7 +548,7 @@ fn validate_local_tome_if_available(name: &str, url: &str) -> Result<()> {
     validate_tome_cache(&tome, source, &manifest, &runtime)
 }
 
-fn record_tome_sync_state(tome: &TomeState, cache_path: &Path) -> Result<()> {
+fn record_tome_sync_state(tome: &TomeState, cache_path: &Path) -> Result<Option<String>> {
     let runtime = EmbeddedNuRuntime;
     let manifest_path = cache_path.join("tome.rn");
     if !manifest_path.exists() {
@@ -514,12 +565,13 @@ fn record_tome_sync_state(tome: &TomeState, cache_path: &Path) -> Result<()> {
     // state is written, so the pin and the cached manifest always move together.
     let signer_pubkey = capture_signer(tome, cache_path, &manifest, state.signer_pubkey.clone())?;
     state.checked_ref = Some(tome.ref_name.clone());
-    state.checked_commit = commit;
+    state.checked_commit = commit.clone();
     state.tome = Some(manifest);
     state.signer_pubkey = signer_pubkey;
 
     let state_path = tome_state_dir()?.join(format!("{}.nuon", tome.name));
-    nuon_io::write_nuon(&state_path, &state.to_value())
+    nuon_io::write_nuon(&state_path, &state.to_value())?;
+    Ok(commit)
 }
 
 /// Loads a tome's binary package index along with the package-repository root that its
@@ -747,7 +799,11 @@ fn validate_staged_tome_cache(tome: &TomeState, cache_path: &Path) -> Result<()>
     validate_tome_cache(tome, cache_path, &manifest, &runtime)
 }
 
-fn promote_tome_cache(tome: &TomeState, staged: &Path, cache_path: &Path) -> Result<()> {
+fn promote_tome_cache(
+    tome: &TomeState,
+    staged: &Path,
+    cache_path: &Path,
+) -> Result<Option<String>> {
     let backup = tome_cache_backup_path(cache_path)?;
     let had_previous = cache_path.exists();
     if backup.exists() {
@@ -768,18 +824,21 @@ fn promote_tome_cache(tome: &TomeState, staged: &Path, cache_path: &Path) -> Res
         return Err(err);
     }
 
-    if let Err(err) = record_tome_sync_state(tome, cache_path) {
-        let _ = fs::remove_dir_all(cache_path);
-        if had_previous {
-            let _ = fs::rename(&backup, cache_path);
+    let commit = match record_tome_sync_state(tome, cache_path) {
+        Ok(commit) => commit,
+        Err(err) => {
+            let _ = fs::remove_dir_all(cache_path);
+            if had_previous {
+                let _ = fs::rename(&backup, cache_path);
+            }
+            return Err(err);
         }
-        return Err(err);
-    }
+    };
 
     if had_previous {
         let _ = fs::remove_dir_all(&backup);
     }
-    Ok(())
+    Ok(commit)
 }
 
 fn tome_cache_backup_path(cache_path: &Path) -> Result<PathBuf> {
@@ -905,4 +964,39 @@ fn tome_cache_dir() -> Result<PathBuf> {
 /// populated should use [`ensure_tome_cache`].
 pub fn tome_cache_path(name: &str) -> Result<PathBuf> {
     Ok(tome_cache_dir()?.join(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_report_says_already_latest_when_commit_is_unchanged() {
+        let report = TomeSyncReport {
+            name: "core".to_owned(),
+            ref_name: "main".to_owned(),
+            from_commit: Some("abcdef1234567890".to_owned()),
+            to_commit: Some("abcdef1234567890".to_owned()),
+        };
+
+        assert_eq!(
+            report.report_line(),
+            "tome core already at latest (main abcdef1)"
+        );
+    }
+
+    #[test]
+    fn sync_report_shows_commit_movement_when_commit_changes() {
+        let report = TomeSyncReport {
+            name: "core".to_owned(),
+            ref_name: "main".to_owned(),
+            from_commit: Some("abcdef1234567890".to_owned()),
+            to_commit: Some("1234567890abcdef".to_owned()),
+        };
+
+        assert_eq!(
+            report.report_line(),
+            "updated tome core (main abcdef1 -> 1234567)"
+        );
+    }
 }

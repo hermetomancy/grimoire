@@ -6,18 +6,21 @@
 //! installs behave identically whether a package came from source or a binary repo.
 
 use anyhow::{Context, Result, bail};
+use flate2::read::GzDecoder;
 use std::{
     collections::BTreeMap,
     fs::File,
+    io::Read,
     path::{Path, PathBuf},
 };
+use xz2::read::XzDecoder;
 
 use crate::{
     addendum, archive,
     archive::pack,
     cli::BuildArgs,
     fetch::{self, FetchedSource},
-    nu::runtime::{BuildEnv, EmbeddedNuRuntime, RuneRuntime},
+    nu::runtime::{BuildDirs, BuildEnv, EmbeddedNuRuntime, RuneRuntime},
     paths,
     progress::{report, status},
     tome,
@@ -34,6 +37,19 @@ pub fn build_package(package: &str, output: &Path) -> Result<PathBuf> {
 }
 
 pub fn build_package_with_env(package: &str, output: &Path, env: &BuildEnv) -> Result<PathBuf> {
+    // A space in the install root breaks source builds: configure records the absolute paths of
+    // build tools (MKDIR_P, INSTALL, ...) — which live under the root — and Makefiles use them
+    // unquoted, so a path like `~/Library/Application Support/...` splits at the space. Fail early
+    // with a clear message instead of a cryptic `make` error 30 seconds in.
+    let root = paths::install_root()?;
+    if root.to_string_lossy().contains(char::is_whitespace) {
+        bail!(
+            "install root `{}` contains whitespace, which breaks source builds; \
+             set GRIMOIRE_ROOT to a path without spaces",
+            root.display()
+        );
+    }
+
     let original_cwd = std::env::current_dir().context("read current working directory")?;
     status(&format!("resolving rune ({package})"));
     let rune = resolve_rune(package)?;
@@ -52,26 +68,25 @@ pub fn build_package_with_env(package: &str, output: &Path, env: &BuildEnv) -> R
     let temp = tempfile::tempdir()?;
     let work_dir = temp.path().join("work");
     let package_dir = temp.path().join("package");
+    let final_prefix = paths::package_dir(&metadata.name, &metadata.version)?;
+    let dirs = BuildDirs {
+        package_dir: package_dir.clone(),
+        final_prefix: final_prefix.clone(),
+        work_dir: work_dir.clone(),
+    };
     std::fs::create_dir_all(&work_dir)?;
     std::fs::create_dir_all(&package_dir)?;
     let sources = prepare_sources(sources, &work_dir)?;
 
     status(&format!("building ({})", rune.display()));
     let build_result = runtime
-        .build(
-            &rune,
-            &package_dir,
-            &work_dir,
-            &sources,
-            &metadata.build_flags,
-            env,
-        )
+        .build(&rune, &dirs, &sources, &metadata.build_flags, env)
         .with_context(|| format!("build rune {}", rune.display()));
     std::env::set_current_dir(&original_cwd)
         .with_context(|| format!("restore working directory {}", original_cwd.display()))?;
     build_result?;
 
-    let archive = pack::pack_built_rune(&rune, &metadata, &package_dir, output)?;
+    let archive = pack::pack_built_rune(&rune, &metadata, &package_dir, &final_prefix, output)?;
     drop(temp);
     Ok(archive)
 }
@@ -99,10 +114,10 @@ fn prepare_sources(
     let sources_dir = work_dir.join("sources");
     let mut prepared = BTreeMap::new();
     for (name, mut source) in sources {
-        if source_should_extract(&source.url) {
+        if let Some(kind) = source_archive_kind(&source.url) {
             let destination = sources_dir.join(&name);
             std::fs::create_dir_all(&destination)?;
-            extract_tar_zst(&source.path, &destination)
+            extract_source_archive(&source.path, &destination, kind)
                 .with_context(|| format!("extract source `{name}`"))?;
             source.extracted_dir = Some(destination);
         }
@@ -111,31 +126,53 @@ fn prepare_sources(
     Ok(prepared)
 }
 
-fn source_should_extract(url: &str) -> bool {
+#[derive(Debug, Clone, Copy)]
+#[allow(clippy::enum_variant_names)] // all source archives are tarballs; the prefix is meaningful
+enum SourceArchiveKind {
+    TarGz,
+    TarXz,
+    TarZst,
+}
+
+fn source_archive_kind(url: &str) -> Option<SourceArchiveKind> {
     let normalized = url
         .split(['?', '#'])
         .next()
         .unwrap_or(url)
         .to_ascii_lowercase();
-    normalized.ends_with(".tar.zst") || normalized.ends_with(".tzst")
+    if normalized.ends_with(".tar.zst") || normalized.ends_with(".tzst") {
+        return Some(SourceArchiveKind::TarZst);
+    }
+    if normalized.ends_with(".tar.gz") || normalized.ends_with(".tgz") {
+        return Some(SourceArchiveKind::TarGz);
+    }
+    if normalized.ends_with(".tar.xz") || normalized.ends_with(".txz") {
+        return Some(SourceArchiveKind::TarXz);
+    }
+    None
 }
 
-fn extract_tar_zst(path: &Path, destination: &Path) -> Result<()> {
-    let file =
-        File::open(path).with_context(|| format!("open source archive {}", path.display()))?;
-    let decoder = zstd::stream::read::Decoder::new(file)
-        .with_context(|| format!("decode zstd source archive {}", path.display()))?;
-    let mut tar = tar::Archive::new(decoder);
+fn extract_source_archive(path: &Path, destination: &Path, kind: SourceArchiveKind) -> Result<()> {
+    let mut tar = tar::Archive::new(source_archive_reader(path, kind)?);
     validate_tar_entries(&mut tar)?;
 
-    let file =
-        File::open(path).with_context(|| format!("open source archive {}", path.display()))?;
-    let decoder = zstd::stream::read::Decoder::new(file)
-        .with_context(|| format!("decode zstd source archive {}", path.display()))?;
-    let mut tar = tar::Archive::new(decoder);
+    let mut tar = tar::Archive::new(source_archive_reader(path, kind)?);
     tar.unpack(destination)
         .with_context(|| format!("unpack source archive into {}", destination.display()))?;
     Ok(())
+}
+
+fn source_archive_reader(path: &Path, kind: SourceArchiveKind) -> Result<Box<dyn Read>> {
+    let file =
+        File::open(path).with_context(|| format!("open source archive {}", path.display()))?;
+    match kind {
+        SourceArchiveKind::TarGz => Ok(Box::new(GzDecoder::new(file))),
+        SourceArchiveKind::TarXz => Ok(Box::new(XzDecoder::new(file))),
+        SourceArchiveKind::TarZst => Ok(Box::new(
+            zstd::stream::read::Decoder::new(file)
+                .with_context(|| format!("decode zstd source archive {}", path.display()))?,
+        )),
+    }
 }
 
 fn validate_tar_entries<R: std::io::Read>(tar: &mut tar::Archive<R>) -> Result<()> {

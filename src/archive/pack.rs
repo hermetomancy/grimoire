@@ -24,6 +24,7 @@ pub fn pack_built_rune(
     rune: &Path,
     metadata: &PackageMetadata,
     package_dir: &Path,
+    final_prefix: &Path,
     output: &Path,
 ) -> Result<PathBuf> {
     let target = paths::target_triple();
@@ -35,7 +36,9 @@ pub fn pack_built_rune(
         "staging package metadata for {} {}",
         metadata.name, metadata.version
     ));
-    let package_nuon = nuon_io::to_nuon_string(&metadata.archive_value(&target))?;
+    let store_path = paths::package_relative_dir(&metadata.name, &metadata.version);
+    let package_nuon =
+        nuon_io::to_nuon_string(&metadata.archive_value(&target, Some(&store_path)))?;
     let rune_source =
         fs::read(rune).with_context(|| format!("read rune source {}", rune.display()))?;
 
@@ -50,7 +53,7 @@ pub fn pack_built_rune(
     let file = File::create(&archive_path)?;
     let encoder = zstd::stream::write::Encoder::new(file, 0)?;
     let mut tar = tar::Builder::new(encoder);
-    append_package_dir(&mut tar, package_dir)?;
+    append_package_dir(&mut tar, package_payload_dir(package_dir, final_prefix))?;
     append_bytes(&mut tar, ".grimoire/package.nuon", package_nuon.as_bytes())?;
     append_bytes(&mut tar, ".grimoire/rune.rn", &rune_source)?;
     let encoder = tar.into_inner()?;
@@ -60,10 +63,44 @@ pub fn pack_built_rune(
     Ok(archive_path)
 }
 
+fn package_payload_dir<'a>(package_dir: &'a Path, final_prefix: &Path) -> PathBufOrBorrowed<'a> {
+    let destdir_payload = package_dir.join(relative_destdir_prefix(final_prefix));
+    if destdir_payload.exists() {
+        PathBufOrBorrowed::Owned(destdir_payload)
+    } else {
+        PathBufOrBorrowed::Borrowed(package_dir)
+    }
+}
+
+enum PathBufOrBorrowed<'a> {
+    Borrowed(&'a Path),
+    Owned(PathBuf),
+}
+
+impl AsRef<Path> for PathBufOrBorrowed<'_> {
+    fn as_ref(&self) -> &Path {
+        match self {
+            Self::Borrowed(path) => path,
+            Self::Owned(path) => path.as_path(),
+        }
+    }
+}
+
+fn relative_destdir_prefix(prefix: &Path) -> PathBuf {
+    let mut relative = PathBuf::new();
+    for component in prefix.components() {
+        if let std::path::Component::Normal(part) = component {
+            relative.push(part);
+        }
+    }
+    relative
+}
+
 fn append_package_dir<W: std::io::Write>(
     tar: &mut tar::Builder<W>,
-    package_dir: &Path,
+    package_dir: impl AsRef<Path>,
 ) -> Result<()> {
+    let package_dir = package_dir.as_ref();
     for entry in walkdir::WalkDir::new(package_dir).sort_by_file_name() {
         let entry = entry?;
         let path = entry.path();
@@ -80,10 +117,8 @@ fn append_package_dir<W: std::io::Write>(
 
         let metadata = fs::symlink_metadata(path)?;
         if metadata.file_type().is_symlink() {
-            bail!("package output contains symlink {}", path.display());
-        }
-
-        if metadata.is_dir() {
+            append_symlink(tar, path, relative)?;
+        } else if metadata.is_dir() {
             append_dir(tar, relative)?;
         } else if metadata.is_file() {
             append_file(tar, path, relative, file_mode(&metadata))?;
@@ -94,6 +129,33 @@ fn append_package_dir<W: std::io::Write>(
             );
         }
     }
+    Ok(())
+}
+
+/// Appends a symlink member, preserving it as a symlink rather than dereferencing it. The target
+/// must resolve within the package (validated here) so the produced archive is self-contained and
+/// safe to extract; an escaping or absolute target is a hard error in the build output.
+fn append_symlink<W: std::io::Write>(
+    tar: &mut tar::Builder<W>,
+    source: &Path,
+    relative: &Path,
+) -> Result<()> {
+    let target =
+        fs::read_link(source).with_context(|| format!("read symlink {}", source.display()))?;
+    if !archive::validate_symlink_target(relative, &target) {
+        bail!(
+            "package output contains symlink {} with a target that escapes the package: {}",
+            relative.display(),
+            target.display()
+        );
+    }
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Symlink);
+    header.set_size(0);
+    header.set_mode(0o777);
+    set_deterministic_metadata(&mut header);
+    tar.append_link(&mut header, relative, target.as_path())
+        .with_context(|| format!("append symlink {}", relative.display()))?;
     Ok(())
 }
 

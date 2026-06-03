@@ -83,6 +83,10 @@ pub fn info(args: PackageArg) -> Result<()> {
 }
 
 pub fn upgrade(args: UpgradeArgs) -> Result<()> {
+    if !args.dry_run {
+        tome::update_all_configured().context("update configured tomes before upgrade")?;
+    }
+
     let states = install::installed_states()?;
     let held: BTreeMap<String, bool> = states
         .iter()
