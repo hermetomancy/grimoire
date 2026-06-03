@@ -47,32 +47,18 @@ struct Installer {
     /// summary and to detect the "nothing to do" case where every requested package was already
     /// satisfied and the solver produced no steps.
     installed_now: Vec<String>,
-    /// Names that were already installed when this run started. Used to tell a build dep that
-    /// just came in for this run apart from one the user (or a previous run) had installed
-    /// independently; only the former is a candidate for post-build cleanup.
-    initial_installed: BTreeSet<String>,
-    /// Build dependencies installed during this run *for* a source build, that were not
-    /// already installed when the run started. Removed at the end of a successful install —
-    /// once the build is over they are no longer load-bearing. The downloaded archive stays in
-    /// `cache/archives/`, so a future install that needs them is a cheap re-extract.
-    build_staged: BTreeSet<String>,
     /// When true, every install path stops after planning and prints the plan to stdout —
     /// no fetches, no builds, no state writes. Wired from `--dry-run` / `--explain`.
     dry_run: bool,
 }
 
 impl Installer {
-    /// Snapshot the installed-name set up front so post-build cleanup can distinguish "this
-    /// run pulled in `make`" from "the user already had `make`".
     fn new(installed: BTreeMap<String, Version>, pins: Option<solve::Pins>) -> Self {
-        let initial_installed = installed.keys().cloned().collect();
         Self {
             installed,
             pins,
             building: HashSet::new(),
             installed_now: Vec::new(),
-            initial_installed,
-            build_staged: BTreeSet::new(),
             dry_run: false,
         }
     }
@@ -109,8 +95,6 @@ pub fn install(args: InstallArgs) -> Result<()> {
     if args.dry_run {
         return Ok(());
     }
-
-    installer.cleanup_build_staged()?;
 
     // A resolve that reuses an already-satisfying install produces no steps, so nothing above
     // reported anything. Tell the user the request was a no-op rather than printing silence.
@@ -401,19 +385,8 @@ impl Installer {
                 None => None,
             };
             let build_deps = metadata.deps.build_for(&paths::target_triple());
-            // Whatever wasn't already installed coming into this run is being pulled in
-            // *for* this build, so mark it for post-build cleanup. Names already in
-            // `initial_installed` belong to the user (or a previous run) and stay.
-            let staged: Vec<String> = build_deps
-                .iter()
-                .map(|dep| dep.name.clone())
-                .filter(|name| !self.initial_installed.contains(name))
-                .collect();
             self.install_deps(&build_deps)
                 .with_context(|| format!("install build dependencies for `{}`", metadata.name))?;
-            for name in staged {
-                self.build_staged.insert(name);
-            }
             let env = BuildEnv::managed(
                 build_dep_bin_dirs(&build_deps)?,
                 toolchain::source_build_host_tools()?,
@@ -432,33 +405,6 @@ impl Installer {
     fn record(&mut self, installed: InstalledArchive) {
         self.installed_now.push(installed.name.clone());
         self.installed.insert(installed.name, installed.version);
-    }
-
-    /// Removes build dependencies pulled in solely for this run's source builds, now that the
-    /// builds have finished. A staged dep is kept if any installed package's `runtime_deps`
-    /// references it — the same gating used by `autoremove_orphans` — or if a *later* package
-    /// in this run picked it up as a runtime dep. Each removal cascades its own runtime-dep
-    /// orphans, so transitive runtime deps of a build dep get reclaimed too.
-    fn cleanup_build_staged(&mut self) -> Result<()> {
-        let staged = std::mem::take(&mut self.build_staged);
-        for name in &staged {
-            let states = installed_states()?;
-            if !states.iter().any(|state| state.name == *name) {
-                continue;
-            }
-            let still_needed = states.iter().any(|other| {
-                other.name != *name && other.runtime_deps.iter().any(|dep| dep == name)
-            });
-            if still_needed {
-                continue;
-            }
-            let removed =
-                remove_one(name).with_context(|| format!("cleanup build dependency `{name}`"))?;
-            report(&format!("removed build dependency {name}"));
-            self.installed.remove(name);
-            autoremove_orphans(removed.runtime_deps)?;
-        }
-        Ok(())
     }
 }
 
@@ -547,7 +493,6 @@ pub fn upgrade_packages(names: &[String]) -> Result<()> {
             .install_named(name)
             .with_context(|| format!("upgrade `{name}`"))?;
     }
-    installer.cleanup_build_staged()?;
     Ok(())
 }
 
