@@ -23,8 +23,10 @@ mod paths;
 mod process_lock;
 mod progress;
 mod query;
+mod signing;
 mod solve;
 mod tome;
+mod toolchain;
 
 use anyhow::Result;
 use clap::Parser;

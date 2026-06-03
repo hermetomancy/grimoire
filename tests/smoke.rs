@@ -196,12 +196,12 @@ fn command_parsing() {
     // `--ref=value` form. A local tome lets `add` read its manifest name offline.
     let add = run(root, &["tome", "add", "./tome-example", "--ref=stable"]);
     assert_success(&add, "tome add supports --ref=value");
-    let state = fs::read_to_string(root.join("state").join("tomes").join("example.nuon"))
-        .expect("example state");
+    let state = fs::read_to_string(root.join("state").join("tomes").join("tome-example.nuon"))
+        .expect("tome-example state");
     assert!(state.contains("ref: stable"), "--ref=value state: {state}");
 
-    let remove = run(root, &["tome", "remove", "example"]);
-    assert_success(&remove, "remove example tome");
+    let remove = run(root, &["tome", "remove", "tome-example"]);
+    assert_success(&remove, "remove tome-example tome");
 
     let extra = run(root, &["install", "hello", "extra"]);
     assert_failure_contains(
@@ -298,19 +298,19 @@ fn install_from_example_tome() {
     let add = run(root, &["tome", "add", "./tome-example", "--ref", "main"]);
     assert_success(&add, "tome add example");
 
-    let update = run(root, &["tome", "update", "example"]);
-    assert_success(&update, "tome update example");
+    let update = run(root, &["tome", "update", "tome-example"]);
+    assert_success(&update, "tome update tome-example");
 
     let install = run(root, &["install", "hello"]);
-    assert_success(&install, "install hello from example");
+    assert_success(&install, "install hello from tome-example");
     assert!(
         root.join("cache")
             .join("tomes")
-            .join("example")
+            .join("tome-example")
             .join("runes")
             .join("hello.rn")
             .exists(),
-        "cached example rune should exist"
+        "cached tome-example rune should exist"
     );
 
     let hello = run_shim(root, "hello");
@@ -322,10 +322,10 @@ fn install_from_example_tome() {
     );
 
     let remove_hello = run(root, &["remove", "hello"]);
-    assert_success(&remove_hello, "remove example hello");
+    assert_success(&remove_hello, "remove tome-example hello");
 
-    let remove_tome = run(root, &["tome", "remove", "example"]);
-    assert_success(&remove_tome, "remove example");
+    let remove_tome = run(root, &["tome", "remove", "tome-example"]);
+    assert_success(&remove_tome, "remove tome-example");
 }
 
 #[test]
@@ -630,8 +630,7 @@ fn source_build_supports_configure_make_install_contract() {
         br#"#!/usr/bin/env sh
 set -eu
 prefix=
-script_dir=$(dirname "$0")
-source_dir=$(cd "$script_dir" && pwd)
+source_dir=${SOURCE_DIR:-.}
 for arg in "$@"; do
   case "$arg" in
     --prefix=*) prefix=${arg#--prefix=} ;;
@@ -642,25 +641,23 @@ if [ -z "$prefix" ]; then
   exit 2
 fi
 printf '%s\n' "$prefix" > configured-prefix.txt
-cat > build.sh <<BUILD
-#!/usr/bin/env sh
-set -eu
-cp '$source_dir/message.txt' built-message.txt
-BUILD
-cat > install.sh <<'INSTALL'
-#!/usr/bin/env sh
-set -eu
-prefix=$1
-mkdir -p "$prefix/bin"
-message=$(cat built-message.txt)
-configured=$(cat configured-prefix.txt)
 {
   printf '%s\n' '#!/usr/bin/env sh'
-  printf "printf '%%s\\n' '%s via %s'\n" "$message" "$configured"
-} > "$prefix/bin/realpkg"
-chmod +x "$prefix/bin/realpkg"
-INSTALL
-chmod +x build.sh install.sh
+  printf '%s\n' 'set -eu'
+  printf '%s\n' "IFS= read -r message < '$source_dir/message.txt'"
+  printf '%s\n' 'printf "%s\n" "$message" > built-message.txt'
+} > build.sh
+{
+  printf '%s\n' '#!/usr/bin/env sh'
+  printf '%s\n' 'set -eu'
+  printf '%s\n' 'prefix=$1'
+  printf '%s\n' 'IFS= read -r message < built-message.txt'
+  printf '%s\n' 'IFS= read -r configured < configured-prefix.txt'
+  printf '%s\n' '{'
+  printf '%s\n' "  printf '%s\n' '#!/usr/bin/env sh'"
+  printf '%s\n' "  printf \"printf '%%s\\\\n' '%s via %s'\\n\" \"\$message\" \"\$configured\""
+  printf '%s\n' '} > "$prefix/realpkg"'
+} > install.sh
 "#,
         0o755,
     );
@@ -700,7 +697,7 @@ chmod +x build.sh install.sh
     fs::write(
         runes.join("realpkg.rn"),
         format!(
-            "export const package = {{\n  name: 'realpkg'\n  version: '1.0.0'\n  sources: {{ main: {{ url: 'realpkg-1.0.0.tar.zst', sha256: '{source_hash}' }} }}\n  deps: {{ build: {{ default: ['minimake'] }}, runtime: [] }}\n  bins: {{ realpkg: 'bin/realpkg' }}\n}}\n\nexport def build [ctx] {{\n  let source_dir = ($ctx.sources.main.dir | path join 'realpkg-1.0.0')\n  let build_dir = ($ctx.package_dir | path join 'build')\n  let result = (sh -c $\"mkdir -p '($build_dir)' && cd '($build_dir)' && '($source_dir)/configure' --prefix='($ctx.prefix)' && make && make install PREFIX='($ctx.package_dir)'\" | complete)\n  if $result.exit_code != 0 {{\n    error make {{ msg: $result.stderr }}\n  }}\n}}\n"
+            "export const package = {{\n  name: 'realpkg'\n  version: '1.0.0'\n  sources: {{ main: {{ url: 'realpkg-1.0.0.tar.zst', sha256: '{source_hash}' }} }}\n  deps: {{ build: {{ default: ['minimake'] }}, runtime: [] }}\n  bins: {{ realpkg: 'realpkg' }}\n}}\n\nexport def build [ctx] {{\n  let source_dir = ($ctx.sources.main.dir | path join 'realpkg-1.0.0')\n  let build_dir = ($ctx.package_dir | path join 'build')\n  mkdir $build_dir\n  let result = (sh -c $\"cd '($build_dir)' && SOURCE_DIR='($source_dir)' '($source_dir)/configure' --prefix='($ctx.prefix)' && make && make install PREFIX='($ctx.package_dir)'\" | complete)\n  if $result.exit_code != 0 {{\n    error make {{ msg: $result.stderr }}\n  }}\n}}\n"
         ),
     )
     .unwrap();
@@ -1779,6 +1776,173 @@ fn completions_and_man_render_from_cli_definition() {
 }
 
 #[test]
+fn signed_tome_pins_key_and_rejects_index_tampering() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+
+    let keypair = gen_keypair();
+    let pubkey = keypair.pk.to_base64();
+
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    build_signed_tome(tome, "signedcore", &triple, &keypair);
+
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "add signed tome",
+    );
+    let update = run(root, &["tome", "update", "signedcore"]);
+    assert_success(&update, "update signed tome");
+    let update_text = format!("{}{}", stdout(&update), stderr(&update));
+    assert!(
+        update_text.contains("pinned signing key"),
+        "update should report the TOFU pin: {update_text}"
+    );
+
+    // The pinned key is persisted in tome state (trust-on-first-use).
+    let state =
+        fs::read_to_string(root.join("state").join("tomes").join("signedcore.nuon")).unwrap();
+    assert!(
+        state.contains("signer_pubkey"),
+        "state records a pin: {state}"
+    );
+    assert!(
+        state.contains(&pubkey),
+        "state records the actual key: {state}"
+    );
+
+    // Install verifies the signed index against the pinned key and succeeds.
+    assert_success(
+        &run(root, &["install", "sgnpkg"]),
+        "install from signed tome",
+    );
+    assert_eq!(stdout(&run_shim(root, "sgnpkg")).trim(), "signed");
+
+    // Remove it so the next install actually re-resolves against the index rather than
+    // short-circuiting as already-installed.
+    assert_success(&run(root, &["remove", "sgnpkg"]), "remove before reinstall");
+
+    // Tamper the cached index without re-signing: the read path must refuse it before fetching
+    // or extracting any archive.
+    let cached_index = root
+        .join("cache")
+        .join("tomes")
+        .join("signedcore")
+        .join("dist")
+        .join("index.nuon");
+    let tampered = fs::read_to_string(&cached_index)
+        .unwrap()
+        .replace("sgnpkg", "evilpkg");
+    fs::write(&cached_index, tampered).unwrap();
+
+    let blocked = run(root, &["install", "sgnpkg"]);
+    assert_failure_contains(&blocked, "signature", "tampered index is refused");
+}
+
+#[test]
+fn signed_tome_refuses_key_rotation_without_readd() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+
+    let key_a = gen_keypair();
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    build_signed_tome(tome, "rotatecore", &triple, &key_a);
+
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "add signed tome",
+    );
+    assert_success(
+        &run(root, &["tome", "update", "rotatecore"]),
+        "pin key A on first update",
+    );
+
+    // Re-advertise and re-sign the (byte-identical) index with a *different* key. A silent
+    // accept here would defeat the whole point of pinning, so it must be refused.
+    let key_b = gen_keypair();
+    build_signed_tome(tome, "rotatecore", &triple, &key_b);
+
+    let rotate = run(root, &["tome", "update", "rotatecore"]);
+    assert_failure_contains(
+        &rotate,
+        "different signing key",
+        "key rotation without re-add is refused",
+    );
+}
+
+#[test]
+fn unsigned_tome_leaves_no_pin() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+
+    // A tome that publishes an index but declares no `signer` stays unsigned: no pin recorded,
+    // installs proceed without signature verification (verify-if-present).
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'plaincore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("plainpkg.rn"),
+        "export const package = {\n  name: 'plainpkg'\n  version: '0.1.0'\n  bins: {}\n}\n\nexport def build [ctx] { }\n",
+    )
+    .unwrap();
+    let dist = tome.join("dist");
+    let archive_name = format!("plainpkg-0.1.0-{triple}.tar.zst");
+    let archive = make_versioned_archive(
+        &dist.join(&archive_name),
+        "plainpkg",
+        "0.1.0",
+        &triple,
+        "#!/usr/bin/env sh\nprintf 'plain\\n'\n",
+    );
+    let hash = sha256_file(&archive);
+    fs::write(
+        dist.join("index.nuon"),
+        format!(
+            "{{\n  packages: [\n    {{ name: \"plainpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", runtime_deps: [] }}\n  ]\n}}\n"
+        ),
+    )
+    .unwrap();
+
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "add unsigned tome",
+    );
+    assert_success(
+        &run(root, &["tome", "update", "plaincore"]),
+        "update unsigned tome",
+    );
+    let state =
+        fs::read_to_string(root.join("state").join("tomes").join("plaincore.nuon")).unwrap();
+    assert!(
+        !state.contains("signer_pubkey"),
+        "unsigned tome records no pin: {state}"
+    );
+    assert_success(
+        &run(root, &["install", "plainpkg"]),
+        "install from unsigned tome",
+    );
+}
+
+#[test]
 fn install_dry_run_prints_plan_without_touching_state() {
     let root = TempDir::new().unwrap();
     let root = root.path();
@@ -2617,6 +2781,67 @@ fn make_versioned_archive(
     );
     finish_archive(builder);
     path.to_path_buf()
+}
+
+fn gen_keypair() -> minisign::KeyPair {
+    minisign::KeyPair::generate_unencrypted_keypair().expect("generate keypair")
+}
+
+/// Writes a detached minisign signature for `data` at `path`, in the `.minisig` text form
+/// `grm` verifies.
+fn sign_to(path: &Path, data: &[u8], keypair: &minisign::KeyPair) {
+    let signature = minisign::sign(
+        Some(&keypair.pk),
+        &keypair.sk,
+        std::io::Cursor::new(data),
+        Some("grimoire test"),
+        Some("grimoire test"),
+    )
+    .expect("sign")
+    .into_string();
+    fs::write(path, signature).expect("write signature");
+}
+
+/// Builds a local tome that publishes a single prebuilt `sgnpkg` archive with a signed
+/// `index.nuon`, declaring `keypair`'s public key as `packages.signer`. Re-running it with a
+/// different keypair rewrites the manifest's signer and re-signs the (byte-identical) index,
+/// which is exactly the key-rotation scenario.
+fn build_signed_tome(tome: &Path, name: &str, triple: &str, keypair: &minisign::KeyPair) {
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    let pubkey = keypair.pk.to_base64();
+    fs::write(
+        tome.join("tome.rn"),
+        format!(
+            "export const tome = {{\n  name: '{name}'\n  packages: {{ repo: 'dist', format: 'local', index: 'index.nuon', signer: '{pubkey}' }}\n}}\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        runes.join("sgnpkg.rn"),
+        "export const package = {\n  name: 'sgnpkg'\n  version: '0.1.0'\n  bins: {}\n}\n\nexport def build [ctx] { }\n",
+    )
+    .unwrap();
+
+    let dist = tome.join("dist");
+    let archive_name = format!("sgnpkg-0.1.0-{triple}.tar.zst");
+    let archive = make_versioned_archive(
+        &dist.join(&archive_name),
+        "sgnpkg",
+        "0.1.0",
+        triple,
+        "#!/usr/bin/env sh\nprintf 'signed\\n'\n",
+    );
+    let hash = sha256_file(&archive);
+    let index_body = format!(
+        "{{\n  packages: [\n    {{ name: \"sgnpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", runtime_deps: [] }}\n  ]\n}}\n"
+    );
+    fs::write(dist.join("index.nuon"), &index_body).unwrap();
+    sign_to(
+        &dist.join("index.nuon.minisig"),
+        index_body.as_bytes(),
+        keypair,
+    );
 }
 
 fn make_symlink_archive(out: &Path) -> PathBuf {

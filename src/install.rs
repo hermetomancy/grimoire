@@ -30,6 +30,7 @@ use crate::{
     paths,
     progress::{report, status, success},
     solve::{self, Origin, Plan, PlanStep},
+    toolchain,
 };
 
 /// Drives one top-level install and its dependency tree. `installed` maps already-installed
@@ -416,9 +417,10 @@ impl Installer {
             for name in staged {
                 self.build_staged.insert(name);
             }
-            let env = BuildEnv {
-                path_dirs: build_dep_bin_dirs(&build_deps)?,
-            };
+            let env = BuildEnv::managed(
+                build_dep_bin_dirs(&build_deps)?,
+                toolchain::source_build_host_tools()?,
+            );
             let archive = build::build_package_with_env(
                 &rune.to_string_lossy(),
                 &paths::build_output_dir()?,

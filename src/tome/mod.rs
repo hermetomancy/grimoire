@@ -15,7 +15,6 @@ pub(crate) mod git;
 
 use crate::{
     cli::{TomeAddArgs, TomeBuildArgs, TomeInitArgs, TomeRemoveArgs, TomeRuneArgs, TomeUpdateArgs},
-    index,
     model::{
         IndexEntry, PackageIndex, TomeManifest, TomePackages, TomeState, validate_package_name,
         validate_package_version, validate_relative_package_path, validate_tome_name,
@@ -27,6 +26,7 @@ use crate::{
     },
     paths,
     progress::{report, status},
+    signing,
 };
 
 pub fn add(args: TomeAddArgs) -> Result<()> {
@@ -54,6 +54,7 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
         checked_ref: None,
         checked_commit: None,
         tome: None,
+        signer_pubkey: None,
     };
     nuon_io::write_nuon(&state_path, &state.to_value())?;
     report(&format!("added tome {name}"));
@@ -491,6 +492,7 @@ fn validate_local_tome_if_available(name: &str, url: &str) -> Result<()> {
         checked_ref: None,
         checked_commit: None,
         tome: None,
+        signer_pubkey: None,
     };
     validate_tome_cache(&tome, source, &manifest, &runtime)
 }
@@ -508,9 +510,13 @@ fn record_tome_sync_state(tome: &TomeState, cache_path: &Path) -> Result<()> {
     validate_tome_cache(tome, cache_path, &manifest, &runtime)?;
     let commit = git::head_commit(cache_path)?;
     let mut state = load_tome(&tome.name).unwrap_or_else(|_| tome.clone());
+    // Trust-on-first-use: capture (or re-confirm) the signing key from this sync before the new
+    // state is written, so the pin and the cached manifest always move together.
+    let signer_pubkey = capture_signer(tome, cache_path, &manifest, state.signer_pubkey.clone())?;
     state.checked_ref = Some(tome.ref_name.clone());
     state.checked_commit = commit;
     state.tome = Some(manifest);
+    state.signer_pubkey = signer_pubkey;
 
     let state_path = tome_state_dir()?.join(format!("{}.nuon", tome.name));
     nuon_io::write_nuon(&state_path, &state.to_value())
@@ -526,42 +532,180 @@ pub fn package_index(tome: &TomeState) -> Result<Option<(PathBuf, crate::model::
         return Ok(None);
     };
 
-    if is_http_repo(&packages.repo) {
-        return http_package_index(&packages);
-    }
-
-    let root = packages_repo_root(&cache, &packages);
-    let index_path = root.join(&packages.index);
-    if !index_path.exists() {
-        return Ok(None);
-    }
-
-    let index = index::read_index(&index_path)?;
-    Ok(Some((root, index)))
-}
-
-/// Loads a package index published over `http(s)`: the host serves the git-untracked publish
-/// directory (`dist/`) a tome author builds, so the index lives at `{repo}/{index}` and each
-/// archive at `{repo}/{archive}`. Relative archive locations are rewritten to absolute URLs so
-/// the downloader fetches and verifies them straight from the host. `None` means none published.
-fn http_package_index(
-    packages: &TomePackages,
-) -> Result<Option<(PathBuf, crate::model::PackageIndex)>> {
-    let base = packages.repo.trim_end_matches('/');
-    let index_url = format!("{base}/{}", packages.index);
-    let Some(text) = crate::fetch::http_get_text(&index_url)? else {
+    let Some(raw) = load_raw_index(&cache, &packages)? else {
         return Ok(None);
     };
 
-    let mut index = crate::model::PackageIndex::from_value(nuon_io::parse_nuon(&text)?)
-        .with_context(|| format!("parse package index {index_url}"))?;
-    for entry in &mut index.packages {
-        if !is_http_repo(&entry.archive) {
-            entry.archive = format!("{base}/{}", entry.archive);
+    // Enforce the trust-on-first-use pin before the index is parsed or any archive is fetched:
+    // the index is the trust root for binary installs, so a signed tome's index must verify
+    // against the key pinned when it was added (`src/signing.rs`). An unsigned tome (no pin)
+    // skips verification.
+    enforce_pinned_signature(tome, &raw)?;
+
+    parse_resolved_index(&cache, &packages, &raw.text).map(Some)
+}
+
+/// A package index document as published, together with its detached minisign signature when the
+/// repository serves one. The signature, when present, is over the exact bytes in `text`.
+struct RawIndex {
+    text: String,
+    signature: Option<String>,
+}
+
+/// Fetches a tome's raw index document and its `.minisig` signature (if published), without
+/// parsing or trusting either yet. Handles both an `http(s)` package repo and a local/filesystem
+/// one. `None` means the tome declares a package repo but has not published an index there.
+fn load_raw_index(cache: &Path, packages: &TomePackages) -> Result<Option<RawIndex>> {
+    if is_http_repo(&packages.repo) {
+        let base = packages.repo.trim_end_matches('/');
+        let index_url = format!("{base}/{}", packages.index);
+        let Some(text) = crate::fetch::http_get_text(&index_url)? else {
+            return Ok(None);
+        };
+        let signature =
+            crate::fetch::http_get_text(&format!("{index_url}.{}", signing::SIGNATURE_EXTENSION))?;
+        Ok(Some(RawIndex { text, signature }))
+    } else {
+        let root = packages_repo_root(cache, packages);
+        let index_path = root.join(&packages.index);
+        if !index_path.exists() {
+            return Ok(None);
         }
+        let text = fs::read_to_string(&index_path)
+            .with_context(|| format!("read package index {}", index_path.display()))?;
+        let sig_path = root.join(format!(
+            "{}.{}",
+            packages.index,
+            signing::SIGNATURE_EXTENSION
+        ));
+        let signature = if sig_path.exists() {
+            Some(
+                fs::read_to_string(&sig_path)
+                    .with_context(|| format!("read index signature {}", sig_path.display()))?,
+            )
+        } else {
+            None
+        };
+        Ok(Some(RawIndex { text, signature }))
     }
-    // Archives now carry absolute URLs, so the base directory is unused at fetch time.
-    Ok(Some((PathBuf::new(), index)))
+}
+
+/// Parses a verified index document and resolves each entry's archive location. For an `http(s)`
+/// repo, relative archive paths are rewritten to absolute `{repo}/{archive}` URLs; for a local
+/// repo, the returned root is the directory archive paths resolve against. The index is parsed
+/// from the already-verified `text` rather than re-read from disk, so verification and parsing
+/// see identical bytes.
+fn parse_resolved_index(
+    cache: &Path,
+    packages: &TomePackages,
+    text: &str,
+) -> Result<(PathBuf, crate::model::PackageIndex)> {
+    let mut index = crate::model::PackageIndex::from_value(nuon_io::parse_nuon(text)?)
+        .context("parse package index")?;
+    if is_http_repo(&packages.repo) {
+        let base = packages.repo.trim_end_matches('/');
+        for entry in &mut index.packages {
+            if !is_http_repo(&entry.archive) {
+                entry.archive = format!("{base}/{}", entry.archive);
+            }
+        }
+        // Archives now carry absolute URLs, so the base directory is unused at fetch time.
+        Ok((PathBuf::new(), index))
+    } else {
+        Ok((packages_repo_root(cache, packages), index))
+    }
+}
+
+/// Enforces a tome's pinned signing key against a freshly loaded index (read path). An unsigned
+/// tome — one with no pinned key — passes through. A signed tome must present a valid signature
+/// over the index bytes; a missing or invalid signature is refused as possible tampering.
+fn enforce_pinned_signature(tome: &TomeState, raw: &RawIndex) -> Result<()> {
+    let Some(pinned) = &tome.signer_pubkey else {
+        return Ok(());
+    };
+    let Some(signature) = &raw.signature else {
+        bail!(
+            "tome `{}` was added with a signed index but no `index` signature is published now; \
+             refusing to use an unsigned index (possible tampering). If the publisher \
+             intentionally stopped signing, remove and re-add the tome.",
+            tome.name
+        );
+    };
+    signing::verify(raw.text.as_bytes(), signature, pinned)
+        .with_context(|| format!("verify package index signature for tome `{}`", tome.name))
+}
+
+/// Trust-on-first-use capture, run when a tome is synced (add/update). Given the key pinned so
+/// far (`existing`) and the manifest just synced, returns the key to record going forward:
+///
+/// - first sync of a tome that advertises a signer → verify its index against that key and pin it;
+/// - a later sync of an already-pinned tome → require the index still verifies against the pinned
+///   key, and refuse a manifest that advertises a *different* key (rotation needs a deliberate
+///   re-add);
+/// - an unsigned tome → stays unpinned.
+fn capture_signer(
+    tome: &TomeState,
+    cache: &Path,
+    manifest: &TomeManifest,
+    existing: Option<String>,
+) -> Result<Option<String>> {
+    let Some(packages) = &manifest.packages else {
+        // No package repo at all: nothing to verify. Preserve any prior pin.
+        return Ok(existing);
+    };
+    let advertised = packages.signer.clone();
+
+    // Without a published index we cannot verify anything this sync; keep the prior pin so a
+    // later sync (once an index exists) still enforces it.
+    let Some(raw) = load_raw_index(cache, packages)? else {
+        return Ok(existing);
+    };
+
+    match (existing, advertised) {
+        (Some(pinned), advertised) => {
+            if let Some(advertised) = &advertised {
+                if !signing::keys_match(&pinned, advertised)? {
+                    bail!(
+                        "tome `{}` now advertises a different signing key than the one pinned on \
+                         first use; refusing. Remove and re-add the tome to trust the new key.",
+                        tome.name
+                    );
+                }
+            }
+            require_signed_index(tome, &raw, &pinned)?;
+            Ok(Some(pinned))
+        }
+        (None, Some(advertised)) => {
+            require_signed_index(tome, &raw, &advertised)?;
+            report(&format!(
+                "pinned signing key for tome `{}` (trust on first use)",
+                tome.name
+            ));
+            Ok(Some(advertised))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+/// Requires that `raw` carries a signature that verifies against `key`. Used by TOFU capture to
+/// refuse pinning (or continuing to trust) a tome whose advertised signer does not actually sign
+/// its index.
+fn require_signed_index(tome: &TomeState, raw: &RawIndex, key: &str) -> Result<()> {
+    let Some(signature) = &raw.signature else {
+        bail!(
+            "tome `{}` advertises a signing key but publishes no index signature; \
+             expected `{}.{}` alongside the index.",
+            tome.name,
+            tome.tome
+                .as_ref()
+                .and_then(|t| t.packages.as_ref())
+                .map(|p| p.index.as_str())
+                .unwrap_or("index.nuon"),
+            signing::SIGNATURE_EXTENSION
+        );
+    };
+    signing::verify(raw.text.as_bytes(), signature, key)
+        .with_context(|| format!("verify package index signature for tome `{}`", tome.name))
 }
 
 /// Resolves the local directory that holds a tome's package index and (relative) archives — the
