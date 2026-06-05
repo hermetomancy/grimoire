@@ -3101,6 +3101,7 @@ fn source_build_preserves_internal_symlink() {
             rune.to_str().unwrap(),
             "--output",
             out.to_str().unwrap(),
+            "--bootstrap",
         ],
     );
     assert_success(&build, "build package with internal symlink");

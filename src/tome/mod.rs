@@ -176,7 +176,7 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
     // build records every package atomically rather than rewriting the file per rune.
     let target = paths::target_triple();
     for name in &rune_names {
-        let (entry, archive) = build_rune_into(root, name, &dist_dir)?;
+        let (entry, archive) = build_rune_into(root, name, &dist_dir, args.bootstrap)?;
         report(&format!(
             "built {} {} ({target}) into {}",
             entry.name,
@@ -198,14 +198,19 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
 /// Builds the rune named `name` (`runes/<name>.rn`) into `dist_dir`, returning the index entry
 /// describing the verified archive and the archive path. Shared by single-package and `--all`
 /// builds so both register identical entries.
-fn build_rune_into(root: &Path, name: &str, dist_dir: &Path) -> Result<(IndexEntry, PathBuf)> {
+fn build_rune_into(
+    root: &Path,
+    name: &str,
+    dist_dir: &Path,
+    bootstrap: bool,
+) -> Result<(IndexEntry, PathBuf)> {
     validate_package_name(name)?;
     let rune_path = root.join("runes").join(format!("{name}.rn"));
     if !rune_path.exists() {
         bail!("rune not found: {}", rune_path.display());
     }
 
-    let result = crate::build::build_package(&rune_path.to_string_lossy(), dist_dir)?;
+    let result = crate::build::build_package(&rune_path.to_string_lossy(), dist_dir, bootstrap)?;
     let archive_hash = crate::archive::archive_hash(&result.archive)?;
     let archive_file = result
         .archive

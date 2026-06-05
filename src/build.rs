@@ -20,10 +20,11 @@ use crate::{
     archive::pack,
     cli::BuildArgs,
     fetch::{self, FetchedSource},
+    install,
     nu::runtime::{BuildDirs, BuildEnv, EmbeddedNuRuntime, RuneRuntime},
     paths,
     progress::{report, status},
-    tome,
+    tome, toolchain,
 };
 
 /// The result of a source build: the archive path and the computed store hash.
@@ -33,15 +34,25 @@ pub struct BuildResult {
 }
 
 pub fn build(args: BuildArgs) -> Result<()> {
-    let result = build_package(&args.package, &args.output)?;
+    let result = build_package(&args.package, &args.output, args.bootstrap)?;
     report(&format!("built {}", result.archive.display()));
     Ok(())
 }
 
-pub fn build_package(package: &str, output: &Path) -> Result<BuildResult> {
+pub fn build_package(package: &str, output: &Path, bootstrap: bool) -> Result<BuildResult> {
     let rune = resolve_rune(package)?;
     let store_hash = crate::closure::store_hash_for_rune(&rune)?;
-    build_package_with_env(package, output, &BuildEnv::default(), &store_hash)
+    let env = if bootstrap {
+        BuildEnv::bootstrap()
+    } else {
+        let metadata = EmbeddedNuRuntime.package_metadata(&rune)?;
+        let build_deps = metadata.deps.build_for(&paths::target_triple());
+        BuildEnv::managed(
+            install::build_dep_bin_dirs(&build_deps)?,
+            toolchain::source_build_host_tools()?,
+        )
+    };
+    build_package_with_env(package, output, &env, &store_hash)
 }
 
 /// Builds `package` into an archive recorded under the already-computed `store_hash` (the package's
