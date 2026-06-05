@@ -18,24 +18,58 @@ queue.
      compiler boundary.
 
 2. **Content-addressed store phase 1.**
-   - Replace `packages/<name>/<version>` as the identity of an install with
-     `/grm/store/<hash>-<name>-<version>`.
-   - Define the input hash: source hashes, rune bytes, resolved dependency closure, target triple,
-     build flags, and relevant build environment versioning.
+   - ~~Replace `packages/<name>/<version>` as the identity of an install with
+     `/grm/store/<hash>-<name>-<version>`.~~ Done: installs now promote into
+     `store_root()/<hash>-<name>-<version>` (canonically `/grm/store`, or `<GRIMOIRE_ROOT>/store`
+     for tests/isolated installs). The archive embeds its store basename as the install identity;
+     state records the absolute store path; the `packages/<name>/<version>` layout is retired.
+   - ~~Define the input hash: source hashes, rune bytes, resolved dependency closure, target triple,
+     build flags.~~ Done in `store::compute_store_hash`.
    - Make package archives/substitutions keyed by store path/hash rather than name/version alone.
-   - Preserve old behavior behind `GRIMOIRE_ROOT` only as a development/testing escape hatch; the
-     canonical binary-cache path is `/grm/store`.
+     Mostly done: `grm tome build` records `store_hash` in `index.nuon`, and installs now treat a
+     prebuilt as a *substitute* only when its published `store_hash` matches the hash recomputed from
+     the local rune (with the resolved runtime-dependency versions); a mismatch — stale sources,
+     flags, or closure — falls back to a source build. The check is skipped under `--locked`, where
+     the lockfile already pins the exact artifact. The store-hash formula lives in one place
+     (`store::store_hash_for_metadata`), shared by the builder and the installer.
+   - ~~Fold build-environment versioning into the input hash.~~ Done: the host toolchain identity
+     (`toolchain::build_env_id`, the C compiler's `--version` banner, overridable via
+     `GRIMOIRE_BUILD_ENV`) is part of the store hash, so a binary built against a different toolchain
+     resolves to a different store path and is not substituted on a mismatched host. A host with no
+     compiler boundary cannot build anyway, so it accepts the published prebuilt as authoritative.
+     Next here: extend the identity beyond the C compiler (linker, system SDK) as those boundaries
+     start to matter.
+   - ~~Key the binhost lookup by store hash.~~ Done: the solver now merges candidates per version
+     (the rune is authoritative for a version's runtime deps) and hands each plan step its rune plus
+     the full set of prebuilt substitutes; the installer realizes a step by querying those
+     substitutes for the wanted store hash, building from the rune when none match. A substitute
+     without a published `store_hash` is unverifiable and trusted (legacy index, or a host with no
+     compiler boundary).
+   - Still open in #1:
+     - Extend the build-environment identity beyond the C compiler (linker, system SDK) as those
+       boundaries start to matter.
+     - One-time privileged creation of `/grm` so installs work on a foreign host (`store_root()`
+       returns `/grm/store` but nothing creates it yet).
 
 3. **Profiles, generations, rollback, and GC roots.**
-   - Replace root-level shims with profile symlink trees.
+   - Replace root-level shims with **thin-profile hard-link forests**.
+     - Because Grimoire bakes absolute store paths, profiles only need `bin/`, `share/man/`,
+       completions, and desktop files — not a full FHS tree.
+     - Each generation is a real directory tree whose files are hard links (or APFS clonefile /
+       Linux reflink on CoW filesystems) into the store. Real files avoid symlink-traversal issues
+       and give better `argv[0]` / `/proc/self/exe` behavior.
+     - The active generation is selected by a single symlink: `profiles/current -> gen-N`.
    - Every install/remove/upgrade creates a new generation and atomically switches the active
-     profile.
+     profile by repointing `profiles/current`.
    - Add `grm rollback` and generation listing.
-   - Add GC roots for retained generations and `grm gc` for unreferenced store paths.
-   - Keep rollback byte-exact: it repoints profiles to existing store paths and never rebuilds.
+   - Generations themselves are the GC roots; `grm gc` walks generation trees, collects referenced
+     store basenames, and deletes unreferenced store paths.
+   - Keep rollback byte-exact: it repoints `current` to an existing generation directory and never
+     rebuilds.
 
 4. **FHS compatibility layer.**
-   - Generate managed `/bin` and `/usr/bin` views for executables on the Grimoire distro target.
+   - On a Grimoire distro, `/usr/bin` (or the user-local equivalent) is a symlink to
+     `profiles/current/bin` — a real-file view, not a symlink farm.
    - Do not globally symlink libraries into `/lib` or `/usr/lib`.
    - Design the bounded foreign-binary compat world: loader path, default library set, and an
      invocation story similar to `nix-ld`, `buildFHSEnv`, or `steam-run`.

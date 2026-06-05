@@ -298,31 +298,7 @@ fn validate_local_addendum_if_available(name: &str, url: &str) -> Result<()> {
 }
 
 fn copy_dir_all(source: &Path, destination: &Path) -> Result<()> {
-    fs::create_dir_all(destination)?;
-    for entry in walkdir::WalkDir::new(source).sort_by_file_name() {
-        let entry = entry?;
-        let path = entry.path();
-        if path == source {
-            continue;
-        }
-        let relative = path
-            .strip_prefix(source)
-            .with_context(|| format!("strip source prefix from {}", path.display()))?;
-        let target = destination.join(relative);
-        let metadata = fs::symlink_metadata(path)?;
-        if metadata.file_type().is_symlink() {
-            bail!("addendum source contains symlink {}", path.display());
-        }
-        if metadata.is_dir() {
-            fs::create_dir_all(&target)?;
-        } else if metadata.is_file() {
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(path, &target)?;
-        }
-    }
-    Ok(())
+    crate::fs_util::copy_dir_all(source, destination, "addendum")
 }
 
 fn remove_path_if_exists(path: &Path) -> Result<()> {

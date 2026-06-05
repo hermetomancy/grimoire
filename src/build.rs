@@ -26,17 +26,33 @@ use crate::{
     tome,
 };
 
+/// The result of a source build: the archive path and the computed store hash.
+pub struct BuildResult {
+    pub archive: PathBuf,
+    pub store_hash: String,
+}
+
 pub fn build(args: BuildArgs) -> Result<()> {
-    let archive = build_package(&args.package, &args.output)?;
-    report(&format!("built {}", archive.display()));
+    let result = build_package(&args.package, &args.output)?;
+    report(&format!("built {}", result.archive.display()));
     Ok(())
 }
 
-pub fn build_package(package: &str, output: &Path) -> Result<PathBuf> {
-    build_package_with_env(package, output, &BuildEnv::default())
+pub fn build_package(package: &str, output: &Path) -> Result<BuildResult> {
+    let rune = resolve_rune(package)?;
+    let store_hash = crate::closure::store_hash_for_rune(&rune)?;
+    build_package_with_env(package, output, &BuildEnv::default(), &store_hash)
 }
 
-pub fn build_package_with_env(package: &str, output: &Path, env: &BuildEnv) -> Result<PathBuf> {
+/// Builds `package` into an archive recorded under the already-computed `store_hash` (the package's
+/// content address over its resolved dependency closure). The caller owns hash computation so the
+/// installer can reuse the address it derived from the dependencies it actually installed.
+pub fn build_package_with_env(
+    package: &str,
+    output: &Path,
+    env: &BuildEnv,
+    store_hash: &str,
+) -> Result<BuildResult> {
     // A space in the install root breaks source builds: configure records the absolute paths of
     // build tools (MKDIR_P, INSTALL, ...) — which live under the root — and Makefiles use them
     // unquoted, so a path like `~/Library/Application Support/...` splits at the space. Fail early
@@ -65,10 +81,11 @@ pub fn build_package_with_env(package: &str, output: &Path, env: &BuildEnv) -> R
     let sources = fetch::fetch_sources(&metadata.sources, rune_dir, &paths::source_cache_dir()?)
         .with_context(|| format!("fetch sources for {}", rune.display()))?;
 
+    let final_prefix = paths::store_path(store_hash, &metadata.name, &metadata.version)?;
+
     let temp = tempfile::tempdir()?;
     let work_dir = temp.path().join("work");
     let package_dir = temp.path().join("package");
-    let final_prefix = paths::package_dir(&metadata.name, &metadata.version)?;
     let dirs = BuildDirs {
         package_dir: package_dir.clone(),
         final_prefix: final_prefix.clone(),
@@ -78,7 +95,11 @@ pub fn build_package_with_env(package: &str, output: &Path, env: &BuildEnv) -> R
     std::fs::create_dir_all(&package_dir)?;
     let sources = prepare_sources(sources, &work_dir)?;
 
-    status(&format!("building ({})", rune.display()));
+    status(&format!(
+        "building ({}) store={}",
+        rune.display(),
+        store_hash
+    ));
     let build_result = runtime
         .build(&rune, &dirs, &sources, &metadata.build_flags, env)
         .with_context(|| format!("build rune {}", rune.display()));
@@ -86,9 +107,19 @@ pub fn build_package_with_env(package: &str, output: &Path, env: &BuildEnv) -> R
         .with_context(|| format!("restore working directory {}", original_cwd.display()))?;
     build_result?;
 
-    let archive = pack::pack_built_rune(&rune, &metadata, &package_dir, &final_prefix, output)?;
+    let archive = pack::pack_built_rune(
+        &rune,
+        &metadata,
+        &package_dir,
+        &final_prefix,
+        store_hash,
+        output,
+    )?;
     drop(temp);
-    Ok(archive)
+    Ok(BuildResult {
+        archive,
+        store_hash: store_hash.to_string(),
+    })
 }
 
 pub(crate) fn tome_name_for_rune(rune: &Path) -> Result<Option<String>> {

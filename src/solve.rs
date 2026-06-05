@@ -2,16 +2,17 @@
 //!
 //! Given one or more root requirements, the resolver picks a concrete version for every package
 //! in the runtime dependency graph that satisfies all accumulated semver requirements. Candidate
-//! versions for a package are the binary archives a tome's index offers for the current target
-//! plus the single version of its source rune; the highest satisfying version is preferred, and
-//! a prebuilt binary is preferred over a source build at the same version. Selection backtracks
-//! when a choice cannot satisfy a transitive requirement. The result is an install plan ordered
-//! so dependencies precede dependents.
+//! versions for a package merge, per version, the prebuilt archives a tome's index offers for the
+//! current target with the source rune that defines that version (the rune being authoritative for
+//! its runtime dependencies); the highest satisfying version is preferred. Selection backtracks when
+//! a choice cannot satisfy a transitive requirement. The result is an install plan ordered so
+//! dependencies precede dependents — each step carrying its rune and the prebuilt substitutes the
+//! installer then chooses between by store hash.
 
 use anyhow::{Context, Result, bail};
 use semver::Version;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::PathBuf,
 };
 
@@ -34,19 +35,24 @@ pub struct Pin {
 /// must match its pin (and any package absent from the map is rejected), reproducing a prior install.
 pub type Pins = BTreeMap<String, Pin>;
 
-/// Where a planned package comes from: a verified binary archive in a tome's package repo, or a
-/// source build of a rune.
+/// A prebuilt archive published for a resolved package version: a candidate *substitute* for a
+/// source build. The installer selects one by matching its `entry.store_hash` against the store
+/// hash recomputed from the local rune, so the binhost is queried by content address.
 #[derive(Clone)]
-pub enum Origin {
-    Binary { root: PathBuf, entry: IndexEntry },
-    Source { rune: PathBuf },
+pub struct Substitute {
+    pub root: PathBuf,
+    pub entry: IndexEntry,
 }
 
-/// One package to install, with the concrete version chosen and how to obtain it.
+/// One package to install at a resolved version, plus the two ways to realize it: the source `rune`
+/// that can build it (when one is available) and the prebuilt `substitutes` published for that
+/// version. The installer prefers a substitute whose store hash matches the inputs, otherwise builds
+/// from the rune. At least one of `rune`/`substitutes` is always present.
 pub struct PlanStep {
     pub name: String,
     pub version: Version,
-    pub origin: Origin,
+    pub rune: Option<PathBuf>,
+    pub substitutes: Vec<Substitute>,
 }
 
 /// An ordered set of install steps: dependencies appear before the packages that need them.
@@ -115,8 +121,19 @@ impl CandidateSource for TomeCandidates {
 #[derive(Clone)]
 struct Candidate {
     version: Version,
+    /// Runtime dependencies for this version. Authoritative from the source rune when one defines
+    /// the version; otherwise taken from the index entry.
     runtime: Vec<Dependency>,
-    origin: Origin,
+    rune: Option<PathBuf>,
+    substitutes: Vec<Substitute>,
+}
+
+/// How a chosen package is realized: the source rune and/or the prebuilt substitutes available for
+/// the selected version. `None` route means an already-installed version is reused (no step).
+#[derive(Clone)]
+struct Route {
+    rune: Option<PathBuf>,
+    substitutes: Vec<Substitute>,
 }
 
 #[derive(Clone)]
@@ -125,7 +142,7 @@ struct ChosenNode {
     /// Runtime dependency names selected for this node, used to order the plan.
     deps: Vec<String>,
     /// `None` when the package is already installed and reused (no install step emitted).
-    origin: Option<Origin>,
+    route: Option<Route>,
 }
 
 struct Resolver<'a> {
@@ -174,7 +191,7 @@ impl Resolver<'_> {
                     ChosenNode {
                         version: version.clone(),
                         deps: Vec::new(),
-                        origin: None,
+                        route: None,
                     },
                 );
                 if self.resolve_list(rest, &mut trial).is_ok() {
@@ -197,7 +214,10 @@ impl Resolver<'_> {
                 ChosenNode {
                     version: candidate.version.clone(),
                     deps: candidate.runtime.iter().map(|d| d.name.clone()).collect(),
-                    origin: Some(candidate.origin.clone()),
+                    route: Some(Route {
+                        rune: candidate.rune.clone(),
+                        substitutes: candidate.substitutes.clone(),
+                    }),
                 },
             );
             let mut next: Vec<Dependency> = rest.to_vec();
@@ -232,23 +252,30 @@ impl Resolver<'_> {
     }
 }
 
-/// Filters `candidates` down to those matching `name`'s lockfile pin: the exact version, and for a
-/// binary archive the exact archive hash too. A package with no pin is rejected, because a locked
-/// install must not pull in anything the lockfile did not record.
+/// Filters `candidates` down to those matching `name`'s lockfile pin: the exact version, and the
+/// exact archive hash for any prebuilt substitute. A package with no pin is rejected, because a
+/// locked install must not pull in anything the lockfile did not record. A source rune is retained
+/// so a package the lockfile recorded as source-built reproduces by rebuilding.
 fn pin_candidates(name: &str, candidates: Vec<Candidate>, pins: &Pins) -> Result<Vec<Candidate>> {
     let Some(pin) = pins.get(name) else {
         bail!("`{name}` is required but is not recorded in the lockfile; cannot install --locked");
     };
     let filtered: Vec<Candidate> = candidates
         .into_iter()
-        .filter(|candidate| {
-            candidate.version == pin.version
-                && match &candidate.origin {
-                    Origin::Binary { entry, .. } => {
-                        archive::verify_hash(&entry.archive_hash, &pin.archive_hash).is_ok()
-                    }
-                    Origin::Source { .. } => true,
-                }
+        .filter_map(|mut candidate| {
+            if candidate.version != pin.version {
+                return None;
+            }
+            candidate.substitutes.retain(|sub| {
+                archive::verify_hash(&sub.entry.archive_hash, &pin.archive_hash).is_ok()
+            });
+            // Keep the version only if it can still be realized: a pin-matching prebuilt, or a rune
+            // to rebuild a source-pinned package.
+            if candidate.substitutes.is_empty() && candidate.rune.is_none() {
+                None
+            } else {
+                Some(candidate)
+            }
         })
         .collect();
     if filtered.is_empty() {
@@ -261,11 +288,14 @@ fn pin_candidates(name: &str, candidates: Vec<Candidate>, pins: &Pins) -> Result
     Ok(filtered)
 }
 
-/// All installable candidates for `name`/`target`: the binary archives every tome's index offers
-/// plus the single version of its source rune, sorted highest version first (a prebuilt binary
-/// beats a source build at the same version). No downloads happen — this reads index metadata.
+/// All installable candidates for `name`/`target`, one per version, sorted highest version first.
+/// Each version merges the prebuilt substitutes every tome's index offers with the source rune that
+/// defines it (when present); the rune is authoritative for that version's runtime dependencies. No
+/// downloads happen — this reads index metadata and the rune.
 fn gather_candidates(name: &str, target: &str) -> Result<Vec<Candidate>> {
-    let mut candidates: Vec<Candidate> = Vec::new();
+    // Prebuilt substitutes grouped by version, paired with the runtime deps the index entry
+    // declares (used only as a fallback when no rune defines the version).
+    let mut by_version: BTreeMap<Version, (Vec<Dependency>, Vec<Substitute>)> = BTreeMap::new();
     for tome in tome::load_tomes()? {
         let Some((root, index)) = tome::package_index(&tome)? else {
             continue;
@@ -273,41 +303,69 @@ fn gather_candidates(name: &str, target: &str) -> Result<Vec<Candidate>> {
         for entry in index.candidates(name, target) {
             let version = Version::parse(&entry.version)
                 .with_context(|| format!("index version `{}` for `{name}`", entry.version))?;
-            candidates.push(Candidate {
-                version,
-                runtime: entry.runtime_deps.clone(),
-                origin: Origin::Binary {
-                    root: root.clone(),
-                    entry: entry.clone(),
-                },
+            let slot = by_version
+                .entry(version)
+                .or_insert_with(|| (entry.runtime_deps.clone(), Vec::new()));
+            slot.1.push(Substitute {
+                root: root.clone(),
+                entry: entry.clone(),
             });
         }
     }
 
-    if let Some(rune) = build::find_rune(name)? {
-        let mut metadata = EmbeddedNuRuntime
-            .package_metadata(&rune)
-            .with_context(|| format!("read rune metadata {}", rune.display()))?;
-        addendum::patched_package_metadata(
-            &mut metadata,
-            build::tome_name_for_rune(&rune)?.as_deref(),
-            &rune,
-        )
-        .with_context(|| format!("apply addendums to {}", rune.display()))?;
-        let version = Version::parse(&metadata.version)
-            .with_context(|| format!("rune version `{}` for `{name}`", metadata.version))?;
-        candidates.push(Candidate {
-            version,
-            runtime: metadata.deps.runtime,
-            origin: Origin::Source { rune },
-        });
+    // The source rune, when one exists, defines its version authoritatively.
+    let rune = match build::find_rune(name)? {
+        Some(rune) => {
+            let mut metadata = EmbeddedNuRuntime
+                .package_metadata(&rune)
+                .with_context(|| format!("read rune metadata {}", rune.display()))?;
+            addendum::patched_package_metadata(
+                &mut metadata,
+                build::tome_name_for_rune(&rune)?.as_deref(),
+                &rune,
+            )
+            .with_context(|| format!("apply addendums to {}", rune.display()))?;
+            let version = Version::parse(&metadata.version)
+                .with_context(|| format!("rune version `{}` for `{name}`", metadata.version))?;
+            Some((version, metadata.deps.runtime, rune))
+        }
+        None => None,
+    };
+
+    let mut versions: BTreeSet<Version> = by_version.keys().cloned().collect();
+    if let Some((version, _, _)) = &rune {
+        versions.insert(version.clone());
     }
 
-    candidates.sort_by(|a, b| {
-        b.version
-            .cmp(&a.version)
-            .then(rank(&a.origin).cmp(&rank(&b.origin)))
-    });
+    let mut candidates: Vec<Candidate> = versions
+        .into_iter()
+        .map(|version| {
+            let substitutes = by_version
+                .get(&version)
+                .map(|(_, subs)| subs.clone())
+                .unwrap_or_default();
+            let (rune_path, runtime) = match &rune {
+                Some((rune_version, runtime, path)) if *rune_version == version => {
+                    (Some(path.clone()), runtime.clone())
+                }
+                _ => (
+                    None,
+                    by_version
+                        .get(&version)
+                        .map(|(deps, _)| deps.clone())
+                        .unwrap_or_default(),
+                ),
+            };
+            Candidate {
+                version,
+                runtime,
+                rune: rune_path,
+                substitutes,
+            }
+        })
+        .collect();
+
+    candidates.sort_by(|a, b| b.version.cmp(&a.version));
     Ok(candidates)
 }
 
@@ -320,15 +378,8 @@ pub fn newest_available(name: &str) -> Result<Option<Version>> {
         .next())
 }
 
-fn rank(origin: &Origin) -> u8 {
-    match origin {
-        Origin::Binary { .. } => 0,
-        Origin::Source { .. } => 1,
-    }
-}
-
 /// Emits steps in dependency order (post-order DFS): a package's dependencies are listed before
-/// it. Already-installed nodes carry no origin and are skipped, but still order their dependents.
+/// it. Already-installed nodes carry no route and are skipped, but still order their dependents.
 fn topo_order(chosen: &BTreeMap<String, ChosenNode>) -> Result<Vec<PlanStep>> {
     let mut visited = HashSet::new();
     let mut on_stack = HashSet::new();
@@ -360,11 +411,12 @@ fn visit(
     }
     on_stack.remove(name);
     visited.insert(name.to_owned());
-    if let Some(origin) = &node.origin {
+    if let Some(route) = &node.route {
         steps.push(PlanStep {
             name: name.to_owned(),
             version: node.version.clone(),
-            origin: origin.clone(),
+            rune: route.rune.clone(),
+            substitutes: route.substitutes.clone(),
         });
     }
     Ok(())
@@ -396,9 +448,8 @@ mod tests {
         Candidate {
             version: Version::parse(version).expect("version"),
             runtime: deps.to_vec(),
-            origin: Origin::Source {
-                rune: PathBuf::from(format!("{version}.rn")),
-            },
+            rune: Some(PathBuf::from(format!("{version}.rn"))),
+            substitutes: Vec::new(),
         }
     }
 

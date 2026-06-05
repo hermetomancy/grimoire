@@ -40,6 +40,17 @@ fn run(root: &Path, args: &[&str]) -> Output {
         .expect("spawn grimoire")
 }
 
+/// Like [`run`], but with extra environment variables — used to pin `GRIMOIRE_BUILD_ENV` so a test
+/// can simulate building and installing under different host toolchains.
+fn run_env(root: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(BIN);
+    command.args(args).env("GRIMOIRE_ROOT", root);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.output().expect("spawn grimoire")
+}
+
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
@@ -113,7 +124,7 @@ fn archive_member_text(path: &Path, member: &str) -> String {
 }
 
 fn run_shim(root: &Path, name: &str) -> Output {
-    Command::new(root.join("bin").join(name))
+    Command::new(root.join("profiles").join("current").join("bin").join(name))
         .output()
         .expect("run installed shim")
 }
@@ -462,6 +473,16 @@ fn tome_build_publishes_prebuilt_into_index() {
     assert_success(&add, "tome add authored");
     let install = run(root, &["install", "widget"]);
     assert_success(&install, "install prebuilt widget");
+    // The published prebuilt's store hash matches the local rune, so it is used as a substitute
+    // rather than rebuilt: no source-build archive is produced for widget.
+    assert!(
+        !root
+            .join("cache")
+            .join("builds")
+            .join(format!("widget-0.1.0-{target}.tar.zst"))
+            .exists(),
+        "matching prebuilt should be substituted, not built from source"
+    );
     let widget = run_shim(root, "widget");
     assert_eq!(
         stdout(&widget).trim(),
@@ -477,6 +498,162 @@ fn tome_build_publishes_prebuilt_into_index() {
         index.matches(&archive_rel).count(),
         1,
         "rebuild should upsert, not duplicate: {index}"
+    );
+}
+
+/// A prebuilt whose published `store_hash` does not match the local rune's inputs is stale and must
+/// not be substituted: the binhost is keyed by store hash, so a mismatch forces a source build.
+#[test]
+fn stale_prebuilt_is_rebuilt_from_source() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    let dist = tome.join("dist");
+    fs::create_dir_all(&runes).unwrap();
+    fs::create_dir_all(&dist).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'staletome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+
+    // The source rune produces a bin that announces it was built from source.
+    fs::write(
+        runes.join("stalepkg.rn"),
+        "export const package = {\n  name: 'stalepkg'\n  version: '0.1.0'\n  bins: { stalepkg: 'bin/stalepkg' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'built from source\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'stalepkg')\n}\n",
+    )
+    .unwrap();
+
+    // A prebuilt that announces itself, published with a store_hash that does NOT match the rune.
+    let archive_name = format!("stalepkg-0.1.0-{triple}.tar.zst");
+    let prebuilt = make_versioned_archive(
+        &dist.join(&archive_name),
+        "stalepkg",
+        "0.1.0",
+        &triple,
+        "#!/usr/bin/env sh\nprintf 'stale prebuilt\\n'\n",
+    );
+    let hash = sha256_file(&prebuilt);
+    fs::write(
+        dist.join("index.nuon"),
+        format!(
+            "{{\n  packages: [\n    {{ name: \"stalepkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", store_hash: \"0000000000000000\", runtime_deps: [] }}\n  ]\n}}\n"
+        ),
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "add stale tome");
+
+    let install = run(root, &["install", "stalepkg"]);
+    assert_success(&install, "install stalepkg");
+
+    // The stale prebuilt is rejected; the package is built from the rune instead.
+    let stalepkg = run_shim(root, "stalepkg");
+    assert_eq!(
+        stdout(&stalepkg).trim(),
+        "built from source",
+        "stale prebuilt must be rebuilt from source, not substituted"
+    );
+    assert!(
+        root.join("cache")
+            .join("builds")
+            .join(&archive_name)
+            .exists(),
+        "a source build should have run because the prebuilt was stale"
+    );
+}
+
+/// A prebuilt published by one host toolchain must not be substituted on a host with a different
+/// toolchain identity: the build environment is part of the store hash, so the hashes diverge and
+/// the installer rebuilds. The same prebuilt *is* substituted when the toolchain identity matches.
+#[test]
+fn prebuilt_is_toolchain_specific() {
+    let triple = target_triple();
+    let build_root = TempDir::new().unwrap();
+    let build_root = build_root.path();
+
+    let workspace = TempDir::new().unwrap();
+    let tome_dir = workspace.path().join("tktome");
+    let tome_path = tome_dir.to_str().unwrap();
+
+    assert_success(
+        &run(build_root, &["tome", "init", "tktome", "--path", tome_path]),
+        "tome init",
+    );
+    assert_success(
+        &run(build_root, &["tome", "rune", "tk", "--path", tome_path]),
+        "tome rune",
+    );
+
+    // Publish a prebuilt whose store hash is computed under toolchain "alpha".
+    assert_success(
+        &run_env(
+            build_root,
+            &["tome", "build", "tk", "--path", tome_path],
+            &[("GRIMOIRE_BUILD_ENV", "alpha")],
+        ),
+        "tome build under toolchain alpha",
+    );
+
+    // Serve the built dist/ as a local package repo.
+    fs::write(
+        tome_dir.join("tome.rn"),
+        "export const tome = {\n  name: 'tktome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+
+    let build_archive = |root: &Path| {
+        root.join("cache")
+            .join("builds")
+            .join(format!("tk-0.1.0-{triple}.tar.zst"))
+    };
+
+    // Same toolchain identity → the prebuilt is a valid substitute, so no source build runs.
+    let matching = TempDir::new().unwrap();
+    let matching = matching.path();
+    assert_success(
+        &run(matching, &["tome", "add", tome_path, "--ref", "main"]),
+        "add tome (matching toolchain)",
+    );
+    assert_success(
+        &run_env(
+            matching,
+            &["install", "tk"],
+            &[("GRIMOIRE_BUILD_ENV", "alpha")],
+        ),
+        "install tk under matching toolchain",
+    );
+    assert!(
+        !build_archive(matching).exists(),
+        "matching toolchain should substitute the prebuilt, not build"
+    );
+
+    // Different toolchain identity → the prebuilt is not a match, so tk is rebuilt from source.
+    let differing = TempDir::new().unwrap();
+    let differing = differing.path();
+    assert_success(
+        &run(differing, &["tome", "add", tome_path, "--ref", "main"]),
+        "add tome (differing toolchain)",
+    );
+    assert_success(
+        &run_env(
+            differing,
+            &["install", "tk"],
+            &[("GRIMOIRE_BUILD_ENV", "beta")],
+        ),
+        "install tk under differing toolchain",
+    );
+    assert!(
+        build_archive(differing).exists(),
+        "differing toolchain should rebuild rather than reuse the alpha prebuilt"
     );
 }
 
@@ -779,8 +956,9 @@ printf '%s\n' "$prefix" > configured-prefix.txt
     let minimake_archive = dist.join(&minimake_archive_name);
     let mut builder = open_archive(&minimake_archive);
     let minimake_metadata = format!(
-        "{{format: 1, name: \"minimake\", version: \"0.1.0\", target: \"{}\", bins: {{make: \"bin/make\"}}}}\n",
-        target_triple()
+        "{{format: 1, name: \"minimake\", version: \"0.1.0\", target: \"{}\", store_path: \"{}\", bins: {{make: \"bin/make\"}}}}\n",
+        target_triple(),
+        fake_store_basename("minimake", "0.1.0")
     );
     append_file(
         &mut builder,
@@ -799,7 +977,7 @@ printf '%s\n' "$prefix" > configured-prefix.txt
     fs::write(
         dist.join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"minimake\", version: \"0.1.0\", target: \"{}\", archive: \"{minimake_archive_name}\", archive_hash: \"{minimake_hash}\", runtime_deps: [] }}\n  ]\n}}\n",
+            "{{\n  packages: [\n    {{ name: \"minimake\", version: \"0.1.0\", target: \"{}\", archive: \"{minimake_archive_name}\", archive_hash: \"{minimake_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n",
             target_triple()
         ),
     )
@@ -831,8 +1009,9 @@ printf '%s\n' "$prefix" > configured-prefix.txt
         "built archive metadata should record its final store path: {package_metadata}"
     );
     assert!(
-        package_metadata.contains("packages/realpkg/1.0.0"),
-        "store path should be the final package prefix: {package_metadata}"
+        package_metadata.contains("-realpkg-1.0.0")
+            && !package_metadata.contains("packages/realpkg"),
+        "store path should be the content-addressed store basename, not a packages/ dir: {package_metadata}"
     );
 
     let output = run_shim(root, "realpkg");
@@ -843,8 +1022,8 @@ printf '%s\n' "$prefix" > configured-prefix.txt
         "realpkg output should reflect configured source build: {line}"
     );
     assert!(
-        line.trim_end().ends_with("/packages/realpkg/1.0.0"),
-        "ctx.prefix should point at the final package prefix, not the temporary staging dir: {line}"
+        line.contains("/store/") && line.trim_end().ends_with("-realpkg-1.0.0"),
+        "ctx.prefix should point at the final store path, not the temporary staging dir: {line}"
     );
     assert!(
         !line.trim_end().ends_with("/package"),
@@ -944,13 +1123,34 @@ fn build_install_list_remove() {
     let remove = run(root, &["remove", "hello"]);
     assert_success(&remove, "remove installed package");
     assert!(
-        !root.join("bin").join("hello").exists(),
+        !root
+            .join("profiles")
+            .join("current")
+            .join("bin")
+            .join("hello")
+            .exists(),
         "removed shim should be gone"
     );
     assert!(
-        !root.join("packages").join("hello").join("0.1.0").exists(),
-        "removed package dir should be gone"
+        !store_has_package(root, "hello"),
+        "removed store dir should be gone"
     );
+}
+
+/// True when the install root's content-addressed store holds a directory for `name`
+/// (`<hash>-<name>-<version>`). Used by tests that assert install/removal of a package without
+/// knowing its build-input hash.
+fn store_has_package(root: &std::path::Path, name: &str) -> bool {
+    let store = root.join("store");
+    let Ok(entries) = fs::read_dir(&store) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry
+            .file_name()
+            .to_str()
+            .is_some_and(|file| file.contains(&format!("-{name}-")))
+    })
 }
 
 #[test]
@@ -976,8 +1176,8 @@ fn built_archive_installs_under_a_different_root() {
     let archive = out.join(format!("hello-0.1.0-{}.tar.zst", target_triple()));
     let metadata = archive_member_text(&archive, ".grimoire/package.nuon");
     assert!(
-        metadata.contains("store_path") && metadata.contains("packages/hello/0.1.0"),
-        "built archive should record a portable root-relative store path: {metadata}"
+        metadata.contains("store_path") && metadata.contains("-hello-0.1.0"),
+        "built archive should record a portable root-relative store basename: {metadata}"
     );
 
     let install = run(install_root, &["install", archive.to_str().unwrap()]);
@@ -1020,11 +1220,7 @@ fn install_rejects_archive_with_wrong_store_path() {
         "reject wrong archive store path",
     );
     assert!(
-        !root
-            .join("packages")
-            .join("wrongpath")
-            .join("1.0.0")
-            .exists(),
+        !store_has_package(root, "wrongpath"),
         "package with wrong store_path should not be promoted"
     );
 }
@@ -1121,7 +1317,7 @@ fn doctor_reports_health_and_problems() {
     );
 
     // Corrupt the install: the package's files vanish but its recorded state remains.
-    fs::remove_dir_all(root.join("packages").join("hello").join("0.1.0")).unwrap();
+    fs::remove_dir_all(installed_store_dir(root, "hello").expect("hello store dir")).unwrap();
     let degraded = run(root, &["doctor"]);
     assert_success(&degraded, "doctor on degraded install");
     assert!(
@@ -1177,7 +1373,12 @@ fn install_verifies_archive_hash() {
     );
     assert_failure_contains(&bad, "hash mismatch", "reject mismatched --sha256");
     assert!(
-        !root.join("bin").join("hello").exists(),
+        !root
+            .join("profiles")
+            .join("current")
+            .join("bin")
+            .join("hello")
+            .exists(),
         "mismatched verify must not create a shim"
     );
     assert!(
@@ -1431,8 +1632,9 @@ fn install_resolves_binary_from_index() {
     let root = root.path();
     let triple = target_triple();
 
-    // A tome that publishes its package repo to a local `dist/` directory: it ships a rune
-    // *and* a pre-built archive alongside the index in `dist/`.
+    // The tome ships `binpkg`'s rune *and* a prebuilt whose published store hash matches it, so the
+    // prebuilt is a valid substitute. The rune builds a bin printing "from source" while the
+    // prebuilt prints "from binary", so the install output proves the prebuilt was substituted.
     let tome = TempDir::new().unwrap();
     let tome = tome.path();
     let runes = tome.join("runes");
@@ -1442,28 +1644,9 @@ fn install_resolves_binary_from_index() {
         "export const tome = {\n  name: 'bincore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
     )
     .unwrap();
-
-    // The source rune for the same package prints a different marker, so a successful
-    // install proves the binary archive — not a source build — was used.
     fs::write(
         runes.join("binpkg.rn"),
         "export const package = {\n  name: 'binpkg'\n  version: '0.1.0'\n  bins: { binpkg: 'bin/binpkg' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'from source\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'binpkg')\n}\n",
-    )
-    .unwrap();
-
-    let archive_name = format!("binpkg-0.1.0-{triple}.tar.zst");
-    let archive = make_indexed_archive(
-        &tome.join("dist").join(&archive_name),
-        "binpkg",
-        &triple,
-        "#!/usr/bin/env sh\nprintf 'from binary\\n'\n",
-    );
-    let hash = sha256_file(&archive);
-    fs::write(
-        tome.join("dist").join("index.nuon"),
-        format!(
-            "{{\n  packages: [\n    {{ name: \"binpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", runtime_deps: [] }}\n  ]\n}}\n"
-        ),
     )
     .unwrap();
 
@@ -1472,6 +1655,32 @@ fn install_resolves_binary_from_index() {
         &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
     );
     assert_success(&add, "tome add bincore");
+
+    // Publish a prebuilt whose store hash is exactly the one the installer will recompute.
+    let store_hash = store_hash(root, "binpkg");
+    let archive_name = format!("binpkg-0.1.0-{triple}.tar.zst");
+    let archive = make_prebuilt(
+        &tome.join("dist").join(&archive_name),
+        "binpkg",
+        "0.1.0",
+        &triple,
+        &store_hash,
+        "#!/usr/bin/env sh\nprintf 'from binary\\n'\n",
+    );
+    let hash = sha256_file(&archive);
+    fs::write(
+        tome.join("dist").join("index.nuon"),
+        solo_index(
+            "binpkg",
+            "0.1.0",
+            &triple,
+            &archive_name,
+            &hash,
+            &store_hash,
+            "[]",
+        ),
+    )
+    .unwrap();
     let update = run(root, &["tome", "update", "bincore"]);
     assert_success(&update, "tome update bincore");
 
@@ -1490,7 +1699,7 @@ fn install_resolves_binary_from_index() {
     assert_eq!(
         stdout(&shim).trim(),
         "from binary",
-        "binary archive must be preferred over source build"
+        "the matching prebuilt is substituted instead of building the rune"
     );
 }
 
@@ -1501,15 +1710,14 @@ fn install_resolves_binary_over_http() {
     let triple = target_triple();
 
     // The published index + archive live in a directory served over HTTP; the tome.rn points
-    // at that base URL with format "http". Installing must fetch and verify the archive over
-    // the network rather than building the source rune (which prints a different marker).
+    // at that base URL with format "http". Installing must fetch and verify the prebuilt archive
+    // over the network. This is a pure binary repo with no rune.
     let tome = TempDir::new().unwrap();
     let tome = tome.path();
-    let runes = tome.join("runes");
-    fs::create_dir_all(&runes).unwrap();
+    fs::create_dir_all(tome.join("runes")).unwrap();
     fs::write(
-        runes.join("httppkg.rn"),
-        "export const package = {\n  name: 'httppkg'\n  version: '0.1.0'\n  bins: { httppkg: 'bin/httppkg' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'from source\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'httppkg')\n}\n",
+        tome.join("runes").join("dummy.rn"),
+        "export const package = { name: 'dummy' version: '0.0.1' }\n",
     )
     .unwrap();
 
@@ -1527,7 +1735,7 @@ fn install_resolves_binary_over_http() {
     fs::write(
         published.join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"httppkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", runtime_deps: [] }}\n  ]\n}}\n"
+            "{{\n  packages: [\n    {{ name: \"httppkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n"
         ),
     )
     .unwrap();
@@ -1564,7 +1772,7 @@ fn install_resolves_binary_over_http() {
     assert_eq!(
         stdout(&shim).trim(),
         "from binary",
-        "http binary archive must be preferred over source build"
+        "http binary repo installs the published prebuilt"
     );
 }
 
@@ -1574,8 +1782,9 @@ fn install_pulls_in_runtime_dependencies() {
     let root = root.path();
     let triple = target_triple();
 
-    // A tome that publishes to a local `dist/` directory: `app` declares a runtime dependency
-    // on `lib`, and both ship as pre-built archives. Installing `app` must install `lib` too.
+    // The tome ships the runes for `app` (which declares a runtime dep on `lib`) and `lib`, plus a
+    // prebuilt for each whose published store hash matches. `app`'s content address folds in `lib`'s
+    // (the transitive closure), so the seam computes `app`'s hash only after `lib`'s rune exists.
     let tome = TempDir::new().unwrap();
     let tome = tome.path();
     let runes = tome.join("runes");
@@ -1585,38 +1794,14 @@ fn install_pulls_in_runtime_dependencies() {
         "export const tome = {\n  name: 'depcore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
     )
     .unwrap();
-    // The binary archives are preferred, but a tome must define at least one rune.
-    for pkg in ["app", "lib"] {
-        fs::write(
-            runes.join(format!("{pkg}.rn")),
-            format!("export const package = {{\n  name: '{pkg}'\n  version: '0.1.0'\n  bins: {{}}\n}}\n\nexport def build [ctx] {{ }}\n"),
-        )
-        .unwrap();
-    }
-
-    let app_name = format!("app-0.1.0-{triple}.tar.zst");
-    let app = make_indexed_archive(
-        &tome.join("dist").join(&app_name),
-        "app",
-        &triple,
-        "#!/usr/bin/env sh\nprintf 'app\\n'\n",
-    );
-    let app_hash = sha256_file(&app);
-
-    let lib_name = format!("lib-0.1.0-{triple}.tar.zst");
-    let lib = make_indexed_archive(
-        &tome.join("dist").join(&lib_name),
-        "lib",
-        &triple,
-        "#!/usr/bin/env sh\nprintf 'lib\\n'\n",
-    );
-    let lib_hash = sha256_file(&lib);
-
     fs::write(
-        tome.join("dist").join("index.nuon"),
-        format!(
-            "{{\n  packages: [\n    {{ name: \"app\", version: \"0.1.0\", target: \"{triple}\", archive: \"{app_name}\", archive_hash: \"{app_hash}\", runtime_deps: [\"lib\"] }}\n    {{ name: \"lib\", version: \"0.1.0\", target: \"{triple}\", archive: \"{lib_name}\", archive_hash: \"{lib_hash}\", runtime_deps: [] }}\n  ]\n}}\n"
-        ),
+        runes.join("app.rn"),
+        "export const package = {\n  name: 'app'\n  version: '0.1.0'\n  deps: { runtime: ['lib'] }\n  bins: { app: 'bin/app' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'app\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'app')\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("lib.rn"),
+        "export const package = {\n  name: 'lib'\n  version: '0.1.0'\n  bins: { lib: 'bin/lib' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'lib\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'lib')\n}\n",
     )
     .unwrap();
 
@@ -1625,6 +1810,38 @@ fn install_pulls_in_runtime_dependencies() {
         &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
     );
     assert_success(&add, "tome add depcore");
+
+    let lib_store = store_hash(root, "lib");
+    let app_store = store_hash(root, "app");
+    let app_name = format!("app-0.1.0-{triple}.tar.zst");
+    let app = make_prebuilt(
+        &tome.join("dist").join(&app_name),
+        "app",
+        "0.1.0",
+        &triple,
+        &app_store,
+        "#!/usr/bin/env sh\nprintf 'app\\n'\n",
+    );
+    let app_hash = sha256_file(&app);
+    let lib_name = format!("lib-0.1.0-{triple}.tar.zst");
+    let lib = make_prebuilt(
+        &tome.join("dist").join(&lib_name),
+        "lib",
+        "0.1.0",
+        &triple,
+        &lib_store,
+        "#!/usr/bin/env sh\nprintf 'lib\\n'\n",
+    );
+    let lib_hash = sha256_file(&lib);
+
+    fs::write(
+        tome.join("dist").join("index.nuon"),
+        format!(
+            "{{\n  packages: [\n    {{ name: \"app\", version: \"0.1.0\", target: \"{triple}\", archive: \"{app_name}\", archive_hash: \"{app_hash}\", store_hash: \"{app_store}\", runtime_deps: [\"lib\"] }}\n    {{ name: \"lib\", version: \"0.1.0\", target: \"{triple}\", archive: \"{lib_name}\", archive_hash: \"{lib_hash}\", store_hash: \"{lib_store}\", runtime_deps: [] }}\n  ]\n}}\n"
+        ),
+    )
+    .unwrap();
+
     let update = run(root, &["tome", "update", "depcore"]);
     assert_success(&update, "tome update depcore");
 
@@ -1655,23 +1872,21 @@ fn install_selects_constrained_dependency_version() {
 
     // The index offers two versions of `lib`; `app` constrains it to `<2.0`. The solver must
     // pick `lib` 1.0.0 even though 2.0.0 is newer, proving version-aware resolution end to end.
+    // A pure binary repo: the constraint lives in `app`'s index entry.
     let tome = TempDir::new().unwrap();
     let tome = tome.path();
-    let runes = tome.join("runes");
-    fs::create_dir_all(&runes).unwrap();
+    fs::create_dir_all(tome.join("dist")).unwrap();
+    fs::create_dir_all(tome.join("runes")).unwrap();
+    fs::write(
+        tome.join("runes").join("dummy.rn"),
+        "export const package = { name: 'dummy' version: '0.0.1' }\n",
+    )
+    .unwrap();
     fs::write(
         tome.join("tome.rn"),
         "export const tome = {\n  name: 'vercore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
     )
     .unwrap();
-    for pkg in ["app", "lib"] {
-        fs::write(
-            runes.join(format!("{pkg}.rn")),
-            format!("export const package = {{\n  name: '{pkg}'\n  version: '1.0.0'\n  bins: {{}}\n}}\n\nexport def build [ctx] {{ }}\n"),
-        )
-        .unwrap();
-    }
-
     let dist = tome.join("dist");
     let app_name = format!("app-1.0.0-{triple}.tar.zst");
     let app = make_versioned_archive(
@@ -1706,7 +1921,7 @@ fn install_selects_constrained_dependency_version() {
     fs::write(
         dist.join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"app\", version: \"1.0.0\", target: \"{triple}\", archive: \"{app_name}\", archive_hash: \"{app_hash}\", runtime_deps: [{{ name: \"lib\", version: \"<2.0\" }}] }}\n    {{ name: \"lib\", version: \"1.0.0\", target: \"{triple}\", archive: \"{lib1_name}\", archive_hash: \"{lib1_hash}\", runtime_deps: [] }}\n    {{ name: \"lib\", version: \"2.0.0\", target: \"{triple}\", archive: \"{lib2_name}\", archive_hash: \"{lib2_hash}\", runtime_deps: [] }}\n  ]\n}}\n"
+            "{{\n  packages: [\n    {{ name: \"app\", version: \"1.0.0\", target: \"{triple}\", archive: \"{app_name}\", archive_hash: \"{app_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [{{ name: \"lib\", version: \"<2.0\" }}] }}\n    {{ name: \"lib\", version: \"1.0.0\", target: \"{triple}\", archive: \"{lib1_name}\", archive_hash: \"{lib1_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n    {{ name: \"lib\", version: \"2.0.0\", target: \"{triple}\", archive: \"{lib2_name}\", archive_hash: \"{lib2_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n"
         ),
     )
     .unwrap();
@@ -1782,14 +1997,15 @@ fn source_install_keeps_pulled_build_dependency_after_success() {
         "stampdep state should remain"
     );
     assert!(
-        root.join("packages")
-            .join("stampdep")
-            .join("0.1.0")
-            .exists(),
+        store_has_package(root, "stampdep"),
         "stampdep package dir should remain"
     );
     assert!(
-        root.join("bin").join("stamp").exists(),
+        root.join("profiles")
+            .join("current")
+            .join("bin")
+            .join("stamp")
+            .exists(),
         "stampdep shim should remain"
     );
 
@@ -1879,22 +2095,22 @@ fn remove_autoremoves_orphaned_runtime_dependencies() {
     // Two top-level packages, `app` and `other`, that both depend on the same `lib`. After
     // removing `app`, `lib` must stay because `other` still needs it; after removing `other`,
     // `lib` becomes truly unreferenced and the cascade autoremove must take it out too.
+    // A pure binary repo: `app` and `other` both declare a runtime dep on `lib` in their index
+    // entries and embedded archive metadata.
     let tome = TempDir::new().unwrap();
     let tome = tome.path();
-    let runes = tome.join("runes");
-    fs::create_dir_all(&runes).unwrap();
+    fs::create_dir_all(tome.join("dist")).unwrap();
+    fs::create_dir_all(tome.join("runes")).unwrap();
+    fs::write(
+        tome.join("runes").join("dummy.rn"),
+        "export const package = { name: 'dummy' version: '0.0.1' }\n",
+    )
+    .unwrap();
     fs::write(
         tome.join("tome.rn"),
         "export const tome = {\n  name: 'rmcore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
     )
     .unwrap();
-    for pkg in ["app", "other", "lib"] {
-        fs::write(
-            runes.join(format!("{pkg}.rn")),
-            format!("export const package = {{\n  name: '{pkg}'\n  version: '0.1.0'\n  bins: {{}}\n}}\n\nexport def build [ctx] {{ }}\n"),
-        )
-        .unwrap();
-    }
 
     let dist = tome.join("dist");
     let mut entries = Vec::new();
@@ -1903,7 +2119,8 @@ fn remove_autoremoves_orphaned_runtime_dependencies() {
         // Embed deps in the archive's package.nuon, not just the index entry: the install state
         // record reads from the archive, and the autoremove cascade reads from that state.
         let package_nuon = format!(
-            "{{format: 1, name: \"{pkg}\", version: \"0.1.0\", target: \"{triple}\", bins: {{{pkg}: \"bin/{pkg}\"}}, deps: {{ runtime: {deps} }}}}\n"
+            "{{format: 1, name: \"{pkg}\", version: \"0.1.0\", target: \"{triple}\", store_path: \"{}\", bins: {{{pkg}: \"bin/{pkg}\"}}, deps: {{ runtime: {deps} }}}}\n",
+            fake_store_basename(pkg, "0.1.0")
         );
         let archive_path = dist.join(&name);
         if let Some(parent) = archive_path.parent() {
@@ -1925,7 +2142,7 @@ fn remove_autoremoves_orphaned_runtime_dependencies() {
         finish_archive(builder);
         let hash = sha256_file(&archive_path);
         entries.push(format!(
-            "    {{ name: \"{pkg}\", version: \"0.1.0\", target: \"{triple}\", archive: \"{name}\", archive_hash: \"{hash}\", runtime_deps: {deps} }}"
+            "    {{ name: \"{pkg}\", version: \"0.1.0\", target: \"{triple}\", archive: \"{name}\", archive_hash: \"{hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: {deps} }}"
         ));
     }
     fs::write(
@@ -1972,11 +2189,16 @@ fn remove_autoremoves_orphaned_runtime_dependencies() {
     );
     assert!(!lib_state.exists(), "lib state should be gone");
     assert!(
-        !root.join("packages").join("lib").join("0.1.0").exists(),
+        !store_has_package(root, "lib"),
         "lib package dir should be gone"
     );
     assert!(
-        !root.join("bin").join("lib").exists(),
+        !root
+            .join("profiles")
+            .join("current")
+            .join("bin")
+            .join("lib")
+            .exists(),
         "lib shim should be gone"
     );
 }
@@ -2135,16 +2357,16 @@ fn unsigned_tome_leaves_no_pin() {
     // installs proceed without signature verification (verify-if-present).
     let tome = TempDir::new().unwrap();
     let tome = tome.path();
-    let runes = tome.join("runes");
-    fs::create_dir_all(&runes).unwrap();
+    fs::create_dir_all(tome.join("dist")).unwrap();
+    fs::create_dir_all(tome.join("runes")).unwrap();
     fs::write(
-        tome.join("tome.rn"),
-        "export const tome = {\n  name: 'plaincore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+        tome.join("runes").join("dummy.rn"),
+        "export const package = { name: 'dummy' version: '0.0.1' }\n",
     )
     .unwrap();
     fs::write(
-        runes.join("plainpkg.rn"),
-        "export const package = {\n  name: 'plainpkg'\n  version: '0.1.0'\n  bins: {}\n}\n\nexport def build [ctx] { }\n",
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'plaincore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
     )
     .unwrap();
     let dist = tome.join("dist");
@@ -2160,7 +2382,7 @@ fn unsigned_tome_leaves_no_pin() {
     fs::write(
         dist.join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"plainpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", runtime_deps: [] }}\n  ]\n}}\n"
+            "{{\n  packages: [\n    {{ name: \"plainpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n"
         ),
     )
     .unwrap();
@@ -2198,20 +2420,18 @@ fn install_dry_run_prints_plan_without_touching_state() {
     // must show both steps and *not* leave a state record, shim, or package directory behind.
     let tome = TempDir::new().unwrap();
     let tome = tome.path();
-    let runes = tome.join("runes");
-    fs::create_dir_all(&runes).unwrap();
+    fs::create_dir_all(tome.join("dist")).unwrap();
+    fs::create_dir_all(tome.join("runes")).unwrap();
+    fs::write(
+        tome.join("runes").join("dummy.rn"),
+        "export const package = { name: 'dummy' version: '0.0.1' }\n",
+    )
+    .unwrap();
     fs::write(
         tome.join("tome.rn"),
         "export const tome = {\n  name: 'drycore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
     )
     .unwrap();
-    for pkg in ["app", "lib"] {
-        fs::write(
-            runes.join(format!("{pkg}.rn")),
-            format!("export const package = {{\n  name: '{pkg}'\n  version: '0.1.0'\n  bins: {{}}\n}}\n\nexport def build [ctx] {{ }}\n"),
-        )
-        .unwrap();
-    }
     let dist = tome.join("dist");
     let app_name = format!("app-0.1.0-{triple}.tar.zst");
     let app = make_indexed_archive(
@@ -2232,7 +2452,7 @@ fn install_dry_run_prints_plan_without_touching_state() {
     fs::write(
         dist.join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"app\", version: \"0.1.0\", target: \"{triple}\", archive: \"{app_name}\", archive_hash: \"{app_hash}\", runtime_deps: [\"lib\"] }}\n    {{ name: \"lib\", version: \"0.1.0\", target: \"{triple}\", archive: \"{lib_name}\", archive_hash: \"{lib_hash}\", runtime_deps: [] }}\n  ]\n}}\n"
+            "{{\n  packages: [\n    {{ name: \"app\", version: \"0.1.0\", target: \"{triple}\", archive: \"{app_name}\", archive_hash: \"{app_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [\"lib\"] }}\n    {{ name: \"lib\", version: \"0.1.0\", target: \"{triple}\", archive: \"{lib_name}\", archive_hash: \"{lib_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n"
         ),
     )
     .unwrap();
@@ -2281,7 +2501,7 @@ fn install_dry_run_prints_plan_without_touching_state() {
         "dry-run must not write state for lib"
     );
     assert!(
-        !root.join("packages").join("app").exists(),
+        !store_has_package(root, "app"),
         "dry-run must not write a package dir"
     );
 
@@ -2339,16 +2559,16 @@ fn hold_skips_upgrade_until_released() {
     // unhold makes the upgrade go through.
     let tome = TempDir::new().unwrap();
     let tome = tome.path();
-    let runes = tome.join("runes");
-    fs::create_dir_all(&runes).unwrap();
+    fs::create_dir_all(tome.join("dist")).unwrap();
+    fs::create_dir_all(tome.join("runes")).unwrap();
     fs::write(
-        tome.join("tome.rn"),
-        "export const tome = {\n  name: 'holdcore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+        tome.join("runes").join("dummy.rn"),
+        "export const package = { name: 'dummy' version: '0.0.1' }\n",
     )
     .unwrap();
     fs::write(
-        runes.join("holdpkg.rn"),
-        "export const package = {\n  name: 'holdpkg'\n  version: '0.1.0'\n  bins: {}\n}\n\nexport def build [ctx] { }\n",
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'holdcore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
     )
     .unwrap();
 
@@ -2365,7 +2585,7 @@ fn hold_skips_upgrade_until_released() {
     fs::write(
         dist.join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"holdpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", runtime_deps: [] }}\n  ]\n}}\n"
+            "{{\n  packages: [\n    {{ name: \"holdpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n"
         ),
     )
     .unwrap();
@@ -2409,7 +2629,7 @@ fn hold_skips_upgrade_until_released() {
     fs::write(
         dist.join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"holdpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", runtime_deps: [] }}\n    {{ name: \"holdpkg\", version: \"0.2.0\", target: \"{triple}\", archive: \"{v2_name}\", archive_hash: \"{v2_hash}\", runtime_deps: [] }}\n  ]\n}}\n"
+            "{{\n  packages: [\n    {{ name: \"holdpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n    {{ name: \"holdpkg\", version: \"0.2.0\", target: \"{triple}\", archive: \"{v2_name}\", archive_hash: \"{v2_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n"
         ),
     )
     .unwrap();
@@ -2463,16 +2683,16 @@ fn upgrade_syncs_configured_tomes_before_resolving_versions() {
     let tome = TempDir::new().unwrap();
     let tome = tome.path();
     let dist = tome.join("dist");
-    let runes = tome.join("runes");
-    fs::create_dir_all(&runes).unwrap();
+    fs::create_dir_all(&dist).unwrap();
+    fs::create_dir_all(tome.join("runes")).unwrap();
     fs::write(
-        tome.join("tome.rn"),
-        "export const tome = {\n  name: 'upcore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+        tome.join("runes").join("dummy.rn"),
+        "export const package = { name: 'dummy' version: '0.0.1' }\n",
     )
     .unwrap();
     fs::write(
-        runes.join("uppkg.rn"),
-        "export const package = {\n  name: 'uppkg'\n  version: '0.1.0'\n  bins: { uppkg: 'bin/uppkg' }\n}\n\nexport def build [ctx] { }\n",
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'upcore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
     )
     .unwrap();
 
@@ -2488,7 +2708,7 @@ fn upgrade_syncs_configured_tomes_before_resolving_versions() {
     fs::write(
         dist.join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"uppkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", runtime_deps: [] }}\n  ]\n}}\n"
+            "{{\n  packages: [\n    {{ name: \"uppkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n"
         ),
     )
     .unwrap();
@@ -2518,7 +2738,7 @@ fn upgrade_syncs_configured_tomes_before_resolving_versions() {
     fs::write(
         dist.join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"uppkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", runtime_deps: [] }}\n    {{ name: \"uppkg\", version: \"0.2.0\", target: \"{triple}\", archive: \"{v2_name}\", archive_hash: \"{v2_hash}\", runtime_deps: [] }}\n  ]\n}}\n"
+            "{{\n  packages: [\n    {{ name: \"uppkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n    {{ name: \"uppkg\", version: \"0.2.0\", target: \"{triple}\", archive: \"{v2_name}\", archive_hash: \"{v2_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n"
         ),
     )
     .unwrap();
@@ -2612,9 +2832,8 @@ fn clean_empties_caches_and_transactions() {
     let state_file = state_dir.join("keep.nuon");
     fs::write(&state_file, b"keep me\n").unwrap();
     let packages_file = root
-        .join("packages")
-        .join("keep")
-        .join("0.1.0")
+        .join("store")
+        .join(fake_store_basename("keep", "0.1.0"))
         .join("file");
     fs::create_dir_all(packages_file.parent().unwrap()).unwrap();
     fs::write(&packages_file, b"keep me too\n").unwrap();
@@ -2725,16 +2944,16 @@ fn install_locked_reproduces_pinned_version() {
     // `--locked` install must reproduce the pinned 0.1.0 even though 0.2.0 is newer and present.
     let tome = TempDir::new().unwrap();
     let tome = tome.path();
-    let runes = tome.join("runes");
-    fs::create_dir_all(&runes).unwrap();
+    fs::create_dir_all(tome.join("dist")).unwrap();
+    fs::create_dir_all(tome.join("runes")).unwrap();
     fs::write(
-        tome.join("tome.rn"),
-        "export const tome = {\n  name: 'lockcore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+        tome.join("runes").join("dummy.rn"),
+        "export const package = { name: 'dummy' version: '0.0.1' }\n",
     )
     .unwrap();
     fs::write(
-        runes.join("lockpkg.rn"),
-        "export const package = {\n  name: 'lockpkg'\n  version: '0.1.0'\n  bins: {}\n}\n\nexport def build [ctx] { }\n",
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'lockcore'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
     )
     .unwrap();
 
@@ -2762,7 +2981,7 @@ fn install_locked_reproduces_pinned_version() {
     fs::write(
         dist.join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"lockpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", runtime_deps: [] }}\n    {{ name: \"lockpkg\", version: \"0.2.0\", target: \"{triple}\", archive: \"{v2_name}\", archive_hash: \"{v2_hash}\", runtime_deps: [] }}\n  ]\n}}\n"
+            "{{\n  packages: [\n    {{ name: \"lockpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n    {{ name: \"lockpkg\", version: \"0.2.0\", target: \"{triple}\", archive: \"{v2_name}\", archive_hash: \"{v2_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n"
         ),
     )
     .unwrap();
@@ -2836,7 +3055,7 @@ fn reject_symlink_archive_with_escaping_target() {
         "reject escaping symlink archive",
     );
     assert!(
-        !root.join("packages").join("badlink").join("0.1.0").exists(),
+        !store_has_package(root, "badlink"),
         "rejected package dir should not exist"
     );
 }
@@ -2891,10 +3110,8 @@ fn source_build_preserves_internal_symlink() {
     assert_success(&install, "install package with internal symlink");
 
     // The alias is preserved as a symlink in the installed package, not dereferenced into a copy.
-    let installed_alias = root
-        .join("packages")
-        .join("aliased")
-        .join("0.1.0")
+    let installed_alias = installed_store_dir(root, "aliased")
+        .expect("aliased store dir")
         .join("bin")
         .join("alias");
     let meta = fs::symlink_metadata(&installed_alias).expect("installed alias exists");
@@ -3070,15 +3287,16 @@ fn make_fake_core_tome(triple: &str) -> TempDir {
     )
     .unwrap();
 
+    // validate_tome_cache requires at least one rune, but we want binary installs.
+    // A dummy rune satisfies the validator without causing a source-build fallback.
+    fs::write(
+        runes.join("dummy.rn"),
+        "export const package = { name: 'dummy' version: '0.0.1' }\n",
+    )
+    .unwrap();
+
     let mut entries = String::from("{\n  packages: [\n");
     for package in CORE_READINESS_PACKAGES {
-        fs::write(
-            runes.join(format!("{package}.rn")),
-            format!(
-                "export const package = {{\n  name: '{package}'\n  version: '0.1.0'\n  bins: {{ {package}: 'bin/{package}' }}\n}}\n\nexport def build [ctx] {{ }}\n"
-            ),
-        )
-        .unwrap();
         let archive_name = format!("{package}-0.1.0-{triple}.tar.zst");
         let archive = make_versioned_archive(
             &dist.join(&archive_name),
@@ -3089,7 +3307,7 @@ fn make_fake_core_tome(triple: &str) -> TempDir {
         );
         let archive_hash = sha256_file(&archive);
         entries.push_str(&format!(
-            "    {{ name: \"{package}\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{archive_hash}\", runtime_deps: [] }}\n"
+            "    {{ name: \"{package}\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{archive_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n"
         ));
     }
     entries.push_str("  ]\n}\n");
@@ -3232,6 +3450,28 @@ fn append_file<W: Write>(builder: &mut tar::Builder<W>, path: &str, data: &[u8],
         .expect("append file");
 }
 
+/// A deterministic, syntactically valid store basename (`<hash>-<name>-<version>`) for a
+/// hand-built archive fixture. The hash bytes are arbitrary: a local-archive install derives its
+/// store location from this embedded basename, and no store-hash cross-check runs unless an index
+/// entry carries one (the fixtures here do not).
+fn fake_store_basename(name: &str, version: &str) -> String {
+    format!("cafef00dcafef00d-{name}-{version}")
+}
+
+/// The absolute store directory a package was installed into, read from its recorded state. Tests
+/// use this instead of guessing the content-addressed path; returns `None` when not installed.
+fn installed_store_dir(root: &Path, name: &str) -> Option<PathBuf> {
+    let state = root
+        .join("state")
+        .join("packages")
+        .join(format!("{name}.nuon"));
+    let text = fs::read_to_string(state).ok()?;
+    let marker = "store_path: \"";
+    let start = text.find(marker)? + marker.len();
+    let end = text[start..].find('"')? + start;
+    Some(PathBuf::from(&text[start..end]))
+}
+
 fn make_package_archive(out: &Path, name: &str, package_nuon: &str) -> PathBuf {
     fs::create_dir_all(out).unwrap();
     let archive = out.join(format!("{name}-0.1.0-{}.tar.zst", target_triple()));
@@ -3258,6 +3498,64 @@ fn make_package_archive(out: &Path, name: &str, package_nuon: &str) -> PathBuf {
     archive
 }
 
+/// The store hash `grm` will assign to `package`, via the hidden `store-hash` seam. Lets a fixture
+/// register a prebuilt whose published `store_hash` matches what the installer will recompute, so
+/// the prebuilt is accepted as a substitute. `package` may be a known name (the tome must be added)
+/// or a path to a `.rn`.
+fn store_hash(root: &Path, package: &str) -> String {
+    let out = run(root, &["store-hash", package]);
+    assert_success(&out, &format!("store-hash {package}"));
+    stdout(&out).trim().to_string()
+}
+
+/// A prebuilt archive whose embedded store basename is `<store_hash>-<name>-<version>`, so it
+/// installs as a valid substitute for a rune of the same content address.
+fn make_prebuilt(
+    path: &Path,
+    name: &str,
+    version: &str,
+    triple: &str,
+    store_hash: &str,
+    bin_script: &str,
+) -> PathBuf {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    let mut builder = open_archive(path);
+    let package_nuon = format!(
+        "{{format: 1, name: \"{name}\", version: \"{version}\", target: \"{triple}\", store_path: \"{store_hash}-{name}-{version}\", bins: {{{name}: \"bin/{name}\"}}}}\n"
+    );
+    append_file(
+        &mut builder,
+        ".grimoire/package.nuon",
+        package_nuon.as_bytes(),
+        0o644,
+    );
+    append_file(
+        &mut builder,
+        &format!("bin/{name}"),
+        bin_script.as_bytes(),
+        0o755,
+    );
+    finish_archive(builder);
+    path.to_path_buf()
+}
+
+/// A single-package `index.nuon` body for a prebuilt, with the matching `store_hash`.
+fn solo_index(
+    name: &str,
+    version: &str,
+    triple: &str,
+    archive: &str,
+    archive_hash: &str,
+    store_hash: &str,
+    runtime_deps: &str,
+) -> String {
+    format!(
+        "{{\n  packages: [\n    {{ name: \"{name}\", version: \"{version}\", target: \"{triple}\", archive: \"{archive}\", archive_hash: \"{archive_hash}\", store_hash: \"{store_hash}\", runtime_deps: {runtime_deps} }}\n  ]\n}}\n"
+    )
+}
+
 /// Builds a complete `.tar.zst` package archive at `path` whose single bin is `bin_script`.
 /// Used to stage a pre-built binary in a fake package repository.
 fn make_indexed_archive(path: &Path, name: &str, triple: &str, bin_script: &str) -> PathBuf {
@@ -3278,7 +3576,8 @@ fn make_versioned_archive(
     }
     let mut builder = open_archive(path);
     let package_nuon = format!(
-        "{{format: 1, name: \"{name}\", version: \"{version}\", target: \"{triple}\", bins: {{{name}: \"bin/{name}\"}}}}\n"
+        "{{format: 1, name: \"{name}\", version: \"{version}\", target: \"{triple}\", store_path: \"{}\", bins: {{{name}: \"bin/{name}\"}}}}\n",
+        fake_store_basename(name, version)
     );
     append_file(
         &mut builder,
@@ -3320,19 +3619,19 @@ fn sign_to(path: &Path, data: &[u8], keypair: &minisign::KeyPair) {
 /// different keypair rewrites the manifest's signer and re-signs the (byte-identical) index,
 /// which is exactly the key-rotation scenario.
 fn build_signed_tome(tome: &Path, name: &str, triple: &str, keypair: &minisign::KeyPair) {
-    let runes = tome.join("runes");
-    fs::create_dir_all(&runes).unwrap();
+    fs::create_dir_all(tome.join("dist")).unwrap();
+    fs::create_dir_all(tome.join("runes")).unwrap();
+    fs::write(
+        tome.join("runes").join("dummy.rn"),
+        "export const package = { name: 'dummy' version: '0.0.1' }\n",
+    )
+    .unwrap();
     let pubkey = keypair.pk.to_base64();
     fs::write(
         tome.join("tome.rn"),
         format!(
             "export const tome = {{\n  name: '{name}'\n  packages: {{ repo: 'dist', format: 'local', index: 'index.nuon', signer: '{pubkey}' }}\n}}\n"
         ),
-    )
-    .unwrap();
-    fs::write(
-        runes.join("sgnpkg.rn"),
-        "export const package = {\n  name: 'sgnpkg'\n  version: '0.1.0'\n  bins: {}\n}\n\nexport def build [ctx] { }\n",
     )
     .unwrap();
 
@@ -3347,7 +3646,7 @@ fn build_signed_tome(tome: &Path, name: &str, triple: &str, keypair: &minisign::
     );
     let hash = sha256_file(&archive);
     let index_body = format!(
-        "{{\n  packages: [\n    {{ name: \"sgnpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", runtime_deps: [] }}\n  ]\n}}\n"
+        "{{\n  packages: [\n    {{ name: \"sgnpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n"
     );
     fs::write(dist.join("index.nuon"), &index_body).unwrap();
     sign_to(

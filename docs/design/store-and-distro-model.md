@@ -43,21 +43,38 @@ forfeits the shared binary cache, so in practice `/grm` is canonical and treated
 
 ## Profiles, generations, and rollback
 
-The store is immutable; the *system* is assembled from it by **profiles** — symlink trees that a
-user's (or the system's) `PATH` points at. Every change produces a new **generation**:
+The store is immutable; the *system* is assembled from it by **profiles** — real directory trees
+that a user's (or the system's) `PATH` points at. Every change produces a new **generation**:
 
-- **Atomic switch.** Activating an install/upgrade repoints profile symlinks; the running system is
-  never mutated in place. It either fully switches or doesn't.
-- **Rollback is byte-exact and reliable.** `grm rollback` repoints to the previous generation,
-  whose store paths are the literal bytes that ran before. Rollback depends only on **retaining the
-  old store paths**, never on rebuilding anything.
+- **Thin profiles.** Because Grimoire binaries bake absolute store paths (RPATH, `install_name`,
+  pkg-config `prefix`), the profile does not need to globally expose libraries, headers, or
+  pkg-config files. A generation only surfaces executables and human-facing artifacts: `bin/`,
+  `share/man/`, shell completions, and desktop files. Everything else stays in the store and is
+  found via the baked absolute paths.
+
+- **Real files, not symlinks.** Each generation is a real directory tree whose files are **hard
+  links** (or APFS `clonefile` / Linux reflink on CoW filesystems) into the store. Software sees
+  normal paths, `argv[0]` and `/proc/self/exe` resolve to the profile path, and there is no
+  symlink-traversal overhead or `realpath` confusion. Because store paths are immutable, hard links
+  are completely safe.
+
+- **Atomic switch.** The active generation is selected by a single symlink:
+  `profiles/current -> gen-N`. Activating an install/upgrade/remove repoints that symlink; the
+  running system is never mutated in place. It either fully switches or doesn't.
+
+- **Rollback is byte-exact and reliable.** `grm rollback` repoints `current` to the previous
+  generation, whose files are the literal bytes that ran before. Rollback depends only on
+  **retaining the old generation directories**, never on rebuilding anything.
+
 - **Boot integration.** On a Grimoire distro the bootloader lists generations, so a broken kernel
   or init still boots the previous generation.
-- **GC roots** pin retained generations so rollback targets are never garbage-collected; `grm gc`
-  reclaims unreferenced store paths.
 
-Generations + profiles + GC roots deliver ~90% of the felt NixOS benefit and are the highest
-priority of this model. They require no functional language and no change to the build model.
+- **GC roots.** Generations themselves are the GC roots: any store path referenced by any retained
+  generation is protected. `grm gc` walks the generation trees, collects referenced store basenames,
+  and deletes unreferenced store paths.
+
+Generations + profiles + GC deliver ~90% of the felt NixOS benefit and are the highest priority of
+this model. They require no functional language and no change to the build model.
 
 ## Build & trust model: imperative recipes, signed binhost
 
@@ -117,15 +134,16 @@ Nearest existing neighbors, each missing at least one defining axis:
 To *use* it feels like Arch/Homebrew; to *survive mistakes* it feels like NixOS — without the Nix
 learning cliff.
 
-## FHS compatibility: "symlink programs, sandbox libraries"
+## FHS compatibility: "real-file programs, sandbox libraries"
 
 A store-based, non-FHS system breaks software that assumes fixed paths. The policy:
 
-- **Executables (`/bin`, `/usr/bin`): populate with a generation-managed symlink view** into the
-  active profile (GoboLinux-style). This fixes the common breakage — `#!/bin/bash` /
-  `#!/usr/bin/python3` shebangs and absolute-path `exec`s — and is a deliberately *more*
-  FHS-friendly stance than NixOS. The inherent cost is that a flat `/usr/bin` is a single namespace,
-  so colliding `bin/foo` providers need a winner chosen at view-generation time (profile priority).
+- **Executables (`/bin`, `/usr/bin`): populate with a generation-managed hard-link view** into the
+  active profile. Because the profile contains real files (hard links into the store), shebangs,
+  absolute-path `exec`s, and self-locating binaries all work normally — a deliberately *more*
+  FHS-friendly stance than NixOS's symlink farm. The inherent cost is that a flat `/usr/bin` is a
+  single namespace, so colliding `bin/foo` providers need a winner chosen at view-generation time
+  (profile priority).
 - **Libraries (`/lib`, `/usr/lib`): do NOT globally symlink.** A global lib symlink farm can hold
   only one version per soname, which collapses the store's multi-version guarantee and reintroduces
   the exact conflicts the store exists to prevent — and it would only ever serve *foreign* binaries,
@@ -155,7 +173,7 @@ applies to the store and to package generations/rollback, not to system config.
 |---|---|
 | `packages/<name>/<version>` under a user root | `/grm/store/<hash>-<name>-<version>` (fixed, content-addressed) |
 | `ctx.prefix == staging tempdir` | `ctx.prefix == <store path>`; `--prefix=<store> DESTDIR=<staging>` |
-| `<root>/bin` shims | per-user/system **profiles**: generation symlink trees + PATH + GC roots |
+| `<root>/bin` shims | per-user/system **profiles**: generation hard-link trees, `current` symlink, PATH + GC |
 | `dist/index.nuon` keyed by name/version/target | substitution cache keyed by **store hash** (path = identity) |
 | version resolution picks a version | resolution computes the **input hash / closure** |
 

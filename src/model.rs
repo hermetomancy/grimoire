@@ -19,6 +19,12 @@ pub struct PackageMetadata {
     pub target: Option<String>,
     #[serde(default)]
     pub store_path: Option<String>,
+    /// `true` for a fixed-output (x-bin / fetch-only) package: its `build` only fetches and
+    /// sha256-verifies prebuilt sources rather than compiling. Such a package is content-addressed
+    /// by its sources alone, so its store hash excludes the host build environment and dependency
+    /// closure (a Nix fixed-output derivation).
+    #[serde(default)]
+    pub fixed_output: bool,
     #[serde(default)]
     pub summary: Option<String>,
     #[serde(default)]
@@ -75,6 +81,12 @@ pub struct PackageState {
     pub version: String,
     pub target: Option<String>,
     pub archive_hash: String,
+    /// The content address (store hash) of this installed package. Folded into the store hash of
+    /// any package that depends on it, so the dependency closure is captured transitively.
+    pub store_hash: String,
+    /// The content-addressed store path this package was installed into, e.g.
+    /// `/grm/store/<hash>-<name>-<version>`.
+    pub store_path: String,
     #[serde(default)]
     pub bins: BTreeMap<String, String>,
     #[serde(default)]
@@ -108,6 +120,10 @@ pub struct IndexEntry {
     /// repository or an `http(s)` URL.
     pub archive: String,
     pub archive_hash: String,
+    /// The content-addressed store hash computed from the package's build inputs. Written by
+    /// `grm tome build` and required: it is how the installer queries the binhost by store hash to
+    /// decide whether this prebuilt is a valid substitute for the inputs it would otherwise build.
+    pub store_hash: String,
     #[serde(default)]
     pub runtime_deps: Vec<Dependency>,
 }
@@ -232,6 +248,7 @@ impl PackageMetadata {
 
         let summary = optional_string(&record, "summary")?;
         let store_path = optional_string(&record, "store_path")?;
+        let fixed_output = optional_bool(&record, "fixed_output")?.unwrap_or(false);
         // A package with no executables (e.g. a library) is valid: `bins` defaults to empty.
         let bins = match record.get("bins") {
             Some(value) => expect_string_map(value, "package field `bins`")?,
@@ -261,6 +278,7 @@ impl PackageMetadata {
             version,
             target,
             store_path,
+            fixed_output,
             summary,
             bins,
             sources,
@@ -282,6 +300,9 @@ impl PackageMetadata {
             );
         } else if let Some(store_path) = &self.store_path {
             record.push("store_path", Value::string(store_path, Span::unknown()));
+        }
+        if self.fixed_output {
+            record.push("fixed_output", Value::bool(true, Span::unknown()));
         }
 
         let mut bins = Record::new();
@@ -424,6 +445,7 @@ impl IndexEntry {
         validate_archive_location(&archive)?;
         let archive_hash = required_field_string(val, "index entry", "archive_hash")?;
         validate_sha256(&archive_hash, "index entry archive_hash")?;
+        let store_hash = required_field_string(val, "index entry", "store_hash")?;
 
         let runtime_deps = match val.get("runtime_deps") {
             Some(value) => parse_dependency_list(value, "index entry runtime_deps")?,
@@ -436,6 +458,7 @@ impl IndexEntry {
             target,
             archive,
             archive_hash,
+            store_hash,
             runtime_deps,
         })
     }
@@ -450,6 +473,10 @@ impl IndexEntry {
             "archive_hash",
             Value::string(&self.archive_hash, Span::unknown()),
         );
+        record.push(
+            "store_hash",
+            Value::string(&self.store_hash, Span::unknown()),
+        );
         record.push("runtime_deps", dependency_list_value(&self.runtime_deps));
         Value::record(record, Span::unknown())
     }
@@ -463,6 +490,8 @@ impl PackageState {
         let target = optional_string(&record, "target")?;
         let archive_hash = required_field_string(&record, "package state", "archive_hash")?;
         validate_sha256(&archive_hash, "package state archive_hash")?;
+        let store_hash = required_field_string(&record, "package state", "store_hash")?;
+        let store_path = required_field_string(&record, "package state", "store_path")?;
         let bins = match record.get("bins") {
             Some(value) => expect_string_map(value, "package field `bins`")?,
             None => BTreeMap::new(),
@@ -480,6 +509,8 @@ impl PackageState {
             version,
             target,
             archive_hash,
+            store_hash,
+            store_path,
             bins,
             runtime_deps,
             build_deps,
@@ -499,6 +530,14 @@ impl PackageState {
         record.push(
             "archive_hash",
             Value::string(&self.archive_hash, Span::unknown()),
+        );
+        record.push(
+            "store_hash",
+            Value::string(&self.store_hash, Span::unknown()),
+        );
+        record.push(
+            "store_path",
+            Value::string(&self.store_path, Span::unknown()),
         );
 
         let mut bins = Record::new();
@@ -964,7 +1003,7 @@ pub fn validate_tome_ref(ref_name: &str) -> Result<()> {
     Ok(())
 }
 
-fn expect_record(value: Value, label: &str) -> Result<Record> {
+pub fn expect_record(value: Value, label: &str) -> Result<Record> {
     match value {
         Value::Record { val, .. } => Ok(val.into_owned()),
         _ => bail!("{label} must be a record"),
@@ -983,6 +1022,24 @@ fn optional_bool(record: &Record, field: &str) -> Result<Option<bool>> {
         Some(Value::Nothing { .. }) | None => Ok(None),
         Some(Value::Bool { val, .. }) => Ok(Some(*val)),
         Some(_) => bail!("field `{field}` must be a boolean"),
+    }
+}
+
+pub fn optional_i64(record: &Record, field: &str) -> Result<Option<i64>> {
+    match record.get(field) {
+        Some(Value::Nothing { .. }) | None => Ok(None),
+        Some(Value::Int { val, .. }) => Ok(Some(*val)),
+        Some(_) => bail!("field `{field}` must be an integer"),
+    }
+}
+
+pub fn required_field_i64(record: &Record, label: &str, field: &str) -> Result<i64> {
+    let value = record
+        .get(field)
+        .ok_or_else(|| anyhow::anyhow!("{label} is missing required field `{field}`"))?;
+    match value {
+        Value::Int { val, .. } => Ok(*val),
+        _ => bail!("{label} field `{field}` must be an integer"),
     }
 }
 
@@ -1097,7 +1154,7 @@ fn expect_string_list(value: &Value, label: &str) -> Result<Vec<String>> {
         .collect()
 }
 
-fn optional_string_list(record: &Record, field: &str) -> Result<Vec<String>> {
+pub fn optional_string_list(record: &Record, field: &str) -> Result<Vec<String>> {
     match record.get(field) {
         Some(Value::Nothing { .. }) | None => Ok(Vec::new()),
         Some(value) => expect_string_list(value, &format!("field `{field}`")),
@@ -1126,7 +1183,7 @@ fn dependency_list_value(deps: &[Dependency]) -> Value {
     Value::list(items, Span::unknown())
 }
 
-fn string_list_value(items: &[String]) -> Value {
+pub fn string_list_value(items: &[String]) -> Value {
     Value::list(
         items
             .iter()
@@ -1170,13 +1227,13 @@ pub fn validate_package_version(version: &str) -> Result<()> {
         .with_context(|| format!("package version `{version}` is not valid semver"))
 }
 
-/// A bin name becomes a shim *file name* under `<root>/bin` — a bare symlink on unix, a
-/// `<name>.cmd` file on windows — and is never interpreted as code (shim bodies reference the
-/// target path, not the name). So, unlike package/tome identifiers, a bin name only has to be a
-/// safe single path component that works on both platforms. We allow the extra punctuation real
-/// command names use (notably `[` from coreutils) but reject path separators, control characters,
-/// the `.`/`..` directory names, a leading `.` (hidden shims), and the characters Windows forbids
-/// in file names so a name valid on one platform cannot fail to install on another.
+/// A bin name becomes a profile entry *file name* under `profiles/current/bin/` — a hard link
+/// into the store on all platforms — and is never interpreted as code. So, unlike package/tome
+/// identifiers, a bin name only has to be a safe single path component that works on both
+/// platforms. We allow the extra punctuation real command names use (notably `[` from coreutils)
+/// but reject path separators, control characters, the `.`/`..` directory names, a leading `.`
+/// (hidden entries), and the characters Windows forbids in file names so a name valid on one
+/// platform cannot fail to install on another.
 fn validate_bin_name(name: &str) -> Result<()> {
     const WINDOWS_RESERVED: &str = "<>:\"/\\|?*";
 
@@ -1218,7 +1275,7 @@ fn starts_valid(value: &str) -> bool {
         .is_some_and(|c| c.is_ascii_alphanumeric())
 }
 
-fn looks_windows_absolute(path: &str) -> bool {
+pub(crate) fn looks_windows_absolute(path: &str) -> bool {
     let bytes = path.as_bytes();
     bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
@@ -1318,7 +1375,7 @@ mod tests {
 
     #[test]
     fn validate_bin_name_rejects_unsafe_file_names() {
-        // Path separators, traversal, hidden shims, Windows-reserved characters, whitespace,
+        // Path separators, traversal, hidden entries, Windows-reserved characters, whitespace,
         // control characters, and non-ASCII all break the "safe cross-platform file name" rule.
         for name in [
             "", "a/b", "a\\b", ".", "..", ".hidden", "a:b", "a*b", "a?b", "a|b", "a<b", "a>b",

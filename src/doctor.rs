@@ -1,11 +1,11 @@
 //! The `doctor` command: a read-only health check of the local Grimoire environment.
 //!
-//! It validates tome caches, installed-package state (package directories and shims), and
+//! It validates tome caches, installed-package state (package directories and profile links), and
 //! lockfile presence, reporting counts to stdout and per-item problems to stderr.
 
 use anyhow::{Context, Result};
 
-use crate::{install, lock, paths, tome, toolchain};
+use crate::{install, lock, paths, profile, tome, toolchain};
 
 const CORE_USERLAND_TOOLS: &[&str] = &[
     "bash",
@@ -27,6 +27,10 @@ pub fn doctor() -> Result<()> {
     println!("install root: {}", root.display());
 
     let mut problems = 0_usize;
+    if let Some(msg) = paths::fixed_store_setup_instructions() {
+        problems += 1;
+        eprintln!("grimoire: {msg}");
+    }
     problems += check_tomes()?;
     problems += check_packages()?;
     problems += check_source_build_readiness()?;
@@ -118,12 +122,11 @@ fn check_packages() -> Result<usize> {
     let states = install::installed_states()?;
     println!("installed packages: {}", states.len());
 
-    let root = paths::install_root()?;
-    let bin_dir = root.join("bin");
+    let bin_dir = profile::current_profile_link()?.join("bin");
     let mut problems = 0;
 
     for state in &states {
-        let package_dir = root.join("packages").join(&state.name).join(&state.version);
+        let package_dir = std::path::PathBuf::from(&state.store_path);
         if !package_dir.exists() {
             problems += 1;
             eprintln!(
@@ -135,14 +138,14 @@ fn check_packages() -> Result<usize> {
         }
 
         for bin in state.bins.keys() {
-            let shim = shim_path(&bin_dir, bin);
-            if !shim.exists() {
+            let link = bin_dir.join(bin);
+            if !link.exists() {
                 problems += 1;
                 eprintln!(
-                    "grimoire: package `{}` is missing its `{}` shim ({})",
+                    "grimoire: package `{}` is missing its `{}` profile link ({})",
                     state.name,
                     bin,
-                    shim.display()
+                    link.display()
                 );
             }
         }
@@ -161,14 +164,4 @@ fn check_lock(problems: &mut usize) -> Result<()> {
         eprintln!("grimoire: lockfile is missing despite installed packages");
     }
     Ok(())
-}
-
-#[cfg(unix)]
-fn shim_path(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    bin_dir.join(name)
-}
-
-#[cfg(windows)]
-fn shim_path(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    bin_dir.join(format!("{name}.cmd"))
 }

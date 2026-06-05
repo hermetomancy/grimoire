@@ -30,31 +30,19 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    // -----------------------------------------------------------------------
+    // Packages
+    // -----------------------------------------------------------------------
     /// Build a package archive from a rune without installing it.
     #[command(visible_alias = "b")]
     Build(BuildArgs),
     /// Install a package by name, from a local archive, or from a rune.
     #[command(visible_aliases = ["in", "i"])]
     Install(InstallArgs),
-    /// Remove an installed package and its shims. Runtime dependencies installed solely for
-    /// this package — that no other installed package still requires — are removed too.
+    /// Remove an installed package. Runtime dependencies installed solely for this package —
+    /// that no other installed package still requires — are removed too.
     #[command(visible_aliases = ["rm", "uninstall"])]
     Remove(PackageArg),
-    /// Reclaim disk under the install root by emptying the source/archive/build caches and
-    /// any leftover transaction staging directories. Installed packages, shims, state, tomes,
-    /// addenda, and the lockfile are untouched; the next install will re-fetch what it needs.
-    Clean,
-    /// List installed packages with their versions and targets.
-    #[command(visible_alias = "ls")]
-    List,
-    /// Check the health of the grimoire installation.
-    #[command(visible_alias = "dr")]
-    Doctor,
-    /// Search configured tomes for packages.
-    #[command(visible_aliases = ["s", "find"])]
-    Search(QueryArg),
-    /// Show detailed information about a package.
-    Info(PackageArg),
     /// Upgrade installed packages to the latest available version. Packages held with
     /// `grm hold` are skipped (or, if named explicitly, refused with an error).
     #[command(visible_alias = "up")]
@@ -65,6 +53,52 @@ pub enum Command {
     /// Release a held package so it is eligible for `grm upgrade` again.
     #[command(visible_alias = "unpin")]
     Unhold(PackageArg),
+
+    // -----------------------------------------------------------------------
+    // Query
+    // -----------------------------------------------------------------------
+    /// List installed packages with their versions and targets.
+    #[command(visible_alias = "ls")]
+    List,
+    /// Search configured tomes for packages.
+    #[command(visible_aliases = ["s", "find"])]
+    Search(QueryArg),
+    /// Show detailed information about a package.
+    Info(PackageArg),
+
+    // -----------------------------------------------------------------------
+    // Profiles
+    // -----------------------------------------------------------------------
+    /// Roll back to the previous generation.
+    #[command(visible_alias = "rb")]
+    Rollback,
+    /// Switch to a specific generation.
+    #[command(visible_alias = "sw")]
+    Switch(SwitchArgs),
+    /// List generations.
+    #[command(visible_alias = "gens")]
+    Generations,
+    /// Garbage-collect unreferenced store paths and old generations.
+    #[command(visible_alias = "gc")]
+    CollectGarbage(GcArgs),
+    /// Delete a specific generation by ID. The currently active generation cannot be deleted.
+    #[command(visible_alias = "del-gen")]
+    DeleteGeneration(DeleteGenerationArgs),
+
+    // -----------------------------------------------------------------------
+    // Maintenance
+    // -----------------------------------------------------------------------
+    /// Check the health of the grimoire installation.
+    #[command(visible_alias = "dr")]
+    Doctor,
+    /// Reclaim disk under the install root by emptying the source/archive/build caches and
+    /// any leftover transaction staging directories. Installed packages, profiles, state, tomes,
+    /// addenda, and the lockfile are untouched; the next install will re-fetch what it needs.
+    Clean,
+
+    // -----------------------------------------------------------------------
+    // Catalogs
+    // -----------------------------------------------------------------------
     /// Manage tomes: the git repositories packages are resolved from.
     Tome {
         #[command(subcommand)]
@@ -76,6 +110,13 @@ pub enum Command {
         #[command(subcommand)]
         command: AddendumCommand,
     },
+
+    // -----------------------------------------------------------------------
+    // Hidden
+    // -----------------------------------------------------------------------
+    /// Print the content-addressed store hash a package resolves to (its rune plus its runtime
+    /// dependency closure). The address a prebuilt must carry to be a valid substitute.
+    StoreHash(PackageArg),
     /// Print a shell completion script for `grm` to stdout. Redirect it where your shell
     /// expects completions (e.g. `grm completions bash > ~/.local/share/bash-completion/completions/grm`).
     Completions(CompletionsArgs),
@@ -152,6 +193,25 @@ pub struct UpgradeArgs {
     /// Show which packages would be upgraded and to which version, without touching state.
     #[arg(long, visible_alias = "explain")]
     pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SwitchArgs {
+    /// Generation ID to activate.
+    pub id: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct GcArgs {
+    /// Number of recent generations to keep (including the current one).
+    #[arg(short, long, default_value = "5")]
+    pub keep: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct DeleteGenerationArgs {
+    /// Generation ID to delete.
+    pub id: u64,
 }
 
 #[derive(Debug, Subcommand)]

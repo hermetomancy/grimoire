@@ -25,6 +25,7 @@ pub fn pack_built_rune(
     metadata: &PackageMetadata,
     package_dir: &Path,
     final_prefix: &Path,
+    store_hash: &str,
     output: &Path,
 ) -> Result<PathBuf> {
     let target = paths::target_triple();
@@ -36,9 +37,9 @@ pub fn pack_built_rune(
         "staging package metadata for {} {}",
         metadata.name, metadata.version
     ));
-    let store_path = paths::package_relative_dir(&metadata.name, &metadata.version);
+    let store_relative = paths::store_relative_dir(store_hash, &metadata.name, &metadata.version);
     let package_nuon =
-        nuon_io::to_nuon_string(&metadata.archive_value(&target, Some(&store_path)))?;
+        nuon_io::to_nuon_string(&metadata.archive_value(&target, Some(&store_relative)))?;
     let rune_source =
         fs::read(rune).with_context(|| format!("read rune source {}", rune.display()))?;
 

@@ -1,7 +1,7 @@
 //! `grm clean`: reclaim disk under the install root.
 //!
 //! Empties the source/archive/build caches and any leftover transaction staging directories
-//! without touching installed packages, shims, state, tomes, addenda, or the lockfile.
+//! without touching installed packages, profiles, state, tomes, addenda, or the lockfile.
 //! Everything removed here is reproducible from the original sources, so a later install just
 //! re-fetches and re-verifies what it needs.
 

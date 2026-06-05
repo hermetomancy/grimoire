@@ -11,8 +11,10 @@ mod archive;
 mod build;
 mod clean;
 mod cli;
+mod closure;
 mod doctor;
 mod fetch;
+mod fs_util;
 mod index;
 mod install;
 mod lock;
@@ -21,10 +23,12 @@ mod model;
 mod nu;
 mod paths;
 mod process_lock;
+mod profile;
 mod progress;
 mod query;
 mod signing;
 mod solve;
+mod store;
 mod tome;
 mod toolchain;
 
@@ -72,6 +76,37 @@ fn run(cli: Cli) -> Result<()> {
         Command::Upgrade(args) => query::upgrade(args),
         Command::Hold(args) => install::hold(args),
         Command::Unhold(args) => install::unhold(args),
+        Command::Rollback => {
+            let id = profile::rollback()?;
+            println!("rolled back to generation {id}");
+            Ok(())
+        }
+        Command::Switch(args) => {
+            profile::activate_generation(args.id)?;
+            println!("switched to generation {}", args.id);
+            Ok(())
+        }
+        Command::Generations => {
+            let gens = profile::list_generations()?;
+            let current = profile::current_generation_id()?;
+            for g in gens {
+                let marker = if current == Some(g.id) { "*" } else { " " };
+                println!(
+                    "{} gen-{:<4} {} ({} packages)",
+                    marker,
+                    g.id,
+                    format_timestamp(g.created),
+                    g.packages.len()
+                );
+            }
+            Ok(())
+        }
+        Command::CollectGarbage(args) => profile::gc(args.keep),
+        Command::DeleteGeneration(args) => {
+            profile::delete_generation(args.id)?;
+            println!("deleted generation {}", args.id);
+            Ok(())
+        }
         Command::Tome { command } => match command {
             TomeCommand::Init(args) => tome::init(args),
             TomeCommand::Rune(args) => tome::rune(args),
@@ -86,6 +121,10 @@ fn run(cli: Cli) -> Result<()> {
             cli::AddendumCommand::Remove(args) => addendum::remove(args),
             cli::AddendumCommand::List => addendum::list(),
         },
+        Command::StoreHash(args) => {
+            println!("{}", closure::store_hash(&args.package)?);
+            Ok(())
+        }
         Command::Completions(args) => man::completions(args),
         Command::Man(args) => man::man(args),
     }
@@ -97,7 +136,14 @@ fn mutates_install_root(command: &Command) -> bool {
         // another `grm` holds the lock.
         Command::Install(args) => !args.dry_run,
         Command::Upgrade(args) => !args.dry_run,
-        Command::Remove(_) | Command::Clean | Command::Hold(_) | Command::Unhold(_) => true,
+        Command::Remove(_)
+        | Command::Clean
+        | Command::Hold(_)
+        | Command::Unhold(_)
+        | Command::Rollback
+        | Command::Switch(_)
+        | Command::CollectGarbage(_)
+        | Command::DeleteGeneration(_) => true,
         Command::Tome { command } => matches!(
             command,
             TomeCommand::Add(_) | TomeCommand::Update(_) | TomeCommand::Remove(_)
@@ -111,7 +157,52 @@ fn mutates_install_root(command: &Command) -> bool {
         | Command::Doctor
         | Command::Search(_)
         | Command::Info(_)
+        | Command::Generations
+        | Command::StoreHash(_)
         | Command::Completions(_)
         | Command::Man(_) => false,
     }
+}
+
+/// Formats a Unix timestamp as `YYYY-MM-DD HH:MM:SS UTC`.
+fn format_timestamp(ts: u64) -> String {
+    // Simple conversion from Unix seconds to calendar date. Not leap-second aware,
+    // but accurate enough for human-readable generation listings.
+    const DAYS_IN_MONTH: [u64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut days = ts / 86400;
+    let mut rem = ts % 86400;
+    let hh = rem / 3600;
+    rem %= 3600;
+    let mm = rem / 60;
+    let ss = rem % 60;
+
+    // 1970-01-01 is day 0.
+    let mut year = 1970u64;
+    loop {
+        let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+        let year_days = if is_leap { 366 } else { 365 };
+        if days < year_days {
+            break;
+        }
+        days -= year_days;
+        year += 1;
+    }
+
+    let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    let mut month = 1u64;
+    for (i, &dim) in DAYS_IN_MONTH.iter().enumerate() {
+        let dim = if i == 1 && is_leap { 29 } else { dim };
+        if days < dim {
+            month = (i + 1) as u64;
+            break;
+        }
+        days -= dim;
+        month = (i + 2) as u64;
+    }
+    let day = days + 1;
+
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+        year, month, day, hh, mm, ss
+    )
 }
