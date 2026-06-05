@@ -633,7 +633,7 @@ fn installed_versions() -> Result<BTreeMap<String, Version>> {
     Ok(versions)
 }
 
-fn build_dep_bin_dirs(deps: &[Dependency]) -> Result<Vec<PathBuf>> {
+pub(crate) fn build_dep_bin_dirs(deps: &[Dependency]) -> Result<Vec<PathBuf>> {
     let states = installed_states()?;
     let mut dirs = Vec::new();
     for dep in deps {

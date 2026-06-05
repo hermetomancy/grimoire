@@ -146,6 +146,10 @@ pub struct BuildArgs {
     /// `<name>-<version>-<target>.tar.zst`.
     #[arg(short, long, default_value = "target/grimoire-packages")]
     pub output: PathBuf,
+    /// Allow host build-tool discovery instead of using only the grimoire-managed toolchain.
+    /// This is useful for bootstrapping before the managed core userland is installed.
+    #[arg(long)]
+    pub bootstrap: bool,
 }
 
 #[derive(Debug, Args)]
@@ -276,6 +280,9 @@ pub struct TomeBuildArgs {
     /// directory.
     #[arg(short, long, default_value = ".")]
     pub path: PathBuf,
+    /// Allow host build-tool discovery instead of using only the grimoire-managed toolchain.
+    #[arg(long)]
+    pub bootstrap: bool,
 }
 
 #[derive(Debug, Args)]
