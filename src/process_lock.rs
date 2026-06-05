@@ -1,7 +1,7 @@
 //! Process-wide install-root lock.
 //!
 //! Two `grm install`/`remove`/`clean`/`tome …`/`addendum …` runs against the same install root
-//! mutate shared state (packages/, bin/, state/, transactions/, the lockfile, tomes/, addendums/);
+//! mutate shared state (store/, bin/, state/, transactions/, the lockfile, tomes/, addendums/);
 //! without coordination they can race and corrupt that state. Mutating CLI entry points acquire
 //! an exclusive OS-level advisory lock on `<install root>/.grimoire-lock` before doing any work
 //! and hold it for the entire command — released automatically when the file descriptor closes

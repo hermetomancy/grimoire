@@ -52,7 +52,7 @@ pub fn validate_archive_member_path(path: &Path) -> bool {
     let text = path.to_string_lossy();
     !text.starts_with('/')
         && !text.starts_with('\\')
-        && !looks_windows_absolute(&text)
+        && !crate::model::looks_windows_absolute(&text)
         && !text.contains('\\')
         && path
             .components()
@@ -70,7 +70,7 @@ pub fn validate_symlink_target(link: &Path, target: &Path) -> bool {
         || text.starts_with('/')
         || text.starts_with('\\')
         || text.contains('\\')
-        || looks_windows_absolute(&text)
+        || crate::model::looks_windows_absolute(&text)
     {
         return false;
     }
@@ -91,14 +91,6 @@ pub fn validate_symlink_target(link: &Path, target: &Path) -> bool {
         }
     }
     true
-}
-
-fn looks_windows_absolute(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && (bytes[2] == b'/' || bytes[2] == b'\\')
 }
 
 #[cfg(test)]

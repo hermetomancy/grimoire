@@ -22,30 +22,51 @@ for elevation.
 
 ```
 <install root>/
-├── packages/<name>/<version>/   # installed package contents (bin/, lib/, share/, …)
-├── bin/                         # shims you put on your PATH
+├── store/<hash>-<name>-<version>/  # installed package contents (bin/, lib/, share/, …)
+├── profiles/
+│   ├── current -> gen-3           # symlink to the active generation
+│   └── gen-3/                     # generation: real directory tree of hard links
+│       ├── bin/
+│       └── share/man/
 ├── state/
-│   └── packages/<name>.nuon     # installed-state records (one per package)
-├── tomes/                       # cached tome git repositories
-├── addendums/                   # cached addendum repositories
+│   ├── packages/<name>.nuon       # installed-state records (one per package)
+│   └── generations.nuon           # generation registry (index + history)
+├── tomes/                         # cached tome git repositories
+├── addendums/                     # cached addendum repositories
 ├── cache/
-│   ├── sources/                 # verified source artifacts, keyed by sha256
-│   ├── archives/                # verified binary package archives
-│   └── builds/                  # source-build output, before promotion
-├── transactions/                # staging directories for in-flight installs
-└── grimoire.lock.nuon           # reproducible-install lockfile
+│   ├── sources/                   # verified source artifacts, keyed by sha256
+│   ├── archives/                  # verified binary package archives
+│   └── builds/                    # source-build output, before promotion
+├── transactions/                  # staging directories for in-flight installs
+└── grimoire.lock.nuon             # reproducible-install lockfile
 ```
 
 ## What each path is for
 
-- **`packages/<name>/<version>/`** — the installed package itself. Promoted into place by an
-  atomic rename from `transactions/`. Removing a package directory by hand will leave the
-  state file and shims dangling — use `grm remove` instead.
-- **`bin/`** — shims that dispatch to executables inside `packages/`. Put this directory on
-  your `PATH`. Shims are regenerated on install and removed on `grm remove`.
+- **`store/<hash>-<name>-<version>/`** — the installed package itself, in the content-addressed
+  store. `<hash>` is derived from the build's inputs (sources, rune, target, build flags, and
+  resolved dependency closure), so identical inputs resolve to the same directory. The basename is
+  recorded in the archive's metadata and is the install's identity; `state/packages/<name>.nuon`
+  records its absolute path. Promoted into place by an atomic rename from `transactions/`. Removing
+  a store directory by hand will leave the state file and profile references dangling — use
+  `grm remove` instead.
+  (The canonical store is the fixed path `/grm/store`; under `GRIMOIRE_ROOT` it lives at
+  `<root>/store` for tests and isolated installs, at the cost of cross-machine binary-cache
+  portability.)
+- **`profiles/current -> gen-N/`** — the active generation: a real directory tree of hard links
+  (or reflinks on CoW filesystems) into `store/`. Put `profiles/current/bin` on your `PATH`.
+  Every install, remove, or upgrade creates a new generation and atomically repoints `current`.
+  `grm rollback` switches back to the previous generation instantly.
+- **`profiles/gen-N/`** — an immutable generation directory. It contains only executables and
+  human-facing artifacts (`bin/`, `share/man/`, completions, desktop files) because Grimoire
+  binaries bake absolute store paths for libraries and headers. Old generations are retained as
+  rollback targets until reclaimed by `grm gc`.
 - **`state/packages/<name>.nuon`** — the recorded state for an installed package: version,
-  target, source/archive hashes, runtime deps, and the tome it came from. `grm doctor` and
-  the lockfile are derived from these files.
+  target, source/archive hashes, runtime deps, store path, and the tome it came from. `grm doctor`
+  and the lockfile are derived from these files.
+- **`state/generations.nuon`** — the generation registry: a list of all retained generations with
+  their package sets and creation timestamps. Used by `grm rollback`, `grm gc`, and boot
+  integration.
 - **`tomes/`** — clones of the git repositories you added with `grm tome add`. Re-cloned on
   demand; safe to delete, at the cost of a re-sync on the next install.
 - **`addendums/`** — clones (or local-path copies) of repositories you added with

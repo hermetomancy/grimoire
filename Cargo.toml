@@ -55,6 +55,9 @@ walkdir = "2"
 xz2 = "0.1"
 zstd = "0.13"
 
+[target.'cfg(windows)'.dependencies]
+junction = "1"
+
 [dev-dependencies]
 fs4 = "0.13"
 minisign = "0.9"

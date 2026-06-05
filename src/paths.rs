@@ -1,5 +1,5 @@
 //! Filesystem layout: the user-local install root and the directories Grimoire derives from it
-//! (state, packages, shims, caches, build output), plus the current target triple. `GRIMOIRE_ROOT`
+//! (state, packages, profiles, caches, build output), plus the current target triple. `GRIMOIRE_ROOT`
 //! overrides the root, which otherwise is `~/.grimoire` — never a system path.
 
 use anyhow::{Context, Result};
@@ -45,12 +45,95 @@ pub fn build_output_dir() -> Result<PathBuf> {
     Ok(install_root()?.join("cache").join("builds"))
 }
 
-pub fn package_dir(name: &str, version: &str) -> Result<PathBuf> {
-    Ok(install_root()?.join(package_relative_dir(name, version)))
+/// The content-addressed store root.
+///
+/// By default this is `/grm/store` — a single fixed path that is identical on every machine
+/// so baked absolute paths (RPATH, install_name, pkg-config prefix) are portable across
+/// hosts and users.
+///
+/// When `GRIMOIRE_ROOT` is set (for testing or isolated installs), the store lives under
+/// `<GRIMOIRE_ROOT>/store` instead. This forfeits cross-machine binary cache portability
+/// but is necessary for tests and user-local installs.
+pub fn store_root() -> Result<PathBuf> {
+    if std::env::var_os("GRIMOIRE_ROOT").is_some() {
+        Ok(install_root()?.join("store"))
+    } else {
+        Ok(PathBuf::from("/grm/store"))
+    }
 }
 
-pub fn package_relative_dir(name: &str, version: &str) -> PathBuf {
-    PathBuf::from("packages").join(name).join(version)
+/// The directory where actual generation trees live.
+///
+/// When using the fixed store (`/grm`) this is `/grm/profiles/<user>` so that hard links
+/// into the store are on the same filesystem and multiple users do not collide. When
+/// `GRIMOIRE_ROOT` is set (tests, isolated installs) generations live under the install root.
+pub fn profiles_dir() -> Result<PathBuf> {
+    if std::env::var_os("GRIMOIRE_ROOT").is_some() {
+        Ok(install_root()?.join("profiles"))
+    } else {
+        let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
+        Ok(PathBuf::from("/grm/profiles").join(user))
+    }
+}
+
+/// The user-facing profile directory. This is always under the install root and holds the
+/// `current` symlink (or junction) that users put on their PATH.
+pub fn user_profiles_dir() -> Result<PathBuf> {
+    Ok(install_root()?.join("profiles"))
+}
+
+/// Returns platform-specific setup instructions when the fixed store directory (`/grm")
+/// does not exist and `GRIMOIRE_ROOT` is not set. Returns `None` when everything is ready.
+pub fn fixed_store_setup_instructions() -> Option<String> {
+    if std::env::var_os("GRIMOIRE_ROOT").is_some() {
+        return None;
+    }
+    let store = store_root().ok()?;
+    let parent = store.parent()?;
+    if parent.exists() {
+        return None;
+    }
+
+    #[cfg(target_os = "macos")]
+    return Some(format!(
+        "the fixed store directory `{}` does not exist\n\n\
+         On macOS the root filesystem is read-only. Create it with:\n\
+         \techo 'grm' | sudo tee -a /etc/synthetic.conf\n\
+         \t# Reboot, then optionally mount a dedicated APFS volume:\n\
+         \tsudo diskutil apfs addVolume disk1 'Grimoire' /grm\n",
+        parent.display()
+    ));
+
+    #[cfg(target_os = "linux")]
+    return Some(format!(
+        "the fixed store directory `{}` does not exist\n\n\
+         Create it with:\n\
+         \tsudo mkdir /grm\n",
+        parent.display()
+    ));
+
+    #[cfg(target_os = "windows")]
+    return Some(format!(
+        "the fixed store directory `{}` does not exist\n\n\
+         Create it with Administrator privileges:\n\
+         \tNew-Item -ItemType Directory -Path C:\\grm\n",
+        parent.display()
+    ));
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    return Some(format!(
+        "the fixed store directory `{}` does not exist\n\n\
+         Create it manually with appropriate privileges.\n",
+        parent.display()
+    ));
+}
+
+pub fn store_path(hash: &str, name: &str, version: &str) -> Result<PathBuf> {
+    Ok(store_root()?.join(crate::store::store_path_basename(hash, name, version)))
+}
+
+pub fn store_relative_dir(hash: &str, name: &str, version: &str) -> PathBuf {
+    PathBuf::from(crate::store::store_path_basename(hash, name, version))
 }
 
 pub fn target_triple() -> String {

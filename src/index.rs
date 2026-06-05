@@ -15,7 +15,7 @@ mod tests {
     #[test]
     fn reads_and_finds_entries() {
         let index = parse_index(
-            "{\n  packages: [\n    { name: \"hello\", version: \"1.0.0\", target: \"linux-x86_64-gnu\", archive: \"hello-1.0.0-linux-x86_64-gnu.tar.zst\", archive_hash: \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", runtime_deps: [\"libc\"] }\n  ]\n}\n",
+            "{\n  packages: [\n    { name: \"hello\", version: \"1.0.0\", target: \"linux-x86_64-gnu\", archive: \"hello-1.0.0-linux-x86_64-gnu.tar.zst\", archive_hash: \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", store_hash: \"deadbeefdeadbeef\", runtime_deps: [\"libc\"] }\n  ]\n}\n",
         )
         .expect("parse index");
         assert_eq!(index.packages.len(), 1);

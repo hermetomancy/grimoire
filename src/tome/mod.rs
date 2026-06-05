@@ -205,12 +205,18 @@ fn build_rune_into(root: &Path, name: &str, dist_dir: &Path) -> Result<(IndexEnt
         bail!("rune not found: {}", rune_path.display());
     }
 
-    let archive = crate::build::build_package(&rune_path.to_string_lossy(), dist_dir)?;
-    let archive_hash = crate::archive::archive_hash(&archive)?;
-    let archive_file = archive
+    let result = crate::build::build_package(&rune_path.to_string_lossy(), dist_dir)?;
+    let archive_hash = crate::archive::archive_hash(&result.archive)?;
+    let archive_file = result
+        .archive
         .file_name()
         .and_then(|name| name.to_str())
-        .with_context(|| format!("archive path has no file name: {}", archive.display()))?;
+        .with_context(|| {
+            format!(
+                "archive path has no file name: {}",
+                result.archive.display()
+            )
+        })?;
 
     let metadata = EmbeddedNuRuntime.package_metadata(&rune_path)?;
     let entry = IndexEntry {
@@ -219,9 +225,10 @@ fn build_rune_into(root: &Path, name: &str, dist_dir: &Path) -> Result<(IndexEnt
         target: paths::target_triple(),
         archive: archive_file.to_owned(),
         archive_hash,
+        store_hash: result.store_hash,
         runtime_deps: metadata.deps.runtime.clone(),
     };
-    Ok((entry, archive))
+    Ok((entry, result.archive))
 }
 
 /// The rune base names (without the `.rn` extension) in a tome's `runes/` directory, sorted for
@@ -869,6 +876,9 @@ fn validate_tome_cache(
         .ok_or_else(|| anyhow::anyhow!("tome manifest is missing required field `packages`"))?;
     validate_tome_packages(packages)?;
 
+    // Every package is defined by a rune (even an x-bin package carries a fetch-and-verify rune),
+    // so a tome must ship a `runes/` directory with at least one definition, and no two may collide
+    // on package name.
     let runes_dir = cache_path.join("runes");
     if !runes_dir.is_dir() {
         bail!(
@@ -929,31 +939,7 @@ fn validate_tome_packages(packages: &TomePackages) -> Result<()> {
 }
 
 fn copy_dir_all(source: &Path, destination: &Path) -> Result<()> {
-    fs::create_dir_all(destination)?;
-    for entry in walkdir::WalkDir::new(source).sort_by_file_name() {
-        let entry = entry?;
-        let path = entry.path();
-        if path == source {
-            continue;
-        }
-        let relative = path
-            .strip_prefix(source)
-            .with_context(|| format!("strip source prefix from {}", path.display()))?;
-        let target = destination.join(relative);
-        let metadata = fs::symlink_metadata(path)?;
-        if metadata.file_type().is_symlink() {
-            bail!("tome source contains symlink {}", path.display());
-        }
-        if metadata.is_dir() {
-            fs::create_dir_all(&target)?;
-        } else if metadata.is_file() {
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(path, &target)?;
-        }
-    }
-    Ok(())
+    crate::fs_util::copy_dir_all(source, destination, "tome")
 }
 
 fn tome_cache_dir() -> Result<PathBuf> {

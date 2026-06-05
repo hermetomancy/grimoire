@@ -3,7 +3,7 @@
 //! [`install`] resolves a package and its dependencies through the solver, then realizes each
 //! step — fetching and verifying a binary archive or building a rune from source — into the
 //! install root. Every install stages into a transaction directory and promotes with atomic
-//! renames, rolling back shims and state on failure (AGENTS.md §4). `--locked` constrains
+//! renames, rolling back the active profile and state on failure (AGENTS.md §4). `--locked` constrains
 //! resolution to the lockfile's recorded versions and hashes for a reproducible reinstall.
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -27,9 +27,9 @@ use crate::{
         nuon_io,
         runtime::{BuildEnv, EmbeddedNuRuntime, RuneRuntime},
     },
-    paths,
+    paths, profile,
     progress::{report, status, success},
-    solve::{self, Origin, Plan, PlanStep},
+    solve::{self, Plan, PlanStep, Substitute},
     toolchain,
 };
 
@@ -67,9 +67,23 @@ impl Installer {
         self.dry_run = dry_run;
         self
     }
+
+    /// Builds a new generation from the current installed state and atomically activates it.
+    /// Called once after all install/remove/upgrade operations complete.
+    fn finalize(&self) -> Result<()> {
+        if self.dry_run {
+            return Ok(());
+        }
+        let states = installed_states()?;
+        profile::rebuild_and_activate(&states)?;
+        Ok(())
+    }
 }
 
 pub fn install(args: InstallArgs) -> Result<()> {
+    if let Some(msg) = paths::fixed_store_setup_instructions() {
+        bail!("{msg}");
+    }
     let pins = if args.locked {
         Some(load_pins()?)
     } else {
@@ -98,12 +112,15 @@ pub fn install(args: InstallArgs) -> Result<()> {
 
     // A resolve that reuses an already-satisfying install produces no steps, so nothing above
     // reported anything. Tell the user the request was a no-op rather than printing silence.
+    // Skip creating a new generation when nothing actually changed.
     if installer.installed_now.is_empty() {
         report(&format!(
             "{} is already installed and up to date",
             args.package
         ));
+        return Ok(());
     }
+    installer.finalize()?;
     Ok(())
 }
 
@@ -138,7 +155,11 @@ struct InstalledArchive {
 /// Verifies, extracts, and promotes the resolved archive into the install root. `expected_hash`
 /// is the hash the archive must match before it is read (from `--sha256` or a tome index entry);
 /// `None` skips the check, which only happens for a local archive installed without `--sha256`.
-fn install_archive(archive_path: &Path, expected_hash: Option<String>) -> Result<InstalledArchive> {
+fn install_archive(
+    archive_path: &Path,
+    expected_hash: Option<String>,
+    expected_store_hash: Option<&str>,
+) -> Result<InstalledArchive> {
     if !archive_path.exists() {
         bail!(
             "package archive `{}` does not exist",
@@ -169,14 +190,14 @@ fn install_archive(archive_path: &Path, expected_hash: Option<String>) -> Result
     validate_target(&metadata, &paths::target_triple())?;
 
     let root = paths::install_root()?;
-    let package_dir = paths::package_dir(&metadata.name, &metadata.version)?;
-    validate_store_path(&metadata, &package_dir, &metadata.name, &metadata.version)?;
+    let (package_dir, store_hash) = resolve_store_dir(&metadata, expected_store_hash)?;
 
-    let transactions_dir = root.join("transactions");
-    fs::create_dir_all(&transactions_dir)?;
+    // Stage on the same filesystem as the store so `promote_package` can use an atomic rename.
+    let store_root = paths::store_root()?;
+    fs::create_dir_all(&store_root)?;
     let transaction = tempfile::Builder::new()
         .prefix("grimoire-")
-        .tempdir_in(&transactions_dir)?;
+        .tempdir_in(&store_root)?;
     let staging_dir = transaction.path().join("package");
     fs::create_dir_all(&staging_dir)?;
 
@@ -196,11 +217,15 @@ fn install_archive(archive_path: &Path, expected_hash: Option<String>) -> Result
     status(&format!("promoting package to ({})", package_dir.display()));
     let replaced = promote_package(&mut tx, &staging_dir, &package_dir)?;
 
-    status("linking shims");
-    link_bins(&mut tx, &metadata, &root, &package_dir)?;
-
     status("writing package state");
-    write_state(&mut tx, &root, &metadata, &archive_hash)?;
+    write_state(
+        &mut tx,
+        &root,
+        &metadata,
+        &archive_hash,
+        &store_hash,
+        &package_dir.to_string_lossy(),
+    )?;
 
     rebuild_lock(&mut tx)?;
 
@@ -259,7 +284,7 @@ impl Installer {
         if self.dry_run {
             return self.dry_run_local_root(package);
         }
-        let installed = install_archive(&PathBuf::from(package), sha256)?;
+        let installed = install_archive(&PathBuf::from(package), sha256, None)?;
         let runtime = installed.runtime_deps.clone();
         self.record(installed);
         self.install_deps(&runtime)
@@ -333,24 +358,105 @@ impl Installer {
     /// Runtime dependencies are separate, earlier steps in the plan, so they are already
     /// installed by the time a step runs.
     fn execute_step(&mut self, step: PlanStep) -> Result<()> {
-        let installed = match step.origin {
-            Origin::Binary { root, entry } => {
-                let archive = fetch::fetch_verified(
-                    &entry.archive,
-                    &root,
-                    &entry.archive_hash,
-                    &paths::archive_cache_dir()?,
-                    &format!("archive `{}` {}", entry.name, entry.version),
-                )?;
-                install_archive(&archive, Some(entry.archive_hash))
-                    .with_context(|| format!("install `{}` {}", step.name, step.version))?
-            }
-            Origin::Source { rune } => self
-                .build_and_install(&rune)
-                .with_context(|| format!("install `{}` {} from source", step.name, step.version))?,
-        };
+        let installed = self
+            .realize_step(&step)
+            .with_context(|| format!("install `{}` {}", step.name, step.version))?;
         self.record(installed);
         Ok(())
+    }
+
+    /// Realizes a resolved step by querying its prebuilt substitutes by store hash, falling back to
+    /// a source build.
+    ///
+    /// The binhost is keyed by content address: when a source rune is available, the store hash is
+    /// recomputed from it (with the resolved runtime dependency versions and the host toolchain) and
+    /// a substitute is accepted only if its published `store_hash` matches — a mismatch means the
+    /// prebuilt is stale (changed sources, flags, or dependency closure) and the package is built
+    /// instead. A substitute that carries no `store_hash` is unverifiable and trusted as-is (a host
+    /// with no compiler boundary cannot rebuild anyway, and legacy indexes predate the field).
+    ///
+    /// Under `--locked` the lockfile already pinned the exact archive — the solver filtered
+    /// substitutes to it — so freshness is not re-litigated here.
+    fn realize_step(&mut self, step: &PlanStep) -> Result<InstalledArchive> {
+        if self.pins.is_some() {
+            return match (step.substitutes.first(), &step.rune) {
+                (Some(sub), _) => self.install_substitute(sub),
+                (None, Some(rune)) => self.build_and_install(rune),
+                (None, None) => bail!("no pinned artifact available for `{}`", step.name),
+            };
+        }
+
+        let wanted = match &step.rune {
+            Some(rune) => self.wanted_store_hash(rune)?,
+            None => None,
+        };
+
+        if let Some(sub) = step
+            .substitutes
+            .iter()
+            .find(|sub| substitute_matches(sub, wanted.as_deref()))
+        {
+            return self.install_substitute(sub);
+        }
+
+        match &step.rune {
+            Some(rune) => {
+                if !step.substitutes.is_empty() {
+                    status(&format!(
+                        "no prebuilt for `{}` {} matches local inputs; building from source",
+                        step.name, step.version
+                    ));
+                }
+                self.build_and_install(rune)
+            }
+            None => bail!(
+                "no installable prebuilt or source for `{}` {}",
+                step.name,
+                step.version
+            ),
+        }
+    }
+
+    /// Fetches, verifies, and installs a prebuilt substitute.
+    fn install_substitute(&self, sub: &Substitute) -> Result<InstalledArchive> {
+        let archive = fetch::fetch_verified(
+            &sub.entry.archive,
+            &sub.root,
+            &sub.entry.archive_hash,
+            &paths::archive_cache_dir()?,
+            &format!("archive `{}` {}", sub.entry.name, sub.entry.version),
+        )?;
+        install_archive(
+            &archive,
+            Some(sub.entry.archive_hash.clone()),
+            Some(&sub.entry.store_hash),
+        )
+    }
+
+    /// The content address the package defined by `rune` would have if built here — computed over
+    /// its dependency closure via [`crate::closure`], the same path the builder and the `store-hash`
+    /// seam use, so the addresses agree by construction. Matched against a published `store_hash` to
+    /// decide whether a prebuilt is a valid substitute.
+    ///
+    /// Returns `None` for a *compiled* package when this host has no toolchain boundary to reproduce
+    /// the build environment: such a host cannot rebuild anyway and takes the published prebuilt as
+    /// authoritative. A fixed-output package is always reproducible (its address ignores the
+    /// toolchain), so it is always `Some`.
+    fn wanted_store_hash(&self, rune: &Path) -> Result<Option<String>> {
+        let mut metadata = EmbeddedNuRuntime
+            .package_metadata(rune)
+            .with_context(|| format!("read rune metadata {}", rune.display()))?;
+        addendum::patched_package_metadata(
+            &mut metadata,
+            build::tome_name_for_rune(rune)?.as_deref(),
+            rune,
+        )
+        .with_context(|| format!("apply addendums to {}", rune.display()))?;
+
+        if !metadata.fixed_output && toolchain::build_env_id().is_none() {
+            return Ok(None);
+        }
+        Ok(Some(crate::closure::store_hash_for_rune(rune)?))
     }
 
     /// Builds the rune at `rune` from source and installs the resulting archive. Build
@@ -384,6 +490,11 @@ impl Installer {
                 ),
                 None => None,
             };
+            // The store hash is computed over the runtime dependency closure, which is installed
+            // before this step; a fixed-output package needs no toolchain to reproduce its address.
+            let store_hash = self
+                .wanted_store_hash(rune)?
+                .with_context(|| format!("cannot compute store hash for `{}`", metadata.name))?;
             let build_deps = metadata.deps.build_for(&paths::target_triple());
             self.install_deps(&build_deps)
                 .with_context(|| format!("install build dependencies for `{}`", metadata.name))?;
@@ -391,12 +502,13 @@ impl Installer {
                 build_dep_bin_dirs(&build_deps)?,
                 toolchain::source_build_host_tools()?,
             );
-            let archive = build::build_package_with_env(
+            let result = build::build_package_with_env(
                 &rune.to_string_lossy(),
                 &paths::build_output_dir()?,
                 &env,
+                &store_hash,
             )?;
-            install_archive(&archive, expected_hash)
+            install_archive(&result.archive, expected_hash, Some(&result.store_hash))
         })();
         self.building.remove(&metadata.name);
         result
@@ -409,7 +521,12 @@ impl Installer {
 }
 
 pub fn list() -> Result<()> {
-    for state in installed_states()? {
+    let states = installed_states()?;
+    if states.is_empty() {
+        println!("No packages are currently installed.");
+        return Ok(());
+    }
+    for state in states {
         println!(
             "{}\t{}\t{}\t{}",
             state.name,
@@ -483,6 +600,9 @@ pub fn installed_states() -> Result<Vec<PackageState>> {
 /// candidate instead of reusing the currently installed (older) version; every other installed
 /// package is still reused to satisfy dependencies.
 pub fn upgrade_packages(names: &[String]) -> Result<()> {
+    if let Some(msg) = paths::fixed_store_setup_instructions() {
+        bail!("{msg}");
+    }
     let mut installed = installed_versions()?;
     for name in names {
         installed.remove(name);
@@ -493,6 +613,11 @@ pub fn upgrade_packages(names: &[String]) -> Result<()> {
             .install_named(name)
             .with_context(|| format!("upgrade `{name}`"))?;
     }
+    if installer.installed_now.is_empty() {
+        report("all requested packages are already up to date");
+        return Ok(());
+    }
+    installer.finalize()?;
     Ok(())
 }
 
@@ -509,7 +634,6 @@ fn installed_versions() -> Result<BTreeMap<String, Version>> {
 }
 
 fn build_dep_bin_dirs(deps: &[Dependency]) -> Result<Vec<PathBuf>> {
-    let root = paths::install_root()?;
     let states = installed_states()?;
     let mut dirs = Vec::new();
     for dep in deps {
@@ -517,11 +641,7 @@ fn build_dep_bin_dirs(deps: &[Dependency]) -> Result<Vec<PathBuf>> {
             continue;
         };
         for path in state.bins.values() {
-            let bin = root
-                .join("packages")
-                .join(&state.name)
-                .join(&state.version)
-                .join(path);
+            let bin = PathBuf::from(&state.store_path).join(path);
             let Some(parent) = bin.parent() else {
                 continue;
             };
@@ -535,13 +655,19 @@ fn build_dep_bin_dirs(deps: &[Dependency]) -> Result<Vec<PathBuf>> {
 }
 
 pub fn remove(args: PackageArg) -> Result<()> {
+    if let Some(msg) = paths::fixed_store_setup_instructions() {
+        bail!("{msg}");
+    }
     let removed = remove_one(&args.package)?;
     report(&format!("removed {}", args.package));
-    autoremove_orphans(removed.runtime_deps)
+    autoremove_orphans(removed.runtime_deps)?;
+    let states = installed_states()?;
+    profile::rebuild_and_activate(&states)?;
+    Ok(())
 }
 
 /// Removes one installed package and returns its prior state record. Each call is a complete
-/// transaction (shims, package directory, state file, lockfile) — callers chaining multiple
+/// transaction (package directory, state file, lockfile, profile generation) — callers chaining multiple
 /// removes do not need to coordinate rollback across them.
 fn remove_one(name: &str) -> Result<PackageState> {
     let root = paths::install_root()?;
@@ -557,23 +683,13 @@ fn remove_one(name: &str) -> Result<PackageState> {
     let state = PackageState::from_value(nuon_io::read_nuon(&state_path)?)?;
 
     // Removal mutates the same shared install state as an install, so stage every step against
-    // a transaction: a failure partway through restores the shims, package files, and state
-    // record rather than leaving the package half-removed.
+    // a transaction: a failure partway through restores the package files and state record
+    // rather than leaving the package half-removed.
     let mut tx = Transaction::new();
-    let bin_dir = root.join("bin");
-    for bin in state.bins.keys() {
-        let shim = shim_path(&bin_dir, bin);
-        let previous = capture_shim(&shim)?;
-        {
-            let shim = shim.clone();
-            tx.on_rollback(move || restore_shim(&shim, previous.as_ref()));
-        }
-        remove_if_exists(&shim)?;
-    }
 
     // Move the package dir aside rather than deleting outright, so a later failure can restore
     // it; the backup is dropped only once the whole removal commits.
-    let package_dir = root.join("packages").join(&state.name).join(&state.version);
+    let package_dir = PathBuf::from(&state.store_path);
     let backup = backup_path(&package_dir)?;
     let had_package = package_dir.exists();
     if had_package {
@@ -655,26 +771,48 @@ fn inspect_archive(path: &Path) -> Result<PackageMetadata> {
     bail!("package archive is missing .grimoire/package.nuon");
 }
 
-fn validate_store_path(
+/// Resolves the absolute store directory an archive installs into and its store hash.
+///
+/// Every archive records its content-addressed store basename (`<hash>-<name>-<version>`) in its
+/// embedded `store_path`; the absolute location is `store_root()/<basename>`, derived locally so the
+/// same archive lands in the same place on every host regardless of who built it. The hash is the
+/// basename's leading component. When the caller knows the expected store hash — a tome index entry,
+/// or a fresh source build — it is cross-checked so a tampered or mislabeled archive is refused.
+fn resolve_store_dir(
     metadata: &PackageMetadata,
-    expected: &Path,
-    name: &str,
-    version: &str,
-) -> Result<()> {
-    let Some(store_path) = &metadata.store_path else {
-        return Ok(());
-    };
-    let actual = Path::new(store_path);
-    let relative = paths::package_relative_dir(name, version);
-    if actual != expected && actual != relative {
+    expected_hash: Option<&str>,
+) -> Result<(PathBuf, String)> {
+    let Some(basename) = metadata.store_path.as_deref() else {
         bail!(
-            "package metadata store_path `{}` does not match install destination `{}` or relative package path `{}`",
-            store_path,
-            expected.display(),
-            relative.display()
+            "package `{}` metadata is missing its store_path basename",
+            metadata.name
+        );
+    };
+    validate_relative_package_path(basename, "metadata store_path")?;
+    let suffix = format!("-{}-{}", metadata.name, metadata.version);
+    let Some(hash) = basename.strip_suffix(&suffix) else {
+        bail!(
+            "package `{}` metadata store_path `{basename}` is not `<hash>-{}-{}`",
+            metadata.name,
+            metadata.name,
+            metadata.version
+        );
+    };
+    if hash.is_empty() || hash.contains('/') {
+        bail!(
+            "package `{}` metadata store_path `{basename}` has an invalid hash component",
+            metadata.name
         );
     }
-    Ok(())
+    if let Some(expected) = expected_hash {
+        if hash != expected {
+            bail!(
+                "package `{}` embeds store hash `{hash}` but its inputs hash to `{expected}`",
+                metadata.name
+            );
+        }
+    }
+    Ok((paths::store_root()?.join(basename), hash.to_string()))
 }
 
 /// Validates every archive member *before* extraction (AGENTS.md §5.2–§5.3): member paths must
@@ -813,100 +951,13 @@ fn backup_path(package_dir: &Path) -> Result<PathBuf> {
     Ok(package_dir.with_file_name(format!("{name}.grimoire-old")))
 }
 
-fn link_bins(
-    tx: &mut Transaction,
-    metadata: &PackageMetadata,
-    root: &Path,
-    package_dir: &Path,
-) -> Result<()> {
-    let bin_dir = root.join("bin");
-    fs::create_dir_all(&bin_dir)?;
-
-    for (name, path) in &metadata.bins {
-        let source = package_dir.join(path).canonicalize()?;
-        let shim = shim_path(&bin_dir, name);
-
-        // Capture and register a restore of the prior shim before replacing it.
-        let previous = capture_shim(&shim)?;
-        {
-            let shim = shim.clone();
-            tx.on_rollback(move || restore_shim(&shim, previous.as_ref()));
-        }
-
-        remove_if_exists(&shim)?;
-        write_shim(&shim, &source)?;
-    }
-
-    Ok(())
-}
-
-#[cfg(unix)]
-fn shim_path(bin_dir: &Path, name: &str) -> PathBuf {
-    bin_dir.join(name)
-}
-
-#[cfg(windows)]
-fn shim_path(bin_dir: &Path, name: &str) -> PathBuf {
-    bin_dir.join(format!("{name}.cmd"))
-}
-
-#[cfg(unix)]
-fn write_shim(shim: &Path, source: &Path) -> Result<()> {
-    std::os::unix::fs::symlink(source, shim)
-        .with_context(|| format!("link shim {}", shim.display()))
-}
-
-#[cfg(windows)]
-fn write_shim(shim: &Path, source: &Path) -> Result<()> {
-    fs::write(shim, windows_shim_contents(source))
-        .with_context(|| format!("write shim {}", shim.display()))
-}
-
-/// The body of a Windows `.cmd` shim that forwards all arguments to the real executable.
-/// Factored out (and compiled on Windows or under test) so its exact contents can be unit-tested
-/// on any host: a batch shim must silence echo, quote the target path, and pass `%*`.
-#[cfg(any(windows, test))]
-fn windows_shim_contents(source: &Path) -> String {
-    format!("@echo off\r\n\"{}\" %*\r\n", source.display())
-}
-
-enum PreviousShim {
-    Symlink(PathBuf),
-    File(Vec<u8>),
-}
-
-fn capture_shim(shim: &Path) -> Result<Option<PreviousShim>> {
-    let Ok(metadata) = fs::symlink_metadata(shim) else {
-        return Ok(None);
-    };
-    if metadata.file_type().is_symlink() {
-        Ok(Some(PreviousShim::Symlink(fs::read_link(shim)?)))
-    } else {
-        Ok(Some(PreviousShim::File(fs::read(shim)?)))
-    }
-}
-
-fn restore_shim(shim: &Path, previous: Option<&PreviousShim>) {
-    let _ = remove_if_exists(shim);
-    match previous {
-        None => {}
-        Some(PreviousShim::File(bytes)) => {
-            let _ = fs::write(shim, bytes);
-        }
-        Some(PreviousShim::Symlink(target)) => {
-            #[cfg(unix)]
-            let _ = std::os::unix::fs::symlink(target, shim);
-            #[cfg(windows)]
-            let _ = std::os::windows::fs::symlink_file(target, shim);
-        }
-    }
-}
-
 fn write_state(
     tx: &mut Transaction,
     root: &Path,
     metadata: &PackageMetadata,
     archive_hash: &str,
+    store_hash: &str,
+    store_path: &str,
 ) -> Result<()> {
     let state_dir = root.join("state").join("packages");
     fs::create_dir_all(&state_dir)?;
@@ -928,6 +979,8 @@ fn write_state(
         version: metadata.version.clone(),
         target: metadata.target.clone(),
         archive_hash: archive_hash.to_owned(),
+        store_hash: store_hash.to_owned(),
+        store_path: store_path.to_owned(),
         bins: metadata.bins.clone(),
         runtime_deps: metadata
             .deps
@@ -1006,11 +1059,35 @@ fn print_plan(plan: &Plan) {
 /// has already printed a synthetic root step (source-rune or local-archive install).
 fn print_plan_body(plan: &Plan) {
     for step in &plan.steps {
-        let origin = match &step.origin {
-            Origin::Binary { entry, .. } => format!("binary archive {}", entry.archive),
-            Origin::Source { rune } => format!("source rune {}", rune.display()),
-        };
-        println!("  + {} {} ({})", step.name, step.version, origin);
+        println!(
+            "  + {} {} ({})",
+            step.name,
+            step.version,
+            describe_origin(step)
+        );
+    }
+}
+
+/// A human-readable summary of how a step will be realized. When both a prebuilt and a rune are
+/// available the exact route depends on the store-hash match resolved at install time, so the plan
+/// names the prebuilt archive and notes that a source build is the fallback.
+fn describe_origin(step: &PlanStep) -> String {
+    match (step.substitutes.first(), &step.rune) {
+        (Some(sub), Some(_)) => format!("binary archive {} or source", sub.entry.archive),
+        (Some(sub), None) => format!("binary archive {}", sub.entry.archive),
+        (None, Some(rune)) => format!("source rune {}", rune.display()),
+        (None, None) => "unavailable".to_owned(),
+    }
+}
+
+/// Whether a substitute is acceptable for the inputs we would otherwise build. When the wanted
+/// content address is known, the substitute's published `store_hash` must match it. When it cannot
+/// be computed — a compiled package on a host with no toolchain boundary — the published prebuilt is
+/// taken as authoritative.
+fn substitute_matches(sub: &Substitute, wanted: Option<&str>) -> bool {
+    match wanted {
+        Some(want) => sub.entry.store_hash == want,
+        None => true,
     }
 }
 
@@ -1048,13 +1125,6 @@ impl Drop for Transaction {
     }
 }
 
-fn remove_if_exists(path: &Path) -> Result<()> {
-    if fs::symlink_metadata(path).is_ok() {
-        fs::remove_file(path)?;
-    }
-    Ok(())
-}
-
 fn normalize_archive_path(path: &Path) -> String {
     let text = path.to_string_lossy();
     text.strip_prefix("./").unwrap_or(&text).to_owned()
@@ -1076,26 +1146,4 @@ fn make_executable(_path: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn windows_shim_forwards_arguments_to_target() {
-        let shim =
-            windows_shim_contents(Path::new(r"C:\grimoire\packages\hello\0.1.0\bin\hello.exe"));
-        // CRLF line endings so cmd.exe parses the batch file correctly on Windows.
-        assert!(shim.starts_with("@echo off\r\n"), "shim: {shim:?}");
-        assert!(shim.ends_with("\r\n"), "shim: {shim:?}");
-        // The target path is quoted (so spaces are tolerated) and `%*` forwards every argument.
-        assert!(
-            shim.contains("\"C:\\grimoire\\packages\\hello\\0.1.0\\bin\\hello.exe\" %*"),
-            "shim: {shim:?}"
-        );
-        // No stray un-quoted invocation that would break on a spaced path.
-        assert_eq!(
-            shim.matches('"').count(),
-            2,
-            "exactly one quoted target: {shim:?}"
-        );
-    }
-}
+mod tests {}
