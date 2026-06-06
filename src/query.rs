@@ -52,31 +52,40 @@ pub fn search(args: QueryArg) -> Result<()> {
 }
 
 pub fn info(args: PackageArg) -> Result<()> {
-    let installed = install::installed_states()?
-        .into_iter()
-        .find(|state| state.name == args.package);
-    let available: Vec<_> = tome_packages()?
-        .into_iter()
-        .filter(|package| package.metadata.name == args.package)
-        .collect();
-
-    progress::finish();
-    if installed.is_none() && available.is_empty() {
-        bail!(
-            "package `{}` was not found in installed state or configured tomes",
-            args.package
-        );
+    if args.packages.is_empty() {
+        bail!("specify at least one package to query");
     }
 
-    if let Some(state) = &installed {
-        print_installed(state);
-    }
+    let installed_states = install::installed_states()?;
+    let available_packages = tome_packages()?;
+    let mut first = true;
 
-    for package in available {
-        if installed.is_some() {
-            println!();
+    for package in &args.packages {
+        let installed = installed_states.iter().find(|state| state.name == *package);
+        let available: Vec<_> = available_packages
+            .iter()
+            .filter(|p| p.metadata.name == *package)
+            .collect();
+
+        if installed.is_none() && available.is_empty() {
+            bail!("package `{package}` was not found in installed state or configured tomes");
         }
-        print_available(&package);
+
+        if !first {
+            println!("\n---\n");
+        }
+        first = false;
+
+        if let Some(state) = installed {
+            print_installed(state);
+        }
+
+        for pkg in available {
+            if installed.is_some() {
+                println!();
+            }
+            print_available(pkg);
+        }
     }
 
     Ok(())
