@@ -20,8 +20,8 @@ use crate::{
     cli::{InstallArgs, PackageArg},
     fetch, lock,
     model::{
-        Dependency, PackageMetadata, PackageState, validate_relative_package_path, validate_sha256,
-        validate_target,
+        Dependency, PackageMetadata, PackageState, parse_version_relaxed,
+        validate_relative_package_path, validate_sha256, validate_target, validate_targets,
     },
     nu::{
         nuon_io,
@@ -146,16 +146,32 @@ fn load_pins() -> Result<solve::Pins> {
 
 /// The installed package's name, concrete version, and the runtime dependencies declared in its
 /// embedded metadata, returned so the caller can record it as installed and resolve those deps.
-struct InstalledArchive {
-    name: String,
-    version: Version,
-    runtime_deps: Vec<Dependency>,
+pub(crate) struct InstalledArchive {
+    pub name: String,
+    pub version: Version,
+    pub runtime_deps: Vec<Dependency>,
 }
 
-/// Verifies, extracts, and promotes the resolved archive into the install root. `expected_hash`
-/// is the hash the archive must match before it is read (from `--sha256` or a tome index entry);
-/// `None` skips the check, which only happens for a local archive installed without `--sha256`.
+/// Verifies, extracts, and promotes the resolved archive into the install root, then rebuilds
+/// the lockfile. `expected_hash` is the hash the archive must match before it is read (from
+/// `--sha256` or a tome index entry); `None` skips the check, which only happens for a local
+/// archive installed without `--sha256`.
 fn install_archive(
+    archive_path: &Path,
+    expected_hash: Option<String>,
+    expected_store_hash: Option<&str>,
+) -> Result<InstalledArchive> {
+    let installed = install_store_only(archive_path, expected_hash, expected_store_hash)?;
+    let mut tx = Transaction::new();
+    rebuild_lock(&mut tx)?;
+    tx.commit();
+    Ok(installed)
+}
+
+/// Like [`install_archive`], but does **not** rebuild the lockfile or activate a generation.
+/// Used by `grm tome build` to make built packages available as build dependencies for subsequent
+/// builds without polluting the user's active profile.
+pub(crate) fn install_store_only(
     archive_path: &Path,
     expected_hash: Option<String>,
     expected_store_hash: Option<&str>,
@@ -227,8 +243,6 @@ fn install_archive(
         &package_dir.to_string_lossy(),
     )?;
 
-    rebuild_lock(&mut tx)?;
-
     tx.commit();
     if let Some(replaced) = replaced {
         let _ = fs::remove_dir_all(replaced);
@@ -240,13 +254,95 @@ fn install_archive(
         metadata.version,
         root.display()
     ));
-    let version = Version::parse(&metadata.version)
+    let version = parse_version_relaxed(&metadata.version)
         .with_context(|| format!("package version `{}` is not valid semver", metadata.version))?;
     Ok(InstalledArchive {
         name: metadata.name,
         version,
         runtime_deps: metadata.deps.runtime,
     })
+}
+
+/// Ensures every build dependency in `deps` is installed store-only (no lockfile, no generation).
+/// Missing deps are resolved through the solver and installed from substitutes or built from source.
+/// Already-installed packages are reused.
+pub(crate) fn ensure_build_deps_installed(deps: &[Dependency]) -> Result<()> {
+    if deps.is_empty() {
+        return Ok(());
+    }
+
+    let mut installed = installed_versions()?;
+    let missing: Vec<Dependency> = deps
+        .iter()
+        .filter(|dep| find_dep_state(&installed_states().unwrap_or_default(), &dep.name).is_none())
+        .cloned()
+        .collect();
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let plan = solve::resolve(&missing, &installed, None)?;
+
+    for step in plan.steps {
+        if installed.contains_key(&step.name) {
+            continue;
+        }
+
+        let result = if let Some(sub) = step.substitutes.first() {
+            let archive = fetch::fetch_verified(
+                &sub.entry.archive,
+                &sub.root,
+                &sub.entry.archive_hash,
+                &paths::archive_cache_dir()?,
+                &format!("archive `{}` {}", sub.entry.name, sub.entry.version),
+            )?;
+            install_store_only(
+                &archive,
+                Some(sub.entry.archive_hash.clone()),
+                Some(&sub.entry.store_hash),
+            )
+        } else if let Some(rune) = &step.rune {
+            let store_hash = crate::closure::store_hash_for_rune(rune)
+                .with_context(|| format!("cannot compute store hash for `{}`", step.name))?;
+            let mut metadata = EmbeddedNuRuntime
+                .package_metadata(rune)
+                .with_context(|| format!("read rune metadata {}", rune.display()))?;
+            addendum::patched_package_metadata(
+                &mut metadata,
+                build::tome_name_for_rune(rune)?.as_deref(),
+                rune,
+            )
+            .with_context(|| format!("apply addendums to {}", rune.display()))?;
+            let build_deps = metadata.deps.build_for(&paths::target_triple());
+            ensure_build_deps_installed(&build_deps)
+                .with_context(|| format!("install build dependencies for `{}`", step.name))?;
+            let env = BuildEnv::managed(
+                build_dep_bin_dirs(&build_deps)?,
+                toolchain::source_build_host_tools()?,
+                build_dep_env_vars(&build_deps)?,
+            );
+            let result = build::build_package_with_env(
+                &rune.to_string_lossy(),
+                &paths::build_output_dir()?,
+                &env,
+                &store_hash,
+            )?;
+            install_store_only(&result.archive, None, Some(&result.store_hash))
+        } else {
+            bail!(
+                "no installable prebuilt or source for `{}` {}",
+                step.name,
+                step.version
+            )
+        };
+
+        let installed_archive = result
+            .with_context(|| format!("store-only install `{}` {}", step.name, step.version))?;
+        installed.insert(installed_archive.name, installed_archive.version);
+    }
+
+    Ok(())
 }
 
 impl Installer {
@@ -472,6 +568,8 @@ impl Installer {
             rune,
         )
         .with_context(|| format!("apply addendums to {}", rune.display()))?;
+        validate_targets(&metadata, &paths::target_triple())
+            .with_context(|| format!("validate target for `{}`", metadata.name))?;
         if !self.building.insert(metadata.name.clone()) {
             bail!("build dependency cycle involving `{}`", metadata.name);
         }
@@ -501,6 +599,7 @@ impl Installer {
             let env = BuildEnv::managed(
                 build_dep_bin_dirs(&build_deps)?,
                 toolchain::source_build_host_tools()?,
+                build_dep_env_vars(&build_deps)?,
             );
             let result = build::build_package_with_env(
                 &rune.to_string_lossy(),
@@ -626,18 +725,31 @@ pub fn upgrade_packages(names: &[String]) -> Result<()> {
 fn installed_versions() -> Result<BTreeMap<String, Version>> {
     let mut versions = BTreeMap::new();
     for state in installed_states()? {
-        if let Ok(version) = Version::parse(&state.version) {
+        if let Ok(version) = parse_version_relaxed(&state.version) {
             versions.insert(state.name, version);
         }
     }
     Ok(versions)
 }
 
+/// Finds an installed package that satisfies the dependency `name`.
+/// First tries an exact package name match, then falls back to capability resolution
+/// (any installed package whose `bins` map contains `name` as a key).
+pub(crate) fn find_dep_state<'a>(
+    states: &'a [PackageState],
+    name: &str,
+) -> Option<&'a PackageState> {
+    states
+        .iter()
+        .find(|state| state.name == name)
+        .or_else(|| states.iter().find(|state| state.bins.contains_key(name)))
+}
+
 pub(crate) fn build_dep_bin_dirs(deps: &[Dependency]) -> Result<Vec<PathBuf>> {
     let states = installed_states()?;
     let mut dirs = Vec::new();
     for dep in deps {
-        let Some(state) = states.iter().find(|state| state.name == dep.name) else {
+        let Some(state) = find_dep_state(&states, &dep.name) else {
             continue;
         };
         for path in state.bins.values() {
@@ -652,6 +764,61 @@ pub(crate) fn build_dep_bin_dirs(deps: &[Dependency]) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(dirs)
+}
+
+/// Computes additional environment variables (PKG_CONFIG_PATH, CPATH, LIBRARY_PATH) from the
+/// installed build dependencies so that compilers and pkg-config can find headers and libraries.
+pub(crate) fn build_dep_env_vars(deps: &[Dependency]) -> Result<Vec<(String, String)>> {
+    let states = installed_states()?;
+    let mut pkg_config_paths = Vec::new();
+    let mut cpaths = Vec::new();
+    let mut library_paths = Vec::new();
+
+    for dep in deps {
+        let Some(state) = find_dep_state(&states, &dep.name) else {
+            continue;
+        };
+        let store = PathBuf::from(&state.store_path);
+        let pkgconfig = store.join("lib/pkgconfig");
+        if pkgconfig.is_dir() && !pkg_config_paths.contains(&pkgconfig) {
+            pkg_config_paths.push(pkgconfig);
+        }
+        let include = store.join("include");
+        if include.is_dir() && !cpaths.contains(&include) {
+            cpaths.push(include);
+        }
+        let lib = store.join("lib");
+        if lib.is_dir() && !library_paths.contains(&lib) {
+            library_paths.push(lib);
+        }
+    }
+
+    let mut env = Vec::new();
+    if !pkg_config_paths.is_empty() {
+        env.push((
+            "PKG_CONFIG_PATH".to_string(),
+            std::env::join_paths(&pkg_config_paths)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        ));
+    }
+    if !cpaths.is_empty() {
+        env.push((
+            "CPATH".to_string(),
+            std::env::join_paths(&cpaths)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        ));
+    }
+    if !library_paths.is_empty() {
+        env.push((
+            "LIBRARY_PATH".to_string(),
+            std::env::join_paths(&library_paths)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        ));
+    }
+    Ok(env)
 }
 
 pub fn remove(args: PackageArg) -> Result<()> {
@@ -1130,18 +1297,12 @@ fn normalize_archive_path(path: &Path) -> String {
     text.strip_prefix("./").unwrap_or(&text).to_owned()
 }
 
-#[cfg(unix)]
 fn make_executable(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     let mut permissions = fs::metadata(path)?.permissions();
     permissions.set_mode(permissions.mode() | 0o111);
     fs::set_permissions(path, permissions)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn make_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
 

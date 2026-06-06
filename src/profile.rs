@@ -151,36 +151,10 @@ pub fn activate_generation(id: u64) -> Result<()> {
         .context("current profile link should have a parent")?;
     fs::create_dir_all(parent)?;
 
-    #[cfg(unix)]
-    {
-        let tmp = parent.join(format!(".current-{id}"));
-        std::os::unix::fs::symlink(&gen_dir, &tmp)
-            .with_context(|| format!("stage current symlink -> {}", gen_dir.display()))?;
-        fs::rename(&tmp, &current).with_context(|| format!("activate generation {id}"))?;
-    }
-    #[cfg(windows)]
-    {
-        // Windows: use a directory junction for the current link. Junctions do not require
-        // admin privileges (unlike symlinks) and work across the same volume.
-        let tmp = parent.join(format!(".current-{id}"));
-        junction::create(&tmp, &gen_dir)
-            .with_context(|| format!("stage current junction -> {}", gen_dir.display()))?;
-
-        if current.exists() {
-            let backup = parent.join(format!(".current-backup-{id}"));
-            if let Err(e) = fs::rename(&current, &backup) {
-                let _ = fs::remove_dir_all(&tmp);
-                bail!("activate generation {id}: could not stage backup of current junction: {e}");
-            }
-            if let Err(e) = fs::rename(&tmp, &current) {
-                let _ = fs::rename(&backup, &current);
-                bail!("activate generation {id}: could not promote junction: {e}");
-            }
-            let _ = fs::remove_dir_all(&backup);
-        } else {
-            fs::rename(&tmp, &current).with_context(|| format!("activate generation {id}"))?;
-        }
-    }
+    let tmp = parent.join(format!(".current-{id}"));
+    std::os::unix::fs::symlink(&gen_dir, &tmp)
+        .with_context(|| format!("stage current symlink -> {}", gen_dir.display()))?;
+    fs::rename(&tmp, &current).with_context(|| format!("activate generation {id}"))?;
 
     report(&format!("activated generation {id}"));
     Ok(())
@@ -506,16 +480,9 @@ fn link_tree(src: &Path, dst: &Path) -> Result<()> {
             }
             let link_target = fs::read_link(path)?;
             let _ = fs::remove_file(&target);
-            #[cfg(unix)]
-            {
-                std::os::unix::fs::symlink(&link_target, &target).with_context(|| {
-                    format!("symlink {} -> {}", target.display(), link_target.display())
-                })?;
-            }
-            #[cfg(windows)]
-            {
-                // TODO: Windows symlink support in profiles
-            }
+            std::os::unix::fs::symlink(&link_target, &target).with_context(|| {
+                format!("symlink {} -> {}", target.display(), link_target.display())
+            })?;
         }
     }
     Ok(())

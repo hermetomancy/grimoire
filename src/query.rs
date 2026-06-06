@@ -13,7 +13,7 @@ use crate::{
     addendum,
     cli::{PackageArg, QueryArg, UpgradeArgs},
     install,
-    model::{PackageMetadata, PackageState},
+    model::{PackageMetadata, PackageState, parse_version_relaxed},
     nu::runtime::{EmbeddedNuRuntime, RuneRuntime},
     progress, solve, tome,
 };
@@ -94,7 +94,11 @@ pub fn upgrade(args: UpgradeArgs) -> Result<()> {
         .collect();
     let installed: BTreeMap<String, Version> = states
         .into_iter()
-        .filter_map(|state| Version::parse(&state.version).ok().map(|v| (state.name, v)))
+        .filter_map(|state| {
+            parse_version_relaxed(&state.version)
+                .ok()
+                .map(|v| (state.name, v))
+        })
         .collect();
 
     let explicit = !args.packages.is_empty();

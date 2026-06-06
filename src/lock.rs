@@ -9,7 +9,12 @@ use nu_protocol::{Record, Value};
 use semver::Version;
 use std::path::PathBuf;
 
-use crate::{addendum, install, model::LockFile, nu::nuon_io, paths, tome};
+use crate::{
+    addendum, install,
+    model::{LockFile, parse_version_relaxed},
+    nu::nuon_io,
+    paths, tome,
+};
 
 /// One package as recorded in `grimoire.lock.nuon`: enough to pin a reproducible reinstall to the
 /// exact version and verified archive hash that was last installed.
@@ -70,7 +75,7 @@ pub fn read_locked_packages() -> Result<Option<Vec<LockedPackage>>> {
         };
         let name = lock_field_string(val, "name")?;
         let version_raw = lock_field_string(val, "version")?;
-        let version = Version::parse(&version_raw)
+        let version = parse_version_relaxed(&version_raw)
             .with_context(|| format!("lockfile version `{version_raw}` for `{name}`"))?;
         let archive_hash = lock_field_string(val, "archive_hash")?;
         packages.push(LockedPackage {

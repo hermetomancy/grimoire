@@ -9,7 +9,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 use crate::{
@@ -189,14 +188,8 @@ fn append_file<W: std::io::Write>(
     Ok(())
 }
 
-#[cfg(unix)]
 fn file_mode(metadata: &fs::Metadata) -> u32 {
     metadata.permissions().mode() & 0o777
-}
-
-#[cfg(not(unix))]
-fn file_mode(_metadata: &fs::Metadata) -> u32 {
-    0o755
 }
 
 fn append_bytes<W: std::io::Write>(

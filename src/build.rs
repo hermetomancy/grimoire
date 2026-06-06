@@ -42,14 +42,24 @@ pub fn build(args: BuildArgs) -> Result<()> {
 pub fn build_package(package: &str, output: &Path, bootstrap: bool) -> Result<BuildResult> {
     let rune = resolve_rune(package)?;
     let store_hash = crate::closure::store_hash_for_rune(&rune)?;
+    let metadata = EmbeddedNuRuntime.package_metadata(&rune)?;
+    let build_deps = metadata.deps.build_for(&paths::target_triple());
+
+    if !bootstrap {
+        install::ensure_build_deps_installed(&build_deps)
+            .with_context(|| format!("install build dependencies for `{package}`"))?;
+    }
+
     let env = if bootstrap {
-        BuildEnv::bootstrap()
+        BuildEnv::bootstrap(
+            install::build_dep_bin_dirs(&build_deps)?,
+            install::build_dep_env_vars(&build_deps)?,
+        )
     } else {
-        let metadata = EmbeddedNuRuntime.package_metadata(&rune)?;
-        let build_deps = metadata.deps.build_for(&paths::target_triple());
         BuildEnv::managed(
             install::build_dep_bin_dirs(&build_deps)?,
             toolchain::source_build_host_tools()?,
+            install::build_dep_env_vars(&build_deps)?,
         )
     };
     build_package_with_env(package, output, &env, &store_hash)

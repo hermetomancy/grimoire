@@ -3,12 +3,12 @@ name = "grimoire"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "A fast, git-native, cross-platform package manager with reproducible installs and composable customization layers."
+description = "A fast, git-native, POSIX package manager with reproducible installs and composable customization layers."
 license = "MIT"
 repository = "https://github.com/grimoire-of-glass/grimoire"
 homepage = "https://github.com/grimoire-of-glass/grimoire"
 readme = "README.md"
-keywords = ["package-manager", "cli", "homebrew", "scoop", "cross-platform"]
+keywords = ["package-manager", "cli", "homebrew", "nix"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = [
     "tome-example/",
@@ -54,9 +54,6 @@ ureq = "2"
 walkdir = "2"
 xz2 = "0.1"
 zstd = "0.13"
-
-[target.'cfg(windows)'.dependencies]
-junction = "1"
 
 [dev-dependencies]
 fs4 = "0.13"

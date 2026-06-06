@@ -19,6 +19,9 @@ pub struct PackageMetadata {
     pub target: Option<String>,
     #[serde(default)]
     pub store_path: Option<String>,
+    /// Supported target triples for source builds. When empty, the rune accepts any target.
+    #[serde(default)]
+    pub targets: Vec<String>,
     /// `true` for a fixed-output (x-bin / fetch-only) package: its `build` only fetches and
     /// sha256-verifies prebuilt sources rather than compiling. Such a package is content-addressed
     /// by its sources alone, so its store hash excludes the host build environment and dependency
@@ -272,12 +275,14 @@ impl PackageMetadata {
             Some(Value::Nothing { .. }) | None => BTreeMap::new(),
             Some(value) => expect_string_map(value, "package field `build_flags`")?,
         };
+        let targets = optional_string_list(&record, "targets")?;
 
         Ok(Self {
             name,
             version,
             target,
             store_path,
+            targets,
             fixed_output,
             summary,
             bins,
@@ -960,6 +965,25 @@ pub fn validate_target(metadata: &PackageMetadata, current: &str) -> Result<()> 
     Ok(())
 }
 
+/// Validates that the current target is supported by a rune's declared `targets` list.
+/// An empty `targets` means the rune accepts any target.
+pub fn validate_targets(metadata: &PackageMetadata, current: &str) -> Result<()> {
+    if metadata.targets.is_empty() {
+        return Ok(());
+    }
+
+    if metadata.targets.iter().any(|t| t == current) {
+        return Ok(());
+    }
+
+    bail!(
+        "package `{}` does not support target `{}`; supported targets are: {}",
+        metadata.name,
+        current,
+        metadata.targets.join(", ")
+    );
+}
+
 pub fn validate_relative_package_path(path: &str, label: &str) -> Result<()> {
     if path.starts_with('/') || path.starts_with('\\') || looks_windows_absolute(path) {
         bail!("{label} path `{path}` must be relative");
@@ -1211,7 +1235,7 @@ fn required_field_string(record: &Record, label: &str, field: &str) -> Result<St
 /// Orders two version strings by semver precedence. Versions are semver-validated on the way
 /// in, so parsing succeeds in practice; an unparsable value falls back to lexical order.
 pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
-    match (Version::parse(a), Version::parse(b)) {
+    match (parse_version_relaxed(a), parse_version_relaxed(b)) {
         (Ok(a), Ok(b)) => a.cmp(&b),
         _ => a.cmp(b),
     }
@@ -1221,8 +1245,28 @@ pub fn validate_package_name(name: &str) -> Result<()> {
     validate_ident(name, "package name")
 }
 
+/// Parse a version string, normalizing two-component (and one-component) versions to semver
+/// by appending missing `.0` components: `"5.3"` → `"5.3.0"`, `"2"` → `"2.0.0"`.
+pub fn parse_version_relaxed(s: &str) -> Result<Version> {
+    Version::parse(s).or_else(|_| {
+        let normalized = if s.contains('-') || s.contains('+') {
+            s.to_string()
+        } else {
+            let dots = s.matches('.').count();
+            match dots {
+                0 => format!("{s}.0.0"),
+                1 => format!("{s}.0"),
+                _ => s.to_string(),
+            }
+        };
+        Version::parse(&normalized).with_context(|| {
+            format!("version `{s}` (normalized: `{normalized}`) is not valid semver")
+        })
+    })
+}
+
 pub fn validate_package_version(version: &str) -> Result<()> {
-    Version::parse(version)
+    parse_version_relaxed(version)
         .map(|_| ())
         .with_context(|| format!("package version `{version}` is not valid semver"))
 }
@@ -1386,5 +1430,28 @@ mod tests {
                 "bin name `{name}` should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn parse_version_relaxed_normalizes_short_versions() {
+        assert_eq!(parse_version_relaxed("5.3").unwrap(), Version::new(5, 3, 0));
+        assert_eq!(
+            parse_version_relaxed("2.72").unwrap(),
+            Version::new(2, 72, 0)
+        );
+        assert_eq!(parse_version_relaxed("1").unwrap(), Version::new(1, 0, 0));
+        assert_eq!(
+            parse_version_relaxed("1.2.3").unwrap(),
+            Version::new(1, 2, 3)
+        );
+        assert_eq!(
+            parse_version_relaxed("1.2.3-alpha").unwrap(),
+            Version::parse("1.2.3-alpha").unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_version_relaxed_rejects_garbage() {
+        assert!(parse_version_relaxed("not-a-version").is_err());
     }
 }

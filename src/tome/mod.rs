@@ -7,7 +7,9 @@
 
 use anyhow::{Context, Result, bail};
 use std::{
+    collections::{BTreeMap, HashMap},
     fs,
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -15,6 +17,7 @@ pub(crate) mod git;
 
 use crate::{
     cli::{TomeAddArgs, TomeBuildArgs, TomeInitArgs, TomeRemoveArgs, TomeRuneArgs, TomeUpdateArgs},
+    install,
     model::{
         IndexEntry, PackageIndex, TomeManifest, TomePackages, TomeState, validate_package_name,
         validate_package_version, validate_relative_package_path, validate_tome_name,
@@ -145,10 +148,25 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
         )
     })?;
 
+    let dist_dir = root.join("dist");
+    fs::create_dir_all(&dist_dir)?;
+    let index_path = dist_dir.join(&packages.index);
+
+    if args.index {
+        let catalog = rebuild_index(&dist_dir)?;
+        nuon_io::write_nuon(&index_path, &catalog.to_value())?;
+        report(&format!(
+            "rebuilt index with {} package(s) in {}",
+            catalog.packages.len(),
+            index_path.display()
+        ));
+        return Ok(());
+    }
+
     // Decide which runes to build: every rune in `runes/` for `--all`, otherwise the single
     // named package. clap already rejects passing both, so exactly one branch applies.
     let rune_names = if args.all {
-        let names = rune_names(root)?;
+        let names = rune_names_ordered(root)?;
         if names.is_empty() {
             bail!("tome `{}` has no runes to build", manifest.name);
         }
@@ -160,10 +178,6 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
         vec![package.to_owned()]
     };
 
-    let dist_dir = root.join("dist");
-    fs::create_dir_all(&dist_dir)?;
-
-    let index_path = dist_dir.join(&packages.index);
     let mut catalog = if index_path.exists() {
         PackageIndex::from_value(nuon_io::read_nuon(&index_path)?)?
     } else {
@@ -174,6 +188,8 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
 
     // Build each rune, upserting its entry as we go, then write the index once so a multi-rune
     // build records every package atomically rather than rewriting the file per rune.
+    // In `--all` mode, each built package is also installed store-only so subsequent runes can
+    // depend on it as a build dependency without requiring a pre-installed userland.
     let target = paths::target_triple();
     for name in &rune_names {
         let (entry, archive) = build_rune_into(root, name, &dist_dir, args.bootstrap)?;
@@ -183,6 +199,10 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
             entry.version,
             archive.display()
         ));
+        if args.all {
+            install::install_store_only(&archive, None, None)
+                .with_context(|| format!("store-only install of {}", entry.name))?;
+        }
         catalog.upsert(entry);
     }
     nuon_io::write_nuon(&index_path, &catalog.to_value())?;
@@ -236,6 +256,104 @@ fn build_rune_into(
     Ok((entry, result.archive))
 }
 
+/// Rebuilds the package index from every `.tar.zst` archive already present in `dist_dir`.
+/// Each archive is inspected for its embedded metadata and rune so the index entry is identical
+/// to what a fresh build would produce.
+fn rebuild_index(dist_dir: &Path) -> Result<PackageIndex> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(dist_dir)
+        .with_context(|| format!("read dist directory {}", dist_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !name.ends_with(".tar.zst") {
+            continue;
+        }
+        match read_archive_index_entry(&path) {
+            Ok(index_entry) => {
+                report(&format!(
+                    "indexed {} {} ({}) from {}",
+                    index_entry.name, index_entry.version, index_entry.target, name
+                ));
+                entries.push(index_entry);
+            }
+            Err(e) => {
+                report(&format!("warning: skipping {}: {e}", path.display()));
+            }
+        }
+    }
+    Ok(PackageIndex { packages: entries })
+}
+
+/// Reads an existing archive and produces the [`IndexEntry`] that would describe it.
+fn read_archive_index_entry(path: &Path) -> Result<IndexEntry> {
+    let file = fs::File::open(path).with_context(|| format!("open archive {}", path.display()))?;
+    let decoder = zstd::stream::read::Decoder::new(file)
+        .with_context(|| format!("decode archive {}", path.display()))?;
+    let mut archive = tar::Archive::new(decoder);
+
+    let mut metadata = None;
+    let mut rune_bytes = None;
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path_str = entry.path()?.to_string_lossy().to_string();
+        let normalized = path_str.strip_prefix("./").unwrap_or(&path_str);
+
+        if normalized == ".grimoire/package.nuon" {
+            let mut text = String::new();
+            entry.read_to_string(&mut text)?;
+            metadata = Some(
+                crate::model::PackageMetadata::from_value(nuon_io::parse_nuon(&text)?, true)
+                    .with_context(|| format!("parse metadata in {}", path.display()))?,
+            );
+        } else if normalized == ".grimoire/rune.rn" {
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes)?;
+            rune_bytes = Some(bytes);
+        }
+    }
+
+    let metadata = metadata.ok_or_else(|| {
+        anyhow::anyhow!(
+            "archive {} is missing .grimoire/package.nuon",
+            path.display()
+        )
+    })?;
+    let rune_bytes = rune_bytes.ok_or_else(|| {
+        anyhow::anyhow!("archive {} is missing .grimoire/rune.rn", path.display())
+    })?;
+
+    let temp_rune = tempfile::NamedTempFile::with_suffix(".rn")
+        .with_context(|| "create temporary rune file")?;
+    fs::write(temp_rune.path(), &rune_bytes).with_context(|| "write temporary rune file")?;
+    let store_hash = crate::closure::store_hash_for_rune(temp_rune.path())
+        .with_context(|| format!("compute store hash for {}", path.display()))?;
+
+    let archive_hash = crate::archive::archive_hash(path)
+        .with_context(|| format!("hash archive {}", path.display()))?;
+    let archive_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .with_context(|| format!("archive path has no file name: {}", path.display()))?
+        .to_owned();
+
+    let target = metadata
+        .target
+        .ok_or_else(|| anyhow::anyhow!("metadata in {} is missing target", path.display()))?;
+
+    Ok(IndexEntry {
+        name: metadata.name,
+        version: metadata.version,
+        target,
+        archive: archive_name,
+        archive_hash,
+        store_hash,
+        runtime_deps: metadata.deps.runtime,
+    })
+}
+
 /// The rune base names (without the `.rn` extension) in a tome's `runes/` directory, sorted for
 /// deterministic build order. Returns an empty list when there is no `runes/` directory.
 fn rune_names(root: &Path) -> Result<Vec<String>> {
@@ -257,6 +375,76 @@ fn rune_names(root: &Path) -> Result<Vec<String>> {
     }
     names.sort();
     Ok(names)
+}
+
+/// Returns rune names in dependency order: a rune's build dependencies appear before the rune
+/// itself. Cycles within the tome are reported as errors.
+fn rune_names_ordered(root: &Path) -> Result<Vec<String>> {
+    let names = rune_names(root)?;
+    if names.is_empty() {
+        return Ok(names);
+    }
+
+    let target = paths::target_triple();
+    let mut metadata_map: BTreeMap<String, crate::model::PackageMetadata> = BTreeMap::new();
+    for name in &names {
+        let rune_path = root.join("runes").join(format!("{name}.rn"));
+        let metadata = EmbeddedNuRuntime
+            .package_metadata(&rune_path)
+            .with_context(|| format!("read metadata for {name}"))?;
+        metadata_map.insert(name.clone(), metadata);
+    }
+
+    // Build adjacency list: dependent -> [its dependencies within this tome]
+    let mut adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut in_degree: HashMap<String, usize> = HashMap::new();
+    for name in &names {
+        in_degree.entry(name.clone()).or_insert(0);
+    }
+    for name in &names {
+        let metadata = &metadata_map[name];
+        let build_deps = metadata.deps.build_for(&target);
+        for dep in build_deps {
+            if metadata_map.contains_key(&dep.name) {
+                adj.entry(dep.name.clone()).or_default().push(name.clone());
+                *in_degree.entry(name.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    // Kahn's algorithm
+    let mut queue: Vec<String> = names
+        .iter()
+        .filter(|n| *in_degree.get(*n).unwrap_or(&0) == 0)
+        .cloned()
+        .collect();
+    queue.sort(); // Deterministic tie-break for seeds
+    let mut ordered = Vec::new();
+    let mut idx = 0;
+    while idx < queue.len() {
+        let name = queue[idx].clone();
+        idx += 1;
+        ordered.push(name.clone());
+        if let Some(deps) = adj.get(&name) {
+            for dep in deps {
+                let count = in_degree.get_mut(dep).expect("in_degree entry");
+                *count -= 1;
+                if *count == 0 {
+                    queue.push(dep.clone());
+                }
+            }
+        }
+    }
+
+    if ordered.len() != names.len() {
+        let remaining: Vec<String> = names.into_iter().filter(|n| !ordered.contains(n)).collect();
+        bail!(
+            "build dependency cycle detected among runes: {}",
+            remaining.join(", ")
+        );
+    }
+
+    Ok(ordered)
 }
 
 fn tome_manifest_template(name: &str, description: &str) -> String {

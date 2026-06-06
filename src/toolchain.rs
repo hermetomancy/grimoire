@@ -183,25 +183,7 @@ fn find_tool(path: &std::ffi::OsStr, name: &str) -> Result<Option<PathBuf>> {
 }
 
 fn executable_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
-    #[cfg(windows)]
-    {
-        let mut candidates = vec![dir.join(name)];
-        if Path::new(name).extension().is_none() {
-            let pathext = env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
-            for ext in pathext.to_string_lossy().split(';') {
-                if ext.is_empty() {
-                    continue;
-                }
-                candidates.push(dir.join(format!("{name}{ext}")));
-            }
-        }
-        candidates
-    }
-
-    #[cfg(not(windows))]
-    {
-        vec![dir.join(name)]
-    }
+    vec![dir.join(name)]
 }
 
 fn is_executable_file(path: &Path) -> Result<bool> {
@@ -214,16 +196,10 @@ fn is_executable_file(path: &Path) -> Result<bool> {
     Ok(is_executable(&metadata))
 }
 
-#[cfg(unix)]
 fn is_executable(metadata: &fs::Metadata) -> bool {
     use std::os::unix::fs::PermissionsExt;
 
     metadata.permissions().mode() & 0o111 != 0
-}
-
-#[cfg(windows)]
-fn is_executable(_metadata: &fs::Metadata) -> bool {
-    true
 }
 
 /// Hashes the first `limit` bytes of `path` with SHA-256 and returns the hex digest.
@@ -287,13 +263,10 @@ mod tests {
 
     fn make_executable(path: &Path) {
         File::create(path).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::PermissionsExt;
 
-            let mut permissions = fs::metadata(path).unwrap().permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(path, permissions).unwrap();
-        }
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
     }
 }

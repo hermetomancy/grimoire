@@ -167,6 +167,7 @@ mod tests {
             version: "1.0.0".to_string(),
             target: None,
             store_path: None,
+            targets: Vec::new(),
             fixed_output,
             summary: None,
             bins: BTreeMap::new(),
