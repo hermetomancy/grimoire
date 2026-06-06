@@ -339,7 +339,13 @@ fn validate_tar_entries<R: std::io::Read>(tar: &mut tar::Archive<R>) -> Result<(
         }
         let entry_type = entry.header().entry_type();
         if entry_type.is_symlink() {
-            bail!("source archive contains a symlink, which is not accepted yet: {member}");
+            let link_target = entry.link_name()?.unwrap_or_default();
+            if !archive::validate_symlink_target(&entry.path()?, &link_target) {
+                bail!(
+                    "source archive contains unsafe symlink: {member} -> {}",
+                    link_target.display()
+                );
+            }
         }
         if entry_type.is_hard_link() {
             bail!("source archive contains a hard link, which is not accepted yet: {member}");

@@ -403,16 +403,22 @@ fn rune_names_ordered(root: &Path) -> Result<Vec<String>> {
         let metadata = EmbeddedNuRuntime
             .package_metadata(&rune_path)
             .with_context(|| format!("read metadata for {name}"))?;
+        // Skip runes that explicitly declare targets and don't include the current one.
+        if !metadata.targets.is_empty() && !metadata.targets.contains(&target) {
+            continue;
+        }
         metadata_map.insert(name.clone(), metadata);
     }
+
+    let filtered_names: Vec<String> = metadata_map.keys().cloned().collect();
 
     // Build adjacency list: dependent -> [its dependencies within this tome]
     let mut adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut in_degree: HashMap<String, usize> = HashMap::new();
-    for name in &names {
+    for name in &filtered_names {
         in_degree.entry(name.clone()).or_insert(0);
     }
-    for name in &names {
+    for name in &filtered_names {
         let metadata = &metadata_map[name];
         let build_deps = metadata.deps.build_for(&target);
         for dep in build_deps {
@@ -424,7 +430,7 @@ fn rune_names_ordered(root: &Path) -> Result<Vec<String>> {
     }
 
     // Kahn's algorithm
-    let mut queue: Vec<String> = names
+    let mut queue: Vec<String> = filtered_names
         .iter()
         .filter(|n| *in_degree.get(*n).unwrap_or(&0) == 0)
         .cloned()
@@ -447,8 +453,11 @@ fn rune_names_ordered(root: &Path) -> Result<Vec<String>> {
         }
     }
 
-    if ordered.len() != names.len() {
-        let remaining: Vec<String> = names.into_iter().filter(|n| !ordered.contains(n)).collect();
+    if ordered.len() != filtered_names.len() {
+        let remaining: Vec<String> = filtered_names
+            .into_iter()
+            .filter(|n| !ordered.contains(n))
+            .collect();
         bail!(
             "build dependency cycle detected among runes: {}",
             remaining.join(", ")
