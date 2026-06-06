@@ -924,6 +924,19 @@ fn capture_signer(
     let sets_match =
         existing.len() == advertised.len() && existing.iter().all(|k| advertised.contains(k));
     if !sets_match {
+        // Graceful key rotation: accept the new signers if the manifest is signed by the
+        // currently pinned keys. This lets a tome owner rotate keys without requiring every
+        // user to manually remove and re-add the tome.
+        let manifest_path = cache.join("tome.rn");
+        if signing::verify_detached(&manifest_path, existing).is_ok() {
+            report(&format!(
+                "tome `{}` rotated signing keys ({} -> {})",
+                tome.name,
+                existing.len(),
+                advertised.len()
+            ));
+            return Ok(advertised);
+        }
         bail!(
             "tome `{}` now advertises a different set of signing keys than the one pinned on \
              first use; refusing. Remove and re-add the tome to trust the new keys.",
