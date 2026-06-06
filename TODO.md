@@ -23,7 +23,7 @@ execution-time capabilities rather than direct binaries on PATH.
   `unshare(CLONE_NEWNS)` + recursive bind mounts. No external dependencies,
   no root required on normal Linux kernels.
 - New `src/cli.rs` subcommand: `grm fhs-run`.
-- New `tome-core/runes/fhs-compat.rn`: a baseline FHS tree package that
+- New `tome-core/runes/toolchain-wrappers.rn`: compiler toolchain wrapper scripts that
   symlinks glibc and core libraries from other core packages into a staging
   directory.
 

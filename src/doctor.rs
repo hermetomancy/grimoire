@@ -14,11 +14,11 @@ const CORE_USERLAND_TOOLS_LINUX: &[&str] = &[
     "llvm",
     "clang",
     "make",
-    "fhs-compat",
+    "toolchain-wrappers",
 ];
 
 const CORE_USERLAND_TOOLS_NON_LINUX: &[&str] =
-    &["llvm", "clang", "compiler-rt", "make", "fhs-compat"];
+    &["llvm", "clang", "compiler-rt", "make", "toolchain-wrappers"];
 
 fn core_userland_tools() -> &'static [&'static str] {
     if paths::target_triple().starts_with("linux-") {
