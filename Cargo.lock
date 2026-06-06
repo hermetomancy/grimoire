@@ -2485,6 +2485,7 @@ dependencies = [
  "flate2",
  "fs4",
  "gix",
+ "hex",
  "indicatif 0.17.11",
  "libc",
  "minisign",

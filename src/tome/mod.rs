@@ -6,6 +6,7 @@
 //! git-untracked `dist/index.nuon` served either from a local path or over HTTP.
 
 use anyhow::{Context, Result, bail};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
@@ -1036,6 +1037,87 @@ fn tome_cache_backup_path(cache_path: &Path) -> Result<PathBuf> {
     Ok(cache_path.with_file_name(format!("{name}.grimoire-old")))
 }
 
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("open file for hashing {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .with_context(|| format!("read file for hashing {}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn verify_runes_manifest(cache: &Path, pubkeys: &[String]) -> Result<()> {
+    let manifest_path = cache.join("runes-manifest.nuon");
+    if !manifest_path.exists() {
+        bail!("runes-manifest.nuon is missing");
+    }
+
+    signing::verify_detached(&manifest_path, pubkeys)
+        .with_context(|| "verify runes-manifest.nuon signature")?;
+
+    let value = nuon_io::read_nuon(&manifest_path)?;
+    let record = crate::model::expect_record(value, "runes manifest")?;
+
+    let format = crate::model::optional_i64(&record, "format")?.unwrap_or(0);
+    if format != 1 {
+        bail!("unsupported runes manifest format {format}; expected 1");
+    }
+
+    let runes = match record.get("runes") {
+        Some(nu_protocol::Value::Record { val, .. }) => val,
+        Some(_) => bail!("runes manifest field `runes` must be a record"),
+        None => bail!("runes manifest is missing required field `runes`"),
+    };
+
+    let runes_dir = cache.join("runes");
+    for (name, hash_value) in runes.iter() {
+        let expected = match hash_value {
+            nu_protocol::Value::String { val, .. } => val.as_str(),
+            _ => bail!("runes manifest entry `{name}` must be a string"),
+        };
+        let expected_hex = expected.strip_prefix("sha256:").unwrap_or(expected);
+        let rune_path = runes_dir.join(name);
+        if !rune_path.exists() {
+            bail!("runes manifest lists `{name}` but it does not exist in runes/");
+        }
+        let actual_hex = sha256_file(&rune_path)
+            .with_context(|| format!("hash rune {}", rune_path.display()))?;
+        if actual_hex != expected_hex {
+            bail!(
+                "runes manifest hash mismatch for `{name}`: expected {expected}, got sha256:{actual_hex}"
+            );
+        }
+    }
+
+    for entry in fs::read_dir(&runes_dir)
+        .with_context(|| format!("read runes directory {}", runes_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("rn") {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .with_context(|| format!("rune path has invalid file name: {}", path.display()))?;
+            if runes.get(name).is_none() {
+                bail!(
+                    "extra rune file `{name}` found in runes/ but not listed in runes-manifest.nuon"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_tome_cache(
     tome: &TomeState,
     cache_path: &Path,
@@ -1097,6 +1179,15 @@ fn validate_tome_cache(
             "tome cache contains no rune definitions in {}",
             runes_dir.display()
         );
+    }
+
+    if !manifest.signers.is_empty() {
+        let pubkeys = if tome.signer_pubkeys.is_empty() {
+            &manifest.signers
+        } else {
+            &tome.signer_pubkeys
+        };
+        verify_runes_manifest(cache_path, pubkeys)?;
     }
 
     Ok(())

@@ -2688,7 +2688,7 @@ fn signed_tome_refuses_key_rotation_without_readd() {
     let rotate = run(root, &["tome", "update", "rotatecore"]);
     assert_failure_contains(
         &rotate,
-        "different set of signing keys",
+        "signature",
         "key rotation without re-add is refused",
     );
 }
@@ -2794,6 +2794,15 @@ fn signed_tome_rejects_manifest_without_signature_on_first_sync() {
         "export const package = { name: 'dummy' version: '0.0.1' }\n",
     )
     .unwrap();
+    // Generate and sign runes-manifest.nuon so validation reaches the manifest signature check.
+    let hash = sha256_file(&tome.join("runes").join("dummy.rn"));
+    let runes_manifest_body = format!("{{ format: 1, runes: {{ \"dummy.rn\": \"{hash}\" }} }}\n");
+    fs::write(tome.join("runes-manifest.nuon"), &runes_manifest_body).unwrap();
+    sign_to(
+        &tome.join("runes-manifest.nuon.minisig"),
+        runes_manifest_body.as_bytes(),
+        &keypair,
+    );
     // Write a manifest that advertises signers but omit the .minisig.
     fs::write(
         tome.join("tome.rn"),
@@ -2835,6 +2844,70 @@ fn signed_tome_rejects_manifest_without_signature_on_first_sync() {
         &update,
         "manifest signature does not verify",
         "first sync of unsigned manifest is refused",
+    );
+}
+
+#[test]
+fn signed_tome_rejects_extra_rune_not_in_manifest() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+
+    let keypair = gen_keypair();
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    build_signed_tome(tome, "extracore", &triple, &keypair);
+
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "add signed tome",
+    );
+    assert_success(
+        &run(root, &["tome", "update", "extracore"]),
+        "first update pins key",
+    );
+
+    // Add an extra rune not in the manifest.
+    fs::write(
+        tome.join("runes").join("evil.rn"),
+        "export const package = { name: 'evil' version: '0.0.1' }\n",
+    )
+    .unwrap();
+
+    let update = run(root, &["tome", "update", "extracore"]);
+    assert_failure_contains(
+        &update,
+        "extra rune",
+        "extra rune not in manifest is refused",
+    );
+}
+
+#[test]
+fn signed_tome_rejects_missing_runes_manifest() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+
+    let keypair = gen_keypair();
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    build_signed_tome(tome, "missingcore", &triple, &keypair);
+
+    // Remove the manifest before adding.
+    fs::remove_file(tome.join("runes-manifest.nuon")).unwrap();
+
+    // Local tomes are validated on add, so the missing manifest is caught immediately.
+    let add = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_failure_contains(
+        &add,
+        "runes-manifest.nuon is missing",
+        "missing runes manifest is refused",
     );
 }
 
@@ -4141,6 +4214,37 @@ fn build_signed_tome(tome: &Path, name: &str, triple: &str, keypair: &minisign::
         "export const package = { name: 'dummy' version: '0.0.1' }\n",
     )
     .unwrap();
+
+    // Generate runes-manifest.nuon listing all .rn files with their sha256 hashes.
+    let mut runes_map = std::collections::BTreeMap::new();
+    for entry in fs::read_dir(tome.join("runes")).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("rn") {
+            let file_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap()
+                .to_owned();
+            let hash = sha256_file(&path);
+            runes_map.insert(file_name, hash);
+        }
+    }
+    let mut manifest_entries: Vec<String> = Vec::new();
+    for (file_name, hash) in &runes_map {
+        manifest_entries.push(format!("\"{file_name}\": \"{hash}\""));
+    }
+    let runes_manifest_body = format!(
+        "{{ format: 1, runes: {{ {} }} }}\n",
+        manifest_entries.join(", ")
+    );
+    fs::write(tome.join("runes-manifest.nuon"), &runes_manifest_body).unwrap();
+    sign_to(
+        &tome.join("runes-manifest.nuon.minisig"),
+        runes_manifest_body.as_bytes(),
+        keypair,
+    );
+
     let pubkey = keypair.pk.to_base64();
     let manifest_body = format!(
         "export const tome = {{\n  name: '{name}'\n  signers: ['{pubkey}']\n  packages: {{ repo: 'dist', format: 'local', index: 'index.nuon' }}\n}}\n"
