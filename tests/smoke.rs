@@ -2544,6 +2544,89 @@ fn signed_tome_refuses_key_rotation_without_readd() {
 }
 
 #[test]
+fn signed_tome_allows_graceful_key_rotation() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+
+    let key_a = gen_keypair();
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    build_signed_tome(tome, "rotatecore", &triple, &key_a);
+
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "add signed tome",
+    );
+    assert_success(
+        &run(root, &["tome", "update", "rotatecore"]),
+        "pin key A on first update",
+    );
+
+    // Graceful rotation: change signers to key B, but sign the manifest with key A
+    // (the currently pinned key) to authorize the rotation.
+    let key_b = gen_keypair();
+    let pubkey_b = key_b.pk.to_base64();
+    let manifest_body = format!(
+        "export const tome = {{\n  name: 'rotatecore'\n  signers: ['{pubkey_b}']\n  packages: {{ repo: 'dist', format: 'local', index: 'index.nuon' }}\n}}\n"
+    );
+    fs::write(tome.join("tome.rn"), &manifest_body).unwrap();
+    sign_to(
+        &tome.join("tome.rn.minisig"),
+        manifest_body.as_bytes(),
+        &key_a,
+    );
+
+    // Rebuild archive and index, signing the archive with the NEW key (key_b).
+    let dist = tome.join("dist");
+    let archive_name = format!("sgnpkg-0.1.0-{triple}.tar.zst");
+    let archive = make_versioned_archive(
+        &dist.join(&archive_name),
+        "sgnpkg",
+        "0.1.0",
+        &triple,
+        "#!/usr/bin/env sh\nprintf 'signed\n'\n",
+    );
+    let hash = sha256_file(&archive);
+    let index_body = format!(
+        "{{\n  format: 2,\n    entries: {{\n    \"cafef00dcafef00d\": {{ name: \"sgnpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", runtime_deps: []}}\n  }}\n}}\n"
+    );
+    fs::write(dist.join("index.nuon"), &index_body).unwrap();
+    sign_to(
+        &dist.join(format!("{archive_name}.minisig")),
+        &fs::read(&archive).unwrap(),
+        &key_b,
+    );
+
+    // Update should succeed because the old key authorized the rotation.
+    let rotate = run(root, &["tome", "update", "rotatecore"]);
+    assert_success(&rotate, "graceful key rotation should succeed");
+    let rotate_text = format!("{}{}", stdout(&rotate), stderr(&rotate));
+    assert!(
+        rotate_text.contains("rotated signing keys"),
+        "update should report key rotation: {rotate_text}"
+    );
+
+    // The new key is now pinned.
+    let state =
+        fs::read_to_string(root.join("state").join("tomes").join("rotatecore.nuon")).unwrap();
+    assert!(
+        state.contains(&pubkey_b),
+        "state should record the new key after rotation: {state}"
+    );
+
+    // Installing from the tome should also succeed because the archive is signed with the new key.
+    assert_success(
+        &run(root, &["install", "sgnpkg"]),
+        "install from rotated tome",
+    );
+    assert_eq!(stdout(&run_shim(root, "sgnpkg")).trim(), "signed");
+}
+
+#[test]
 fn signed_tome_rejects_manifest_without_signature_on_first_sync() {
     let root = TempDir::new().unwrap();
     let root = root.path();
