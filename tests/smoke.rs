@@ -2544,6 +2544,68 @@ fn signed_tome_refuses_key_rotation_without_readd() {
 }
 
 #[test]
+fn signed_tome_rejects_manifest_without_signature_on_first_sync() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+
+    let keypair = gen_keypair();
+    let pubkey = keypair.pk.to_base64();
+
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    fs::create_dir_all(tome.join("dist")).unwrap();
+    fs::create_dir_all(tome.join("runes")).unwrap();
+    fs::write(
+        tome.join("runes").join("dummy.rn"),
+        "export const package = { name: 'dummy' version: '0.0.1' }\n",
+    )
+    .unwrap();
+    // Write a manifest that advertises signers but omit the .minisig.
+    fs::write(
+        tome.join("tome.rn"),
+        format!(
+            "export const tome = {{\n  name: 'unsignedmanifest'\n  signers: ['{pubkey}']\n  packages: {{ repo: 'dist', format: 'local', index: 'index.nuon' }}\n}}\n"
+        ),
+    )
+    .unwrap();
+
+    let dist = tome.join("dist");
+    let archive_name = format!("sgnpkg-0.1.0-{triple}.tar.zst");
+    let archive = make_versioned_archive(
+        &dist.join(&archive_name),
+        "sgnpkg",
+        "0.1.0",
+        &triple,
+        "#!/usr/bin/env sh\nprintf 'signed\n'",
+    );
+    let hash = sha256_file(&archive);
+    let index_body = format!(
+        "{{\n  format: 2,\n    entries: {{\n    \"cafef00dcafef00d\": {{ name: \"sgnpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", runtime_deps: []}}\n  }}\n}}\n"
+    );
+    fs::write(dist.join("index.nuon"), &index_body).unwrap();
+    sign_to(
+        &dist.join(format!("{archive_name}.minisig")),
+        &fs::read(&archive).unwrap(),
+        &keypair,
+    );
+
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "add signed tome without manifest signature",
+    );
+    let update = run(root, &["tome", "update", "unsignedmanifest"]);
+    assert_failure_contains(
+        &update,
+        "manifest signature does not verify",
+        "first sync of unsigned manifest is refused",
+    );
+}
+
+#[test]
 fn unsigned_tome_leaves_no_pin() {
     let root = TempDir::new().unwrap();
     let root = root.path();
@@ -3847,13 +3909,15 @@ fn build_signed_tome(tome: &Path, name: &str, triple: &str, keypair: &minisign::
     )
     .unwrap();
     let pubkey = keypair.pk.to_base64();
-    fs::write(
-        tome.join("tome.rn"),
-        format!(
-            "export const tome = {{\n  name: '{name}'\n  signers: ['{pubkey}']\n  packages: {{ repo: 'dist', format: 'local', index: 'index.nuon' }}\n}}\n"
-        ),
-    )
-    .unwrap();
+    let manifest_body = format!(
+        "export const tome = {{\n  name: '{name}'\n  signers: ['{pubkey}']\n  packages: {{ repo: 'dist', format: 'local', index: 'index.nuon' }}\n}}\n"
+    );
+    fs::write(tome.join("tome.rn"), &manifest_body).unwrap();
+    sign_to(
+        &tome.join("tome.rn.minisig"),
+        manifest_body.as_bytes(),
+        keypair,
+    );
 
     let dist = tome.join("dist");
     let archive_name = format!("sgnpkg-0.1.0-{triple}.tar.zst");

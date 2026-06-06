@@ -886,7 +886,7 @@ fn parse_resolved_index(
 /// - an unsigned tome → stays unpinned.
 fn capture_signer(
     tome: &TomeState,
-    _cache: &Path,
+    cache: &Path,
     manifest: &TomeManifest,
     existing: &[String],
 ) -> Result<Vec<String>> {
@@ -905,6 +905,13 @@ fn capture_signer(
     }
 
     if existing.is_empty() && !advertised.is_empty() {
+        let manifest_path = cache.join("tome.rn");
+        if let Err(err) = signing::verify_detached(&manifest_path, &advertised) {
+            bail!(
+                "tome `{}` manifest signature does not verify: {err}",
+                tome.name
+            );
+        }
         report(&format!(
             "pinned {} signer(s) for tome `{}` (trust on first use)",
             advertised.len(),
