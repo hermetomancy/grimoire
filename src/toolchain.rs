@@ -1,6 +1,6 @@
 //! Host compiler-boundary discovery for strict managed source builds.
 //!
-//! Grimoire-managed build dependencies provide the normal userland (`make`, `sh`, `sed`, ...).
+//! Grimoire-managed build dependencies provide the normal userland (`make`, `sh`, etc.).
 //! Until `core` carries a relocatable compiler toolchain, source builds may fall back only to an
 //! explicit host compiler boundary discovered from `PATH` without spawning any tools.
 

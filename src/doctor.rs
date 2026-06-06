@@ -7,15 +7,33 @@ use anyhow::{Context, Result};
 
 use crate::{install, lock, paths, profile, tome, toolchain};
 
-const CORE_USERLAND_TOOLS: &[&str] = &[
-    "bash",
+const CORE_USERLAND_TOOLS_LINUX: &[&str] = &[
+    "linux-headers",
+    "musl",
+    "compiler-rt",
+    "llvm",
+    "clang",
     "make",
-    "coreutils",
-    "sed",
-    "grep",
-    "gawk",
-    "diffutils",
+    "busybox",
+    "fhs-compat",
 ];
+
+const CORE_USERLAND_TOOLS_NON_LINUX: &[&str] = &[
+    "llvm",
+    "clang",
+    "compiler-rt",
+    "make",
+    "busybox",
+    "fhs-compat",
+];
+
+fn core_userland_tools() -> &'static [&'static str] {
+    if paths::target_triple().starts_with("linux-") {
+        CORE_USERLAND_TOOLS_LINUX
+    } else {
+        CORE_USERLAND_TOOLS_NON_LINUX
+    }
+}
 
 /// Reports Grimoire's environment and validates local state. Health results (counts, the
 /// environment summary) go to stdout; per-item problems go to stderr (AGENTS.md §7). A clean
@@ -68,26 +86,28 @@ fn check_source_build_readiness() -> Result<usize> {
 }
 
 fn report_managed_core_readiness() -> Result<()> {
+    let tools = core_userland_tools();
     let missing = missing_core_tools()?;
-    let installed = CORE_USERLAND_TOOLS.len() - missing.len();
+    let installed = tools.len() - missing.len();
     if missing.is_empty() {
         println!(
-            "managed core userland: ready ({installed}/{})",
-            CORE_USERLAND_TOOLS.len()
+            "managed core userland: ready ({installed}/{total})",
+            total = tools.len()
         );
     } else {
         println!(
-            "managed core userland: incomplete ({installed}/{}, missing {})",
-            CORE_USERLAND_TOOLS.len(),
-            missing.join(", ")
+            "managed core userland: incomplete ({installed}/{total}, missing {missing})",
+            total = tools.len(),
+            missing = missing.join(", ")
         );
     }
     Ok(())
 }
 
 fn missing_core_tools() -> Result<Vec<String>> {
+    let tools = core_userland_tools();
     let states = install::installed_states()?;
-    Ok(CORE_USERLAND_TOOLS
+    Ok(tools
         .iter()
         .filter(|name| !states.iter().any(|state| state.name == **name))
         .map(|name| (*name).to_owned())
