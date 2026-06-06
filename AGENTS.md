@@ -115,8 +115,9 @@ These must never be regressed:
 Grimoire is **POSIX-only**: Linux, macOS, FreeBSD. No `#[cfg(windows)]` code.
 
 The bootstrap depends on a POSIX userland at `/usr/bin` and `/bin`. Default target triples are
-`linux-x86_64-gnu`, `linux-aarch64-gnu`, `macos-x86_64-darwin`, `macos-aarch64-darwin`,
-`freebsd-x86_64-unknown`, and `freebsd-aarch64-unknown`.
+`linux-x86_64-musl`, `linux-aarch64-musl`, `macos-x86_64-darwin`, `macos-aarch64-darwin`,
+`freebsd-x86_64-unknown`, and `freebsd-aarch64-unknown`. The `-gnu` Linux variants remain
+supported via explicit `--target` but are no longer the default.
 
 ## 11. CLI and user-facing output
 

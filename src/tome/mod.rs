@@ -191,13 +191,19 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
     // build records every package atomically rather than rewriting the file per rune.
     // In `--all` mode, each built package is also installed store-only so subsequent runes can
     // depend on it as a build dependency without requiring a pre-installed userland.
-    let target = paths::target_triple();
     for name in &rune_names {
-        let (store_hash, entry, archive) = build_rune_into(root, name, &dist_dir, args.bootstrap)?;
+        let (store_hash, entry, archive) = build_rune_into(
+            root,
+            name,
+            &dist_dir,
+            args.bootstrap,
+            args.target.as_deref(),
+        )?;
         report(&format!(
-            "built {} {} ({target}) into {}",
+            "built {} {} ({}) into {}",
             entry.name,
             entry.version,
+            entry.target,
             archive.display()
         ));
         if args.all {
@@ -224,6 +230,7 @@ fn build_rune_into(
     name: &str,
     dist_dir: &Path,
     bootstrap: bool,
+    target: Option<&str>,
 ) -> Result<(String, IndexEntry, PathBuf)> {
     validate_package_name(name)?;
     let rune_path = root.join("runes").join(format!("{name}.rn"));
@@ -232,7 +239,7 @@ fn build_rune_into(
     }
 
     let result =
-        crate::build::build_package(&rune_path.to_string_lossy(), dist_dir, bootstrap, None)?;
+        crate::build::build_package(&rune_path.to_string_lossy(), dist_dir, bootstrap, target)?;
     let archive_hash = crate::archive::archive_hash(&result.archive)?;
     let archive_file = result
         .archive
@@ -246,10 +253,11 @@ fn build_rune_into(
         })?;
 
     let metadata = EmbeddedNuRuntime.package_metadata(&rune_path)?;
+    let resolved_target = target.map_or_else(paths::target_triple, |t| t.to_string());
     let entry = IndexEntry {
         name: metadata.name.clone(),
         version: metadata.version.clone(),
-        target: paths::target_triple(),
+        target: resolved_target,
         archive: archive_file.to_owned(),
         archive_hash,
         runtime_deps: metadata.deps.runtime.clone(),

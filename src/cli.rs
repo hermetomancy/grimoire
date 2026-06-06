@@ -291,6 +291,9 @@ pub struct TomeBuildArgs {
     /// Allow host build-tool discovery instead of using only the grimoire-managed toolchain.
     #[arg(long)]
     pub bootstrap: bool,
+    /// Target triple to build for (defaults to the host target).
+    #[arg(short, long)]
+    pub target: Option<String>,
     /// Rebuild the binary package index (`index.nuon`) from existing archives in `dist/`
     /// without building any packages.
     #[arg(long, conflicts_with_all = ["package", "all"])]
