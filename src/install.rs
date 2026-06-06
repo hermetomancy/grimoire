@@ -84,6 +84,13 @@ pub fn install(args: InstallArgs) -> Result<()> {
     if let Some(msg) = paths::fixed_store_setup_instructions() {
         bail!("{msg}");
     }
+    if args.packages.is_empty() {
+        bail!("specify at least one package to install");
+    }
+    if args.sha256.is_some() && args.packages.len() > 1 {
+        bail!("--sha256 is only valid when installing a single local archive");
+    }
+
     let pins = if args.locked {
         Some(load_pins()?)
     } else {
@@ -98,12 +105,14 @@ pub fn install(args: InstallArgs) -> Result<()> {
 
     let mut installer = Installer::new(installed, pins).with_dry_run(args.dry_run);
 
-    if args.from_source || args.package.ends_with(".rn") {
-        installer.install_source_root(&args.package)?;
-    } else if PathBuf::from(&args.package).exists() || args.package.ends_with(".tar.zst") {
-        installer.install_local_root(&args.package, args.sha256.clone())?;
-    } else {
-        installer.install_named(&args.package)?;
+    for package in &args.packages {
+        if args.from_source || package.ends_with(".rn") {
+            installer.install_source_root(package)?;
+        } else if PathBuf::from(package).exists() || package.ends_with(".tar.zst") {
+            installer.install_local_root(package, args.sha256.clone())?;
+        } else {
+            installer.install_named(package)?;
+        }
     }
 
     if args.dry_run {
@@ -114,10 +123,8 @@ pub fn install(args: InstallArgs) -> Result<()> {
     // reported anything. Tell the user the request was a no-op rather than printing silence.
     // Skip creating a new generation when nothing actually changed.
     if installer.installed_now.is_empty() {
-        report(&format!(
-            "{} is already installed and up to date",
-            args.package
-        ));
+        let names = args.packages.join(", ");
+        report(&format!("{names} already installed and up to date"));
         return Ok(());
     }
     installer.finalize()?;
@@ -665,11 +672,23 @@ pub fn list() -> Result<()> {
 /// Marks `name` as held so `grm upgrade` skips it. Idempotent: holding a held package is a
 /// no-op that still reports success. Fails when the package is not installed.
 pub fn hold(args: PackageArg) -> Result<()> {
-    set_hold(&args.package, true)
+    if args.packages.is_empty() {
+        bail!("specify at least one package to hold");
+    }
+    for package in &args.packages {
+        set_hold(package, true)?;
+    }
+    Ok(())
 }
 
 pub fn unhold(args: PackageArg) -> Result<()> {
-    set_hold(&args.package, false)
+    if args.packages.is_empty() {
+        bail!("specify at least one package to unhold");
+    }
+    for package in &args.packages {
+        set_hold(package, false)?;
+    }
+    Ok(())
 }
 
 fn set_hold(name: &str, held: bool) -> Result<()> {
@@ -855,9 +874,17 @@ pub fn remove(args: PackageArg) -> Result<()> {
     if let Some(msg) = paths::fixed_store_setup_instructions() {
         bail!("{msg}");
     }
-    let removed = remove_one(&args.package)?;
-    report(&format!("removed {}", args.package));
-    autoremove_orphans(removed.runtime_deps)?;
+    if args.packages.is_empty() {
+        bail!("specify at least one package to remove");
+    }
+
+    let mut all_runtime_deps = Vec::new();
+    for package in &args.packages {
+        let removed = remove_one(package)?;
+        report(&format!("removed {package}"));
+        all_runtime_deps.extend(removed.runtime_deps);
+    }
+    autoremove_orphans(all_runtime_deps)?;
     let states = installed_states()?;
     profile::rebuild_and_activate(&states)?;
     Ok(())

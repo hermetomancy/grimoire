@@ -730,11 +730,11 @@ fn command_parsing() {
     let remove = run(root, &["tome", "remove", "tome-example"]);
     assert_success(&remove, "remove tome-example tome");
 
-    let extra = run(root, &["install", "hello", "extra"]);
+    let extra = run(root, &["build", "./tome-example/runes/hello.rn", "extra"]);
     assert_failure_contains(
         &extra,
         "unexpected argument 'extra' found",
-        "reject extra install argument",
+        "reject extra build argument",
     );
 
     let unknown = run(root, &["doctor", "--unknown"]);

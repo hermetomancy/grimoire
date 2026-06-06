@@ -125,7 +125,9 @@ fn run(cli: Cli) -> Result<()> {
             cli::AddendumCommand::Update(args) => addendum::update(args),
         },
         Command::StoreHash(args) => {
-            println!("{}", closure::store_hash(&args.package)?);
+            for package in &args.packages {
+                println!("{}", closure::store_hash(package)?);
+            }
             Ok(())
         }
         Command::Completions(args) => man::completions(args),

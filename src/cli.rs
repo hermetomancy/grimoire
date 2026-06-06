@@ -162,16 +162,18 @@ pub struct BuildArgs {
 
 #[derive(Debug, Args)]
 pub struct InstallArgs {
-    /// Package to install: a bare name (resolved from tomes, preferring a verified binary
-    /// archive for this target), a path to a local `.tar.zst` archive, or a `.rn` rune to
+    /// Packages to install: bare names (resolved from tomes, preferring verified binary
+    /// archives for this target), paths to local `.tar.zst` archives, or `.rn` runes to
     /// build from source. Runtime dependencies are installed automatically.
-    pub package: String,
+    #[arg(num_args = 1..)]
+    pub packages: Vec<String>,
     /// Build from source even when a pre-built binary archive is available. Build
     /// dependencies are installed first.
     #[arg(short = 's', long)]
     pub from_source: bool,
     /// Expected archive hash (`sha256:<hex>` or bare hex). When set, the archive is verified
-    /// against it before being read or extracted; a mismatch is a hard failure.
+    /// against it before being read or extracted; a mismatch is a hard failure. Only valid
+    /// when installing a single local archive.
     #[arg(long = "sha256")]
     pub sha256: Option<String>,
     /// Reproduce the install recorded in `grimoire.lock.nuon`: every package in the resolved
@@ -188,8 +190,9 @@ pub struct InstallArgs {
 
 #[derive(Debug, Args)]
 pub struct PackageArg {
-    /// Name of the installed package to operate on.
-    pub package: String,
+    /// Names of the installed packages to operate on.
+    #[arg(num_args = 1..)]
+    pub packages: Vec<String>,
 }
 
 #[derive(Debug, Args)]
