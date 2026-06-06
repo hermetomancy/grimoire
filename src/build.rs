@@ -37,7 +37,6 @@ const CORE_TOOLCHAIN_PACKAGES: &[&str] = &[
     "llvm",
     "clang",
     "make",
-    "busybox",
     "fhs-compat",
 ];
 

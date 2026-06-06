@@ -27,18 +27,10 @@ fn core_readiness_packages() -> &'static [&'static str] {
             "llvm",
             "clang",
             "make",
-            "busybox",
             "fhs-compat",
         ]
     } else {
-        &[
-            "llvm",
-            "clang",
-            "compiler-rt",
-            "make",
-            "busybox",
-            "fhs-compat",
-        ]
+        &["llvm", "clang", "compiler-rt", "make", "fhs-compat"]
     }
 }
 
