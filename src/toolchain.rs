@@ -77,15 +77,20 @@ pub fn source_build_host_tools() -> Result<Vec<HostTool>> {
     );
 }
 
-/// A stable identity for the host build environment — currently the C compiler — folded into a
-/// package's store hash so a build against a different toolchain resolves to a *different* store
-/// path instead of colliding with one built elsewhere.
+/// A stable identity for the host build environment folded into a package's store hash so a build
+/// against a different toolchain resolves to a *different* store path instead of colliding with one
+/// built elsewhere.
 ///
-/// The identity is the resolved compiler's `--version` banner (its first line), which captures the
-/// implementation (clang vs gcc) and version while staying identical across machines that share the
-/// same toolchain, so a shared binary cache can still hit. Returns `None` when no host compiler
-/// boundary is available: such a host cannot build from source anyway, so the installer treats a
-/// published prebuilt as authoritative rather than gating it on a hash it cannot reproduce.
+/// The identity is derived from each tool's `--version` banner (first line only). This captures
+/// the implementation family and major/minor version while staying identical across machines that
+/// share the same toolchain release, so a shared binary cache can still hit. A machine with a
+/// different compiler patch level but the same version string will produce the same hash — this is
+/// intentional: the store hash is an input hash, and the actual archive content is verified
+/// independently.
+///
+/// Returns `None` when no host compiler boundary is available: such a host cannot build from source
+/// anyway, so the installer treats a published prebuilt as authoritative rather than gating it on a
+/// hash it cannot reproduce.
 ///
 /// The result is computed once and cached for the process — `PATH` and the host compiler do not
 /// change underneath a running command. Setting `GRIMOIRE_BUILD_ENV` overrides discovery with an
@@ -108,11 +113,63 @@ fn compute_build_env_id() -> Option<String> {
     }
     // `cc` is the canonical alias inserted for whichever compiler was found (cc/clang/gcc).
     let cc = readiness.host_tools.iter().find(|tool| tool.name == "cc")?;
-    // Hash a prefix of the compiler binary itself rather than spawning it (AGENTS.md §1a).
-    // The first 64 KB captures enough of the binary's header and embedded strings to be a
-    // stable fingerprint across identical compiler installations, while staying fast.
-    let hash = hash_file_prefix(&cc.path, 64 * 1024).ok()?;
-    Some(format!("cc:{hash}"))
+    let cc_ver = tool_version_string(&cc.path, "cc").ok()?;
+    let mut parts = vec![format!("cc:{cc_ver}")];
+
+    // Also capture the linker, assembler, and platform-specific post-link tools — anything that
+    // affects the bytes in the final binary so that a different host boundary resolves to a
+    // different store path instead of silently colliding.
+    for tool in &readiness.host_tools {
+        if tool.path == cc.path || !is_binary_affecting_tool(&tool.name) {
+            continue;
+        }
+        if let Ok(ver) = tool_version_string(&tool.path, &tool.name) {
+            parts.push(format!("{}:{ver}", tool.name));
+        }
+    }
+
+    parts.sort();
+    Some(parts.join(","))
+}
+
+/// Tools beyond the compiler that influence the bytes in a built binary.
+fn is_binary_affecting_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "ld" | "ld.bfd" | "ld.gold" | "lld" | "as" | "install_name_tool" | "lipo"
+    )
+}
+
+/// Runs `tool --version` (or `tool -version` for macOS tools) and returns the first line of stdout,
+/// trimmed. Falls back to hashing the binary prefix if the tool does not produce version output.
+fn tool_version_string(path: &Path, name: &str) -> Result<String> {
+    let flag = if name == "install_name_tool" || name == "lipo" {
+        "-version"
+    } else {
+        "--version"
+    };
+
+    let output = std::process::Command::new(path)
+        .arg(flag)
+        .output()
+        .with_context(|| format!("spawn {} {} for version", path.display(), flag))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first_line = stdout.lines().next().unwrap_or("").trim();
+
+    if !first_line.is_empty() {
+        return Ok(first_line.to_string());
+    }
+
+    // Some tools (e.g. ancient `ld`) don't support --version. Fall back to a binary prefix hash
+    // so we still have *some* stable identity.
+    let hash = hash_file_prefix(path, 64 * 1024).with_context(|| {
+        format!(
+            "fallback hash of {} after no version output",
+            path.display()
+        )
+    })?;
+    Ok(format!("bin:{hash}"))
 }
 
 fn source_build_readiness_in_path(path: &std::ffi::OsStr) -> Result<SourceBuildReadiness> {

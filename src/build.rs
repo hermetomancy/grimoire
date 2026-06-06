@@ -41,6 +41,7 @@ pub fn build(args: BuildArgs) -> Result<()> {
 
 pub fn build_package(package: &str, output: &Path, bootstrap: bool) -> Result<BuildResult> {
     let rune = resolve_rune(package)?;
+    tome::verify_rune(&rune).with_context(|| format!("verify rune signature for {package}"))?;
     let store_hash = crate::closure::store_hash_for_rune(&rune)?;
     let metadata = EmbeddedNuRuntime.package_metadata(&rune)?;
     let build_deps = metadata.deps.build_for(&paths::target_triple());

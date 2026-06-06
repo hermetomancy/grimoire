@@ -434,8 +434,8 @@ fn link_package_into_generation(state: &PackageState, gen_dir: &Path) -> Result<
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::hard_link(&src, &dst)
-            .with_context(|| format!("hard link {} -> {}", dst.display(), src.display()))?;
+        clone_or_hard_link(&src, &dst)
+            .with_context(|| format!("link {} -> {}", dst.display(), src.display()))?;
     }
 
     // Scan share/ subdirectories for human-facing artifacts (man pages, completions, etc.)
@@ -448,6 +448,79 @@ fn link_package_into_generation(state: &PackageState, gen_dir: &Path) -> Result<
         link_tree(&src, &dst)?;
     }
     Ok(())
+}
+
+/// Try a CoW clone (APFS `clonefile` on macOS, `FICLONE` on Linux), falling back to a hard link
+/// when the filesystem or platform does not support it.
+fn clone_or_hard_link(src: &Path, dst: &Path) -> Result<()> {
+    if let Err(e) = try_cow_clone(src, dst) {
+        if !is_cow_unsupported(&e) {
+            return Err(e);
+        }
+    } else {
+        return Ok(());
+    }
+    fs::hard_link(src, dst)
+        .with_context(|| format!("hard link {} -> {}", dst.display(), src.display()))
+}
+
+/// Whether an error indicates that CoW cloning is unsupported on this filesystem.
+fn is_cow_unsupported(err: &anyhow::Error) -> bool {
+    if let Some(io_err) = err.root_cause().downcast_ref::<std::io::Error>() {
+        matches!(
+            io_err.raw_os_error(),
+            Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP) | Some(libc::EINVAL)
+        )
+    } else {
+        false
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn try_cow_clone(src: &Path, dst: &Path) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let src_c = std::ffi::CString::new(src.as_os_str().as_bytes())
+        .with_context(|| format!("convert src path to C string: {}", src.display()))?;
+    let dst_c = std::ffi::CString::new(dst.as_os_str().as_bytes())
+        .with_context(|| format!("convert dst path to C string: {}", dst.display()))?;
+    let rc = unsafe { libc::clonefile(src_c.as_ptr(), dst_c.as_ptr(), 0) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().into())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn try_cow_clone(src: &Path, dst: &Path) -> Result<()> {
+    use std::os::unix::io::AsRawFd;
+
+    let src_file =
+        fs::File::open(src).with_context(|| format!("open src for reflink: {}", src.display()))?;
+    let dst_file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(dst)
+        .with_context(|| format!("open dst for reflink: {}", dst.display()))?;
+
+    let src_fd = src_file.as_raw_fd();
+    let dst_fd = dst_file.as_raw_fd();
+    // FICLONE = _IOW(0x94, 9, int)
+    const FICLONE: libc::c_ulong = 0x40049409;
+
+    let rc = unsafe { libc::ioctl(dst_fd, FICLONE, src_fd) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().into())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn try_cow_clone(_src: &Path, _dst: &Path) -> Result<()> {
+    bail!("CoW cloning not supported on this platform")
 }
 
 /// Recursively hard-links files from `src` into `dst`, preserving directory structure.
@@ -472,8 +545,8 @@ fn link_tree(src: &Path, dst: &Path) -> Result<()> {
             }
             // Remove any existing file so we don't fail on collision
             let _ = fs::remove_file(&target);
-            fs::hard_link(path, &target)
-                .with_context(|| format!("hard link {} -> {}", target.display(), path.display()))?;
+            clone_or_hard_link(path, &target)
+                .with_context(|| format!("link {} -> {}", target.display(), path.display()))?;
         } else if meta.file_type().is_symlink() {
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;

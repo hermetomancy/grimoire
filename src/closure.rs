@@ -7,7 +7,7 @@
 //! `store-hash` seam. The installer derives the same address incrementally from the store hashes of
 //! the dependencies it has already installed.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -15,7 +15,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::{
     addendum, build,
     nu::runtime::{EmbeddedNuRuntime, RuneRuntime},
-    paths, store, toolchain,
+    paths, store, tome, toolchain,
 };
 
 /// Computes the content address (store hash) of the package named `name`, resolving its runtime
@@ -30,6 +30,48 @@ pub fn store_hash_for_rune(rune: &Path) -> Result<String> {
     let mut walker = Walker::new()?;
     let metadata = walker.metadata(rune)?;
     walker.of_rune(&metadata.name, rune)
+}
+
+/// Computes the store hash for a rune whose dependency closure has already been resolved.
+/// `dep_hashes` maps dependency names to their already-computed store hashes.
+/// This is used by the solver after version resolution to compute hashes eagerly.
+pub fn store_hash_for_rune_with_deps(
+    rune: &Path,
+    dep_hashes: &BTreeMap<String, String>,
+    target: &str,
+    build_env: &str,
+) -> Result<String> {
+    let mut metadata = EmbeddedNuRuntime
+        .package_metadata(rune)
+        .with_context(|| format!("read rune metadata {}", rune.display()))?;
+    addendum::patched_package_metadata(
+        &mut metadata,
+        build::tome_name_for_rune(rune)?.as_deref(),
+        rune,
+    )
+    .with_context(|| format!("apply addendums to {}", rune.display()))?;
+
+    let dep_store_hashes: Vec<String> = metadata
+        .deps
+        .runtime
+        .iter()
+        .map(|dep| {
+            dep_hashes
+                .get(&dep.name)
+                .cloned()
+                .ok_or_else(|| anyhow!("missing store hash for dependency `{}`", dep.name))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let rune_bytes =
+        std::fs::read(rune).with_context(|| format!("read rune {}", rune.display()))?;
+    Ok(store::store_hash_for_metadata(
+        &metadata,
+        &rune_bytes,
+        &dep_store_hashes,
+        target,
+        build_env,
+    ))
 }
 
 struct Walker {
@@ -87,6 +129,8 @@ impl Walker {
     }
 
     fn metadata(&self, rune: &Path) -> Result<crate::model::PackageMetadata> {
+        tome::verify_rune(rune)
+            .with_context(|| format!("verify rune signature {}", rune.display()))?;
         let mut metadata = EmbeddedNuRuntime
             .package_metadata(rune)
             .with_context(|| format!("read rune metadata {}", rune.display()))?;

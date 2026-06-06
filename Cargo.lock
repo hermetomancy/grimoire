@@ -2486,6 +2486,7 @@ dependencies = [
  "fs4",
  "gix",
  "indicatif 0.17.11",
+ "libc",
  "minisign",
  "minisign-verify",
  "nu-cmd-lang",

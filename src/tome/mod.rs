@@ -57,7 +57,7 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
         checked_ref: None,
         checked_commit: None,
         tome: None,
-        signer_pubkey: None,
+        signer_pubkeys: Vec::new(),
     };
     nuon_io::write_nuon(&state_path, &state.to_value())?;
     report(&format!("added tome {name}"));
@@ -157,7 +157,7 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
         nuon_io::write_nuon(&index_path, &catalog.to_value())?;
         report(&format!(
             "rebuilt index with {} package(s) in {}",
-            catalog.packages.len(),
+            catalog.entries.len(),
             index_path.display()
         ));
         return Ok(());
@@ -182,7 +182,7 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
         PackageIndex::from_value(nuon_io::read_nuon(&index_path)?)?
     } else {
         PackageIndex {
-            packages: Vec::new(),
+            entries: std::collections::BTreeMap::new(),
         }
     };
 
@@ -192,7 +192,7 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
     // depend on it as a build dependency without requiring a pre-installed userland.
     let target = paths::target_triple();
     for name in &rune_names {
-        let (entry, archive) = build_rune_into(root, name, &dist_dir, args.bootstrap)?;
+        let (store_hash, entry, archive) = build_rune_into(root, name, &dist_dir, args.bootstrap)?;
         report(&format!(
             "built {} {} ({target}) into {}",
             entry.name,
@@ -203,7 +203,7 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
             install::install_store_only(&archive, None, None)
                 .with_context(|| format!("store-only install of {}", entry.name))?;
         }
-        catalog.upsert(entry);
+        catalog.upsert(store_hash, entry);
     }
     nuon_io::write_nuon(&index_path, &catalog.to_value())?;
 
@@ -215,15 +215,15 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
     Ok(())
 }
 
-/// Builds the rune named `name` (`runes/<name>.rn`) into `dist_dir`, returning the index entry
-/// describing the verified archive and the archive path. Shared by single-package and `--all`
-/// builds so both register identical entries.
+/// Builds the rune named `name` (`runes/<name>.rn`) into `dist_dir`, returning the store hash,
+/// index entry describing the verified archive, and the archive path. Shared by single-package
+/// and `--all` builds so both register identical entries.
 fn build_rune_into(
     root: &Path,
     name: &str,
     dist_dir: &Path,
     bootstrap: bool,
-) -> Result<(IndexEntry, PathBuf)> {
+) -> Result<(String, IndexEntry, PathBuf)> {
     validate_package_name(name)?;
     let rune_path = root.join("runes").join(format!("{name}.rn"));
     if !rune_path.exists() {
@@ -250,17 +250,16 @@ fn build_rune_into(
         target: paths::target_triple(),
         archive: archive_file.to_owned(),
         archive_hash,
-        store_hash: result.store_hash,
         runtime_deps: metadata.deps.runtime.clone(),
     };
-    Ok((entry, result.archive))
+    Ok((result.store_hash, entry, result.archive))
 }
 
 /// Rebuilds the package index from every `.tar.zst` archive already present in `dist_dir`.
 /// Each archive is inspected for its embedded metadata and rune so the index entry is identical
 /// to what a fresh build would produce.
 fn rebuild_index(dist_dir: &Path) -> Result<PackageIndex> {
-    let mut entries = Vec::new();
+    let mut entries = std::collections::BTreeMap::new();
     for entry in fs::read_dir(dist_dir)
         .with_context(|| format!("read dist directory {}", dist_dir.display()))?
     {
@@ -271,23 +270,23 @@ fn rebuild_index(dist_dir: &Path) -> Result<PackageIndex> {
             continue;
         }
         match read_archive_index_entry(&path) {
-            Ok(index_entry) => {
+            Ok((store_hash, index_entry)) => {
                 report(&format!(
                     "indexed {} {} ({}) from {}",
                     index_entry.name, index_entry.version, index_entry.target, name
                 ));
-                entries.push(index_entry);
+                entries.insert(store_hash, index_entry);
             }
             Err(e) => {
                 report(&format!("warning: skipping {}: {e}", path.display()));
             }
         }
     }
-    Ok(PackageIndex { packages: entries })
+    Ok(PackageIndex { entries })
 }
 
-/// Reads an existing archive and produces the [`IndexEntry`] that would describe it.
-fn read_archive_index_entry(path: &Path) -> Result<IndexEntry> {
+/// Reads an existing archive and produces the `(store_hash, IndexEntry)` that would describe it.
+fn read_archive_index_entry(path: &Path) -> Result<(String, IndexEntry)> {
     let file = fs::File::open(path).with_context(|| format!("open archive {}", path.display()))?;
     let decoder = zstd::stream::read::Decoder::new(file)
         .with_context(|| format!("decode archive {}", path.display()))?;
@@ -343,15 +342,17 @@ fn read_archive_index_entry(path: &Path) -> Result<IndexEntry> {
         .target
         .ok_or_else(|| anyhow::anyhow!("metadata in {} is missing target", path.display()))?;
 
-    Ok(IndexEntry {
-        name: metadata.name,
-        version: metadata.version,
-        target,
-        archive: archive_name,
-        archive_hash,
+    Ok((
         store_hash,
-        runtime_deps: metadata.deps.runtime,
-    })
+        IndexEntry {
+            name: metadata.name,
+            version: metadata.version,
+            target,
+            archive: archive_name,
+            archive_hash,
+            runtime_deps: metadata.deps.runtime,
+        },
+    ))
 }
 
 /// The rune base names (without the `.rn` extension) in a tome's `runes/` directory, sorted for
@@ -630,6 +631,45 @@ pub fn ensure_tome_cache(tome: &TomeState) -> Result<PathBuf> {
     Ok(cache_path)
 }
 
+/// Finds the tome whose cache directory contains `path`. Returns `None` when the path is not
+/// inside any configured tome cache (e.g. a local `.rn` file passed directly on the CLI).
+pub fn find_tome_for_path(path: &std::path::Path) -> Result<Option<TomeState>> {
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("canonicalize {}", path.display()))?;
+    for tome in load_tomes()? {
+        let cache = tome_cache_path(&tome.name)?;
+        if canonical.starts_with(&cache) {
+            return Ok(Some(tome));
+        }
+    }
+    Ok(None)
+}
+
+/// Verifies a rune's detached signature (`package.rn.minisig`) against the tome's pinned signers.
+/// Returns `Ok` when the rune is not inside any tome cache, when the tome has no pinned signers,
+/// or when the signature verifies against one of the pinned keys.
+pub fn verify_rune(rune: &std::path::Path) -> Result<()> {
+    let Some(tome) = find_tome_for_path(rune)? else {
+        return Ok(());
+    };
+    if tome.signer_pubkeys.is_empty() {
+        return Ok(());
+    }
+    signing::verify_detached(rune, &tome.signer_pubkeys)
+        .with_context(|| format!("verify rune signature for {}", rune.display()))
+}
+
+/// Verifies an archive's detached signature (`archive.tar.zst.minisig`) against the tome's pinned
+/// signers. Returns `Ok` when the tome has no pinned signers or when the signature verifies.
+pub fn verify_archive(archive: &std::path::Path, tome: &TomeState) -> Result<()> {
+    if tome.signer_pubkeys.is_empty() {
+        return Ok(());
+    }
+    signing::verify_detached(archive, &tome.signer_pubkeys)
+        .with_context(|| format!("verify archive signature for {}", archive.display()))
+}
+
 #[derive(Debug)]
 struct TomeSyncReport {
     name: String,
@@ -743,7 +783,7 @@ fn validate_local_tome_if_available(name: &str, url: &str) -> Result<()> {
         checked_ref: None,
         checked_commit: None,
         tome: None,
-        signer_pubkey: None,
+        signer_pubkeys: Vec::new(),
     };
     validate_tome_cache(&tome, source, &manifest, &runtime)
 }
@@ -763,11 +803,11 @@ fn record_tome_sync_state(tome: &TomeState, cache_path: &Path) -> Result<Option<
     let mut state = load_tome(&tome.name).unwrap_or_else(|_| tome.clone());
     // Trust-on-first-use: capture (or re-confirm) the signing key from this sync before the new
     // state is written, so the pin and the cached manifest always move together.
-    let signer_pubkey = capture_signer(tome, cache_path, &manifest, state.signer_pubkey.clone())?;
+    let signer_pubkeys = capture_signer(tome, cache_path, &manifest, &state.signer_pubkeys)?;
     state.checked_ref = Some(tome.ref_name.clone());
     state.checked_commit = commit.clone();
     state.tome = Some(manifest);
-    state.signer_pubkey = signer_pubkey;
+    state.signer_pubkeys = signer_pubkeys;
 
     let state_path = tome_state_dir()?.join(format!("{}.nuon", tome.name));
     nuon_io::write_nuon(&state_path, &state.to_value())?;
@@ -788,57 +828,25 @@ pub fn package_index(tome: &TomeState) -> Result<Option<(PathBuf, crate::model::
         return Ok(None);
     };
 
-    // Enforce the trust-on-first-use pin before the index is parsed or any archive is fetched:
-    // the index is the trust root for binary installs, so a signed tome's index must verify
-    // against the key pinned when it was added (`src/signing.rs`). An unsigned tome (no pin)
-    // skips verification.
-    enforce_pinned_signature(tome, &raw)?;
-
-    parse_resolved_index(&cache, &packages, &raw.text).map(Some)
+    parse_resolved_index(&cache, &packages, &raw).map(Some)
 }
 
-/// A package index document as published, together with its detached minisign signature when the
-/// repository serves one. The signature, when present, is over the exact bytes in `text`.
-struct RawIndex {
-    text: String,
-    signature: Option<String>,
-}
-
-/// Fetches a tome's raw index document and its `.minisig` signature (if published), without
-/// parsing or trusting either yet. Handles both an `http(s)` package repo and a local/filesystem
-/// one. `None` means the tome declares a package repo but has not published an index there.
-fn load_raw_index(cache: &Path, packages: &TomePackages) -> Result<Option<RawIndex>> {
+/// Loads a tome's raw `index.nuon` text. Returns `None` when the tome has no package repo or
+/// the index file does not exist yet.
+fn load_raw_index(cache: &Path, packages: &TomePackages) -> Result<Option<String>> {
     if is_http_repo(&packages.repo) {
         let base = packages.repo.trim_end_matches('/');
         let index_url = format!("{base}/{}", packages.index);
-        let Some(text) = crate::fetch::http_get_text(&index_url)? else {
-            return Ok(None);
-        };
-        let signature =
-            crate::fetch::http_get_text(&format!("{index_url}.{}", signing::SIGNATURE_EXTENSION))?;
-        Ok(Some(RawIndex { text, signature }))
+        crate::fetch::http_get_text(&index_url)
     } else {
         let root = packages_repo_root(cache, packages);
         let index_path = root.join(&packages.index);
         if !index_path.exists() {
             return Ok(None);
         }
-        let text = fs::read_to_string(&index_path)
-            .with_context(|| format!("read package index {}", index_path.display()))?;
-        let sig_path = root.join(format!(
-            "{}.{}",
-            packages.index,
-            signing::SIGNATURE_EXTENSION
-        ));
-        let signature = if sig_path.exists() {
-            Some(
-                fs::read_to_string(&sig_path)
-                    .with_context(|| format!("read index signature {}", sig_path.display()))?,
-            )
-        } else {
-            None
-        };
-        Ok(Some(RawIndex { text, signature }))
+        fs::read_to_string(&index_path)
+            .with_context(|| format!("read package index {}", index_path.display()))
+            .map(Some)
     }
 }
 
@@ -856,7 +864,7 @@ fn parse_resolved_index(
         .context("parse package index")?;
     if is_http_repo(&packages.repo) {
         let base = packages.repo.trim_end_matches('/');
-        for entry in &mut index.packages {
+        for entry in index.entries.values_mut() {
             if !is_http_repo(&entry.archive) {
                 entry.archive = format!("{base}/{}", entry.archive);
             }
@@ -868,96 +876,55 @@ fn parse_resolved_index(
     }
 }
 
-/// Enforces a tome's pinned signing key against a freshly loaded index (read path). An unsigned
-/// tome — one with no pinned key — passes through. A signed tome must present a valid signature
-/// over the index bytes; a missing or invalid signature is refused as possible tampering.
-fn enforce_pinned_signature(tome: &TomeState, raw: &RawIndex) -> Result<()> {
-    let Some(pinned) = &tome.signer_pubkey else {
-        return Ok(());
-    };
-    let Some(signature) = &raw.signature else {
-        bail!(
-            "tome `{}` was added with a signed index but no `index` signature is published now; \
-             refusing to use an unsigned index (possible tampering). If the publisher \
-             intentionally stopped signing, remove and re-add the tome.",
-            tome.name
-        );
-    };
-    signing::verify(raw.text.as_bytes(), signature, pinned)
-        .with_context(|| format!("verify package index signature for tome `{}`", tome.name))
-}
-
-/// Trust-on-first-use capture, run when a tome is synced (add/update). Given the key pinned so
-/// far (`existing`) and the manifest just synced, returns the key to record going forward:
+/// Trust-on-first-use capture for per-package signing. Run when a tome is synced (add/update).
+/// Given the keys pinned so far (`existing`) and the manifest just synced, returns the set of
+/// keys to record going forward:
 ///
-/// - first sync of a tome that advertises a signer → verify its index against that key and pin it;
-/// - a later sync of an already-pinned tome → require the index still verifies against the pinned
-///   key, and refuse a manifest that advertises a *different* key (rotation needs a deliberate
-///   re-add);
+/// - first sync of a tome that advertises signers → pin them (TOFU);
+/// - a later sync of an already-pinned tome → require the advertised set matches the pinned set
+///   exactly (key rotation needs a deliberate re-add);
 /// - an unsigned tome → stays unpinned.
 fn capture_signer(
     tome: &TomeState,
-    cache: &Path,
+    _cache: &Path,
     manifest: &TomeManifest,
-    existing: Option<String>,
-) -> Result<Option<String>> {
-    let Some(packages) = &manifest.packages else {
-        // No package repo at all: nothing to verify. Preserve any prior pin.
-        return Ok(existing);
-    };
-    let advertised = packages.signer.clone();
+    existing: &[String],
+) -> Result<Vec<String>> {
+    let advertised = manifest.signers.clone();
 
-    // Without a published index we cannot verify anything this sync; keep the prior pin so a
-    // later sync (once an index exists) still enforces it.
-    let Some(raw) = load_raw_index(cache, packages)? else {
-        return Ok(existing);
-    };
-
-    match (existing, advertised) {
-        (Some(pinned), advertised) => {
-            if let Some(advertised) = &advertised {
-                if !signing::keys_match(&pinned, advertised)? {
-                    bail!(
-                        "tome `{}` now advertises a different signing key than the one pinned on \
-                         first use; refusing. Remove and re-add the tome to trust the new key.",
-                        tome.name
-                    );
-                }
-            }
-            require_signed_index(tome, &raw, &pinned)?;
-            Ok(Some(pinned))
-        }
-        (None, Some(advertised)) => {
-            require_signed_index(tome, &raw, &advertised)?;
-            report(&format!(
-                "pinned signing key for tome `{}` (trust on first use)",
-                tome.name
-            ));
-            Ok(Some(advertised))
-        }
-        (None, None) => Ok(None),
+    if existing.is_empty() && advertised.is_empty() {
+        return Ok(Vec::new());
     }
-}
 
-/// Requires that `raw` carries a signature that verifies against `key`. Used by TOFU capture to
-/// refuse pinning (or continuing to trust) a tome whose advertised signer does not actually sign
-/// its index.
-fn require_signed_index(tome: &TomeState, raw: &RawIndex, key: &str) -> Result<()> {
-    let Some(signature) = &raw.signature else {
+    if !existing.is_empty() && advertised.is_empty() {
         bail!(
-            "tome `{}` advertises a signing key but publishes no index signature; \
-             expected `{}.{}` alongside the index.",
-            tome.name,
-            tome.tome
-                .as_ref()
-                .and_then(|t| t.packages.as_ref())
-                .map(|p| p.index.as_str())
-                .unwrap_or("index.nuon"),
-            signing::SIGNATURE_EXTENSION
+            "tome `{}` previously advertised signers but no longer does; refusing. \
+             Remove and re-add the tome to trust an unsigned manifest.",
+            tome.name
         );
-    };
-    signing::verify(raw.text.as_bytes(), signature, key)
-        .with_context(|| format!("verify package index signature for tome `{}`", tome.name))
+    }
+
+    if existing.is_empty() && !advertised.is_empty() {
+        report(&format!(
+            "pinned {} signer(s) for tome `{}` (trust on first use)",
+            advertised.len(),
+            tome.name
+        ));
+        return Ok(advertised);
+    }
+
+    // Both have signers: require exact match (same set, same order doesn't matter).
+    let sets_match =
+        existing.len() == advertised.len() && existing.iter().all(|k| advertised.contains(k));
+    if !sets_match {
+        bail!(
+            "tome `{}` now advertises a different set of signing keys than the one pinned on \
+             first use; refusing. Remove and re-add the tome to trust the new keys.",
+            tome.name
+        );
+    }
+
+    Ok(existing.to_vec())
 }
 
 /// Resolves the local directory that holds a tome's package index and (relative) archives — the

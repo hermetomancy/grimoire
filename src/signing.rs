@@ -1,18 +1,18 @@
-//! Package-index signature verification (minisign / Ed25519).
+//! Per-package signature verification (minisign / Ed25519).
 //!
-//! A tome may sign its `index.nuon` with [minisign](https://jedisct1.github.io/minisign/): the
-//! author publishes a detached `index.nuon.minisig` alongside the index and declares the matching
-//! public key in `tome.rn` (`packages.signer`). Because the index already records the `sha256` of
-//! every archive it lists, a valid signature over the index transitively authenticates every
-//! binary package — Grimoire never needs to sign archives individually.
+//! Every package in a signed tome — both its source rune (`package.rn`) and its published binary
+//! archive (`archive.tar.zst`) — carries a detached `.minisig` signature. The tome's manifest
+//! declares one or more minisign public keys (`signers: ["..."]`) that may sign packages. Trust
+//! is established **on first use**: the key set seen the first time a tome syncs is pinned into
+//! the tome's install-root state, and every later sync must present the same set. See
+//! `src/tome/mod.rs` for the TOFU capture flow.
 //!
-//! Trust is established **on first use**: the key seen the first time a tome syncs is pinned into
-//! the tome's install-root state, and every later sync must verify against that pinned key. See
-//! `src/tome/mod.rs` for the TOFU capture/enforce flow. This module is verify-only — Grimoire
-//! never holds a private key; authors sign with the standard `minisign` tool.
+//! This module is verify-only — Grimoire never holds a private key; authors sign with the
+//! standard `minisign` tool.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use minisign_verify::{PublicKey, Signature};
+use std::path::Path;
 
 /// The conventional extension for a detached minisign signature: `index.nuon` is signed into
 /// `index.nuon.minisig`.
@@ -36,10 +36,40 @@ pub fn verify(data: &[u8], signature: &str, public_key_b64: &str) -> Result<()> 
 /// different signer than the one pinned on first use (key rotation or host compromise), which is
 /// refused rather than silently trusted. Both must decode as valid keys; the comparison is over
 /// the canonical (trimmed) base64, which is deterministic for a given key.
+#[cfg(test)]
 pub fn keys_match(pinned_b64: &str, presented_b64: &str) -> Result<bool> {
     PublicKey::from_base64(pinned_b64.trim()).context("decode pinned signer public key")?;
     PublicKey::from_base64(presented_b64.trim()).context("decode presented signer public key")?;
     Ok(pinned_b64.trim() == presented_b64.trim())
+}
+
+/// Verifies `data` against `signature` using any of `pubkeys`. Returns `Ok` if at least one key
+/// verifies the signature.
+pub fn verify_any(data: &[u8], signature: &str, pubkeys: &[String]) -> Result<()> {
+    let mut last_err = None;
+    for pubkey in pubkeys {
+        match verify(data, signature, pubkey) {
+            Ok(()) => return Ok(()),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    if let Some(e) = last_err {
+        Err(e)
+    } else {
+        bail!("no public keys provided to verify signature")
+    }
+}
+
+/// Verifies the detached signature at `{path}.minisig` against `path`'s contents using any of
+/// `pubkeys`.
+pub fn verify_detached(path: &Path, pubkeys: &[String]) -> Result<()> {
+    let sig_path = format!("{}.{SIGNATURE_EXTENSION}", path.display());
+    let signature = std::fs::read_to_string(&sig_path)
+        .with_context(|| format!("read signature file {sig_path}"))?;
+    let data =
+        std::fs::read(path).with_context(|| format!("read file to verify {}", path.display()))?;
+    verify_any(&data, &signature, pubkeys)
+        .with_context(|| format!("verify signature for {}", path.display()))
 }
 
 #[cfg(test)]
