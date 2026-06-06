@@ -231,10 +231,11 @@ fn record_addendum_sync_state(state: &AddendumState, cache_path: &Path) -> Resul
 }
 
 /// Trust-on-first-use for addendum signing keys. Mirrors `tome::capture_signer` — the first sync
-/// pins whatever `signers` the manifest advertises; later syncs must present the exact same set.
+/// pins whatever `signers` the manifest advertises after verifying a detached signature; later
+/// syncs must present the exact same set, or a signature from the currently pinned keys to rotate.
 fn capture_addendum_signer(
     state: &AddendumState,
-    _cache: &Path,
+    cache: &Path,
     manifest: &AddendumManifest,
     existing: &[String],
 ) -> Result<Vec<String>> {
@@ -253,6 +254,13 @@ fn capture_addendum_signer(
     }
 
     if existing.is_empty() && !advertised.is_empty() {
+        let manifest_path = cache.join(MANIFEST);
+        if let Err(err) = signing::verify_detached(&manifest_path, &advertised) {
+            bail!(
+                "addendum `{}` manifest signature does not verify: {err}",
+                state.name
+            );
+        }
         report(&format!(
             "pinned {} signer(s) for addendum `{}` (trust on first use)",
             advertised.len(),
@@ -264,6 +272,16 @@ fn capture_addendum_signer(
     let sets_match =
         existing.len() == advertised.len() && existing.iter().all(|k| advertised.contains(k));
     if !sets_match {
+        let manifest_path = cache.join(MANIFEST);
+        if signing::verify_detached(&manifest_path, existing).is_ok() {
+            report(&format!(
+                "addendum `{}` rotated signing keys ({} -> {})",
+                state.name,
+                existing.len(),
+                advertised.len()
+            ));
+            return Ok(advertised);
+        }
         bail!(
             "addendum `{}` now advertises a different set of signing keys than the one pinned on \
              first use; refusing. Remove and re-add the addendum to trust the new keys.",
