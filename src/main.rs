@@ -122,6 +122,7 @@ fn run(cli: Cli) -> Result<()> {
             cli::AddendumCommand::Add(args) => addendum::add(args),
             cli::AddendumCommand::Remove(args) => addendum::remove(args),
             cli::AddendumCommand::List => addendum::list(),
+            cli::AddendumCommand::Update(args) => addendum::update(args),
         },
         Command::StoreHash(args) => {
             println!("{}", closure::store_hash(&args.package)?);
@@ -152,7 +153,9 @@ fn mutates_install_root(command: &Command) -> bool {
         ),
         Command::Addendum { command } => matches!(
             command,
-            cli::AddendumCommand::Add(_) | cli::AddendumCommand::Remove(_)
+            cli::AddendumCommand::Add(_)
+                | cli::AddendumCommand::Update(_)
+                | cli::AddendumCommand::Remove(_)
         ),
         Command::Build(_)
         | Command::List

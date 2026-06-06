@@ -219,6 +219,60 @@ fn addendum_add_list_remove() {
 }
 
 #[test]
+fn addendum_update_syncs_latest_changes() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let addendum = TempDir::new().unwrap();
+    let addendum_path = addendum.path();
+    fs::write(
+        addendum_path.join("addendum.nuon"),
+        "{ name: updatable, patches: [] }\n",
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &[
+            "addendum",
+            "add",
+            addendum_path.to_str().unwrap(),
+            "--ref",
+            "main",
+        ],
+    );
+    assert_success(&add, "add addendum");
+
+    let update = run(root, &["addendum", "update", "updatable"]);
+    assert_success(&update, "update addendum");
+
+    // Modify the source to add a new patch.
+    fs::write(
+        addendum_path.join("addendum.nuon"),
+        "{ name: updatable, patches: [{ package: testpkg, version: '0.2.0' }] }\n",
+    )
+    .unwrap();
+
+    let update2 = run(root, &["addendum", "update", "updatable"]);
+    assert_success(&update2, "update addendum after source change");
+
+    let cached_manifest = root
+        .join("cache")
+        .join("addendums")
+        .join("updatable")
+        .join("addendum.nuon");
+    let cached = fs::read_to_string(&cached_manifest).unwrap();
+    assert!(
+        cached.contains("testpkg"),
+        "cached manifest should reflect updated patch: {cached}"
+    );
+    assert!(
+        cached.contains("0.2.0"),
+        "cached manifest should reflect updated version: {cached}"
+    );
+}
+
+#[test]
 fn signed_addendum_pins_key_and_rejects_tampering() {
     let root = TempDir::new().unwrap();
     let root = root.path();
