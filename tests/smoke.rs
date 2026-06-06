@@ -18,15 +18,29 @@ use tempfile::TempDir;
 use xz2::write::XzEncoder;
 
 const BIN: &str = env!("CARGO_BIN_EXE_grm");
-const CORE_READINESS_PACKAGES: &[&str] = &[
-    "bash",
-    "make",
-    "coreutils",
-    "sed",
-    "grep",
-    "gawk",
-    "diffutils",
-];
+fn core_readiness_packages() -> &'static [&'static str] {
+    if std::env::consts::OS == "linux" {
+        &[
+            "linux-headers",
+            "musl",
+            "compiler-rt",
+            "llvm",
+            "clang",
+            "make",
+            "busybox",
+            "fhs-compat",
+        ]
+    } else {
+        &[
+            "llvm",
+            "clang",
+            "compiler-rt",
+            "make",
+            "busybox",
+            "fhs-compat",
+        ]
+    }
+}
 
 type ZstdFileEncoder = zstd::stream::write::Encoder<'static, fs::File>;
 type GzipFileEncoder = GzEncoder<fs::File>;
@@ -1302,7 +1316,8 @@ fn doctor_reports_managed_core_ready_after_minimal_core_install() {
     );
     assert_success(&add, "add fake core tome");
 
-    for package in CORE_READINESS_PACKAGES {
+    let packages = core_readiness_packages();
+    for package in packages {
         let install = run(root, &["install", package]);
         assert_success(&install, &format!("install core package {package}"));
     }
@@ -1310,8 +1325,9 @@ fn doctor_reports_managed_core_ready_after_minimal_core_install() {
     let doctor = run(root, &["doctor"]);
     assert_success(&doctor, "doctor after core readiness install");
     let out = stdout(&doctor);
+    let expected = format!("managed core userland: ready ({n}/{n})", n = packages.len());
     assert!(
-        out.contains("managed core userland: ready (7/7)"),
+        out.contains(&expected),
         "doctor reports managed core readiness: {out}"
     );
 }
@@ -1790,8 +1806,14 @@ fn doctor_reports_health_and_problems() {
         empty_out.contains("installed packages: 0"),
         "doctor counts packages: {empty_out}"
     );
+    let packages = core_readiness_packages();
+    let missing = packages.join(", ");
+    let expected = format!(
+        "managed core userland: incomplete (0/{n}, missing {missing})",
+        n = packages.len()
+    );
     assert!(
-        empty_out.contains("managed core userland: incomplete (0/7, missing bash, make, coreutils, sed, grep, gawk, diffutils)"),
+        empty_out.contains(&expected),
         "doctor reports missing managed core tools: {empty_out}"
     );
     assert!(
@@ -4037,7 +4059,7 @@ fn make_fake_core_tome(triple: &str) -> TempDir {
     .unwrap();
 
     let mut entries = String::from("{\n  format: 2,\n    entries: {\n");
-    for package in CORE_READINESS_PACKAGES {
+    for package in core_readiness_packages() {
         let store_hash = format!("cafef00dcafef00d-{package}");
         let archive_name = format!("{package}-0.1.0-{triple}.tar.zst");
         let archive = make_versioned_archive_with_hash(

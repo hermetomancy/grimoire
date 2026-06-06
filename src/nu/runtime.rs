@@ -487,7 +487,7 @@ fn nuon_string(value: &str) -> Result<String> {
 
 /// Directories containing POSIX-mandated utilities that the host OS provides.
 /// These are always included in managed build PATH so runes don't need to declare
-/// `coreutils`, `sed`, `grep`, `awk`, `find`, etc. as build dependencies.
+/// ambient POSIX tools as managed build dependencies.
 fn posix_ambient_dirs() -> Vec<PathBuf> {
     vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")]
 }

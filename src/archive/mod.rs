@@ -137,8 +137,8 @@ mod tests {
         // Sibling, nested, and `..` hops that stay inside the package root are all fine,
         // including the versioned shared-library aliases the core tome needs.
         for (link, target) in [
-            ("bin/awk", "gawk"),
-            ("bin/sh", "bash"),
+            ("bin/awk", "busybox"),
+            ("bin/sh", "busybox"),
             ("lib/libintl.dylib", "libintl.8.dylib"),
             ("lib/foo/libbar.so", "libbar.so.1"),
             ("bin/tool", "../libexec/tool"),
