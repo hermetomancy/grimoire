@@ -51,6 +51,8 @@ pub struct BuildEnv {
     pub inherit_host_path: bool,
     /// Additional environment variables to set in the build sandbox.
     pub extra_env: Vec<(String, String)>,
+    /// Target triple the build is being performed for.
+    pub target: String,
 }
 
 #[derive(Debug)]
@@ -69,6 +71,7 @@ impl BuildEnv {
             host_tools: Vec::new(),
             inherit_host_path: true,
             extra_env,
+            target: paths::target_triple(),
         }
     }
 
@@ -82,6 +85,7 @@ impl BuildEnv {
             host_tools,
             inherit_host_path: false,
             extra_env,
+            target: paths::target_triple(),
         }
     }
 }
@@ -133,6 +137,7 @@ impl RuneRuntime for EmbeddedNuRuntime {
             build_flags,
             path.as_deref(),
             &env.extra_env,
+            &env.target,
         );
         let env_prefix = path_env_assignment(&path_entries)?;
         let source = format!(
@@ -153,6 +158,7 @@ impl RuneRuntime for EmbeddedNuRuntime {
 
 /// Builds the inert `ctx` record passed to a rune's `build` function. Source paths are the
 /// already-fetched, checksum-verified cache locations (AGENTS.md §5.1).
+#[allow(clippy::too_many_arguments)]
 fn build_context(
     package_dir: &Path,
     final_prefix: &Path,
@@ -161,6 +167,7 @@ fn build_context(
     build_flags: &BTreeMap<String, String>,
     path: Option<&str>,
     extra_env: &[(String, String)],
+    target: &str,
 ) -> Value {
     let span = Span::unknown();
     let mut ctx = Record::new();
@@ -170,7 +177,7 @@ fn build_context(
     // metadata. `package_dir` remains the staging root used as DESTDIR.
     ctx.push("prefix", path_value(final_prefix));
     ctx.push("store_path", path_value(final_prefix));
-    ctx.push("target", Value::string(paths::target_triple(), span));
+    ctx.push("target", Value::string(target, span));
 
     let mut sources_record = Record::new();
     for (name, source) in sources {

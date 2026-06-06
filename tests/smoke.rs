@@ -86,7 +86,7 @@ fn target_triple() -> String {
     let arch = std::env::consts::ARCH;
     let abi = match os {
         "macos" => "darwin",
-        "windows" | "linux" => "gnu",
+        "linux" => "musl",
         _ => "unknown",
     };
     format!("{os}-{arch}-{abi}")
@@ -742,6 +742,42 @@ fn command_parsing() {
         &bool_value,
         "unexpected value 'true' for '--quiet'",
         "reject bool option value",
+    );
+}
+
+#[test]
+fn build_respects_musl_target() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let out = TempDir::new().unwrap();
+    let out = out.path();
+
+    let rune_path = root.join("test.rn");
+    fs::write(
+        &rune_path,
+        "export const package = { name: 'testpkg' version: '0.1.0' }\n\nexport def build [ctx] {\n  echo $ctx.target | save ($ctx.package_dir | path join 'target.txt')\n}\n",
+    ).unwrap();
+
+    let build = run(
+        root,
+        &[
+            "build",
+            rune_path.to_str().unwrap(),
+            &format!("--output={}", out.display()),
+            "--target",
+            "linux-x86_64-musl",
+        ],
+    );
+    assert_success(&build, "build with musl target");
+
+    let archive = out.join("testpkg-0.1.0-linux-x86_64-musl.tar.zst");
+    assert!(archive.exists(), "musl archive should exist: {archive:?}");
+
+    let target_text = archive_member_text(&archive, "target.txt");
+    assert_eq!(
+        target_text.trim(),
+        "linux-x86_64-musl",
+        "build context target"
     );
 }
 

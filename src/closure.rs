@@ -32,6 +32,13 @@ pub fn store_hash_for_rune(rune: &Path) -> Result<String> {
     walker.of_rune(&metadata.name, rune)
 }
 
+/// Like [`store_hash_for_rune`], but for an explicit target triple instead of the host default.
+pub fn store_hash_for_rune_with_target(rune: &Path, target: &str) -> Result<String> {
+    let mut walker = Walker::with_target(target)?;
+    let metadata = walker.metadata(rune)?;
+    walker.of_rune(&metadata.name, rune)
+}
+
 /// Computes the store hash for a rune whose dependency closure has already been resolved.
 /// `dep_hashes` maps dependency names to their already-computed store hashes.
 /// This is used by the solver after version resolution to compute hashes eagerly.
@@ -83,8 +90,12 @@ struct Walker {
 
 impl Walker {
     fn new() -> Result<Self> {
+        Self::with_target(&paths::target_triple())
+    }
+
+    fn with_target(target: &str) -> Result<Self> {
         Ok(Self {
-            target: paths::target_triple(),
+            target: target.to_string(),
             // Compiled packages fold the host toolchain identity into their hash; fixed-output
             // packages ignore it. An absent toolchain hashes as empty (only fixed-output packages
             // can be addressed without one).

@@ -34,24 +34,35 @@ pub struct BuildResult {
 }
 
 pub fn build(args: BuildArgs) -> Result<()> {
-    let result = build_package(&args.package, &args.output, args.bootstrap)?;
+    let result = build_package(
+        &args.package,
+        &args.output,
+        args.bootstrap,
+        args.target.as_deref(),
+    )?;
     report(&format!("built {}", result.archive.display()));
     Ok(())
 }
 
-pub fn build_package(package: &str, output: &Path, bootstrap: bool) -> Result<BuildResult> {
+pub fn build_package(
+    package: &str,
+    output: &Path,
+    bootstrap: bool,
+    target: Option<&str>,
+) -> Result<BuildResult> {
     let rune = resolve_rune(package)?;
     tome::verify_rune(&rune).with_context(|| format!("verify rune signature for {package}"))?;
-    let store_hash = crate::closure::store_hash_for_rune(&rune)?;
+    let target = target.map_or_else(paths::target_triple, |t| t.to_string());
+    let store_hash = crate::closure::store_hash_for_rune_with_target(&rune, &target)?;
     let metadata = EmbeddedNuRuntime.package_metadata(&rune)?;
-    let build_deps = metadata.deps.build_for(&paths::target_triple());
+    let build_deps = metadata.deps.build_for(&target);
 
     if !bootstrap {
         install::ensure_build_deps_installed(&build_deps)
             .with_context(|| format!("install build dependencies for `{package}`"))?;
     }
 
-    let env = if bootstrap {
+    let mut env = if bootstrap {
         BuildEnv::bootstrap(
             install::build_dep_bin_dirs(&build_deps)?,
             install::build_dep_env_vars(&build_deps)?,
@@ -63,6 +74,7 @@ pub fn build_package(package: &str, output: &Path, bootstrap: bool) -> Result<Bu
             install::build_dep_env_vars(&build_deps)?,
         )
     };
+    env.target = target;
     build_package_with_env(package, output, &env, &store_hash)
 }
 
@@ -75,6 +87,7 @@ pub fn build_package_with_env(
     env: &BuildEnv,
     store_hash: &str,
 ) -> Result<BuildResult> {
+    let target = env.target.clone();
     // A space in the install root breaks source builds: configure records the absolute paths of
     // build tools (MKDIR_P, INSTALL, ...) — which live under the root — and Makefiles use them
     // unquoted, so a path like `~/Library/Application Support/...` splits at the space. Fail early
@@ -136,6 +149,7 @@ pub fn build_package_with_env(
         &final_prefix,
         store_hash,
         output,
+        &target,
     )?;
     drop(temp);
     Ok(BuildResult {

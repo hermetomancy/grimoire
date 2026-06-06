@@ -26,8 +26,8 @@ pub fn pack_built_rune(
     final_prefix: &Path,
     store_hash: &str,
     output: &Path,
+    target: &str,
 ) -> Result<PathBuf> {
-    let target = paths::target_triple();
     let archive_name = format!("{}-{}-{target}.tar.zst", metadata.name, metadata.version);
     let archive_path = output.join(archive_name);
     fs::create_dir_all(output)?;
@@ -38,7 +38,7 @@ pub fn pack_built_rune(
     ));
     let store_relative = paths::store_relative_dir(store_hash, &metadata.name, &metadata.version);
     let package_nuon =
-        nuon_io::to_nuon_string(&metadata.archive_value(&target, Some(&store_relative)))?;
+        nuon_io::to_nuon_string(&metadata.archive_value(target, Some(&store_relative)))?;
     let rune_source =
         fs::read(rune).with_context(|| format!("read rune source {}", rune.display()))?;
 
