@@ -613,4 +613,66 @@ mod tests {
             Some("bin/hello")
         );
     }
+
+    #[test]
+    fn parses_linux_headers_rune() {
+        let runtime = EmbeddedNuRuntime;
+        let metadata = runtime
+            .package_metadata(Path::new("tome-core/runes/linux-headers.rn"))
+            .expect("package metadata");
+        assert_eq!(metadata.name, "linux-headers");
+        assert_eq!(metadata.version, "6.12");
+        assert!(metadata.deps.build.is_empty());
+    }
+
+    #[test]
+    fn parses_musl_rune() {
+        let runtime = EmbeddedNuRuntime;
+        let metadata = runtime
+            .package_metadata(Path::new("tome-core/runes/musl.rn"))
+            .expect("package metadata");
+        assert_eq!(metadata.name, "musl");
+        assert_eq!(metadata.version, "1.2.5");
+        let build_deps = metadata.deps.build_for("linux-x86_64-musl");
+        assert!(build_deps.iter().any(|d| d.name == "linux-headers"));
+    }
+
+    #[test]
+    fn parses_llvm_rune() {
+        let runtime = EmbeddedNuRuntime;
+        let metadata = runtime
+            .package_metadata(Path::new("tome-core/runes/llvm.rn"))
+            .expect("package metadata");
+        assert_eq!(metadata.name, "llvm");
+        assert_eq!(metadata.version, "19.1.0");
+        assert!(metadata.bins.contains_key("lld"));
+        assert!(metadata.bins.contains_key("llvm-ar"));
+    }
+
+    #[test]
+    fn parses_compiler_rt_rune() {
+        let runtime = EmbeddedNuRuntime;
+        let metadata = runtime
+            .package_metadata(Path::new("tome-core/runes/compiler-rt.rn"))
+            .expect("package metadata");
+        assert_eq!(metadata.name, "compiler-rt");
+        assert_eq!(metadata.version, "19.1.0");
+        let build_deps = metadata.deps.build_for("linux-x86_64-musl");
+        assert!(build_deps.iter().any(|d| d.name == "llvm"));
+    }
+
+    #[test]
+    fn parses_clang_rune() {
+        let runtime = EmbeddedNuRuntime;
+        let metadata = runtime
+            .package_metadata(Path::new("tome-core/runes/clang.rn"))
+            .expect("package metadata");
+        assert_eq!(metadata.name, "clang");
+        assert_eq!(metadata.version, "19.1.0");
+        assert!(metadata.bins.contains_key("clang"));
+        assert!(metadata.bins.contains_key("clang++"));
+        let build_deps = metadata.deps.build_for("linux-x86_64-musl");
+        assert!(build_deps.iter().any(|d| d.name == "llvm"));
+        assert!(build_deps.iter().any(|d| d.name == "compiler-rt"));
+    }
 }
