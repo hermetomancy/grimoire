@@ -766,6 +766,7 @@ fn build_respects_musl_target() {
             &format!("--output={}", out.display()),
             "--target",
             "linux-x86_64-musl",
+            "--bootstrap",
         ],
     );
     assert_success(&build, "build with musl target");
