@@ -273,6 +273,85 @@ fn addendum_update_syncs_latest_changes() {
 }
 
 #[test]
+fn addendum_staleness_warning_on_use() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = { name: 'staletome' packages: { repo: 'dist', format: 'local', index: 'index.nuon' } }\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("stalepkg.rn"),
+        "export const package = { name: 'stalepkg' version: '0.1.0' bins: { stalepkg: 'bin/stalepkg' } }\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  echo '#!/usr/bin/env sh' | save ($ctx.package_dir | path join 'bin' 'stalepkg')\n}\n",
+    )
+    .unwrap();
+
+    let addendum = TempDir::new().unwrap();
+    let addendum = addendum.path();
+    fs::write(
+        addendum.join("addendum.nuon"),
+        "{ name: staleadd, patches: [] }\n",
+    )
+    .unwrap();
+
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "add tome",
+    );
+    assert_success(
+        &run(
+            root,
+            &[
+                "addendum",
+                "add",
+                addendum.to_str().unwrap(),
+                "--ref",
+                "main",
+            ],
+        ),
+        "add addendum",
+    );
+
+    // First info call syncs the addendum.
+    let first = run(root, &["info", "stalepkg"]);
+    assert_success(&first, "info succeeds on first use");
+    let first_text = format!("{}{}", stdout(&first), stderr(&first));
+    assert!(
+        !first_text.contains("is stale"),
+        "fresh addendum should not warn: {first_text}"
+    );
+
+    // Modify the addendum source and simulate staleness by making the recorded commit diverge.
+    fs::write(
+        addendum.join("addendum.nuon"),
+        "{ name: staleadd, patches: [{ package: stalepkg, version: '0.2.0' }] }\n",
+    )
+    .unwrap();
+    let state_path = root.join("state").join("addendums").join("staleadd.nuon");
+    let mut state = fs::read_to_string(&state_path).unwrap();
+    state = state.replace('}', ", checked_commit: \"deadbeef\"}");
+    fs::write(&state_path, state).unwrap();
+
+    // Second info call should warn about staleness.
+    let second = run(root, &["info", "stalepkg"]);
+    assert_success(&second, "info succeeds but warns");
+    let second_text = format!("{}{}", stdout(&second), stderr(&second));
+    assert!(
+        second_text.contains("is stale"),
+        "stale addendum should warn: {second_text}"
+    );
+}
+
+#[test]
 fn signed_addendum_pins_key_and_rejects_tampering() {
     let root = TempDir::new().unwrap();
     let root = root.path();
