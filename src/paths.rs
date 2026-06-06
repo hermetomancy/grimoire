@@ -123,8 +123,10 @@ pub fn store_relative_dir(hash: &str, name: &str, version: &str) -> PathBuf {
 }
 
 pub fn target_triple() -> String {
-    let os = env::consts::OS;
-    let arch = env::consts::ARCH;
+    resolve_target_triple(env::consts::OS, env::consts::ARCH)
+}
+
+fn resolve_target_triple(os: &str, arch: &str) -> String {
     let abi = match os {
         "macos" => "darwin",
         "linux" => "musl",
@@ -159,5 +161,41 @@ mod tests {
     #[test]
     fn errors_without_override_or_home() {
         assert!(resolve_install_root(None, None).is_err());
+    }
+
+    #[test]
+    fn resolve_target_triple_linux_defaults_to_musl() {
+        assert_eq!(
+            resolve_target_triple("linux", "x86_64"),
+            "linux-x86_64-musl"
+        );
+        assert_eq!(
+            resolve_target_triple("linux", "aarch64"),
+            "linux-aarch64-musl"
+        );
+    }
+
+    #[test]
+    fn resolve_target_triple_macos_defaults_to_darwin() {
+        assert_eq!(
+            resolve_target_triple("macos", "x86_64"),
+            "macos-x86_64-darwin"
+        );
+        assert_eq!(
+            resolve_target_triple("macos", "aarch64"),
+            "macos-aarch64-darwin"
+        );
+    }
+
+    #[test]
+    fn resolve_target_triple_freebsd_defaults_to_unknown() {
+        assert_eq!(
+            resolve_target_triple("freebsd", "x86_64"),
+            "freebsd-x86_64-unknown"
+        );
+        assert_eq!(
+            resolve_target_triple("freebsd", "aarch64"),
+            "freebsd-aarch64-unknown"
+        );
     }
 }

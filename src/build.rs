@@ -436,4 +436,31 @@ mod tests {
         assert!(env.extra_env.iter().any(|(k, _)| k == "CFLAGS"));
         assert!(env.extra_env.iter().any(|(k, _)| k == "LDFLAGS"));
     }
+
+    #[test]
+    fn musl_build_env_has_exact_static_flags() {
+        let env = build_env_for_target(Vec::new(), Vec::new(), "linux-x86_64-musl").unwrap();
+        let get = |key: &str| {
+            env.extra_env
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get("CC"), Some("cc"));
+        assert_eq!(get("CXX"), Some("c++"));
+        assert_eq!(get("AR"), Some("ar"));
+        assert_eq!(get("LD"), Some("ld"));
+        assert_eq!(get("CFLAGS"), Some("-static"));
+        assert_eq!(get("LDFLAGS"), Some("-static"));
+    }
+
+    #[test]
+    fn musl_implicit_deps_are_appended_after_explicit_deps() {
+        let mut deps = Deps::default();
+        deps.build
+            .insert("default".to_owned(), vec![Dependency::any("cmake")]);
+        let build_deps = effective_build_deps(&deps, "hello", "linux-x86_64-musl");
+        let names: Vec<_> = build_deps.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["cmake", "fhs-compat", "clang", "musl", "llvm"]);
+    }
 }
