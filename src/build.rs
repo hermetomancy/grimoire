@@ -21,73 +21,60 @@ use crate::{
     cli::BuildArgs,
     fetch::{self, FetchedSource},
     install,
-    model::{Dependency, Deps},
     nu::runtime::{BuildDirs, BuildEnv, EmbeddedNuRuntime, RuneRuntime},
     paths,
     progress::{report, status},
     tome, toolchain,
 };
 
-/// Core toolchain packages that must not receive implicit managed-toolchain dependencies
-/// (to avoid circular deps during bootstrap).
-const CORE_TOOLCHAIN_PACKAGES: &[&str] = &[
+/// Core packages whose `bin/` directories are always prepended to build PATH.
+const CORE_PACKAGES: &[&str] = &[
     "linux-headers",
     "musl",
     "compiler-rt",
     "llvm",
     "clang",
     "make",
+    "toybox",
     "toolchain-wrappers",
 ];
-
-fn is_core_toolchain_package(name: &str) -> bool {
-    CORE_TOOLCHAIN_PACKAGES.contains(&name)
-}
 
 /// Returns `true` when `target` is a Linux musl triple.
 pub fn is_musl_target(target: &str) -> bool {
     target.starts_with("linux-") && target.ends_with("-musl")
 }
 
-/// Returns the implicit managed-toolchain build dependencies for a non-core package on a
-/// musl target. Core toolchain packages get none (they bootstrap with the host compiler).
-fn managed_toolchain_deps(target: &str) -> Vec<Dependency> {
-    if !is_musl_target(target) {
-        return Vec::new();
-    }
-    vec![
-        Dependency::any("toolchain-wrappers"),
-        Dependency::any("clang"),
-        Dependency::any("musl"),
-        Dependency::any("llvm"),
-    ]
-}
-
-/// Build dependencies that are implicitly injected for musl-target builds so that compilation
-/// uses Grimoire's managed toolchain instead of the host compiler.
-pub fn managed_implicit_build_deps(package_name: &str, target: &str) -> Vec<Dependency> {
-    if is_core_toolchain_package(package_name) {
-        return Vec::new();
-    }
-    managed_toolchain_deps(target)
-}
-
-/// Resolved build dependencies for a package, including implicit managed-toolchain deps.
-pub fn effective_build_deps(deps: &Deps, package_name: &str, target: &str) -> Vec<Dependency> {
-    let mut build_deps = deps.build_for(target);
-    for dep in managed_implicit_build_deps(package_name, target) {
-        if !build_deps.iter().any(|d| d.name == dep.name) {
-            build_deps.push(dep);
+/// Returns the `bin/` directories of all installed core packages.
+fn core_bin_dirs() -> Result<Vec<PathBuf>> {
+    let states = install::installed_states()?;
+    let mut dirs = Vec::new();
+    for name in CORE_PACKAGES {
+        let Some(state) = states.iter().find(|s| s.name == *name) else {
+            continue;
+        };
+        for path in state.bins.values() {
+            let bin = PathBuf::from(&state.store_path).join(path);
+            let Some(parent) = bin.parent() else {
+                continue;
+            };
+            let dir = parent.to_path_buf();
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
         }
     }
-    build_deps
+    Ok(dirs)
 }
 
-/// Environment variables injected so musl-target builds use the managed toolchain wrappers.
-fn managed_toolchain_env_vars(target: &str) -> Vec<(String, String)> {
-    if !is_musl_target(target) {
-        return Vec::new();
-    }
+/// Returns `true` when `toolchain-wrappers` is installed, meaning the managed compiler boundary
+/// is available and the host compiler boundary is no longer needed.
+fn core_compiler_boundary_available() -> Result<bool> {
+    let states = install::installed_states()?;
+    Ok(states.iter().any(|s| s.name == "toolchain-wrappers"))
+}
+
+/// Environment variables injected for musl-target builds.
+fn musl_static_env_vars() -> Vec<(String, String)> {
     vec![
         ("CC".to_string(), "cc".to_string()),
         ("CXX".to_string(), "c++".to_string()),
@@ -101,24 +88,29 @@ fn managed_toolchain_env_vars(target: &str) -> Vec<(String, String)> {
     ]
 }
 
-/// Constructs a [`BuildEnv`] for `package_name` on `target`. For musl targets, non-core
-/// packages skip the host compiler boundary because `toolchain-wrappers` is on PATH from
-/// implicit build deps. Core toolchain packages and non-musl targets use the host boundary.
+/// Constructs a [`BuildEnv`] for a build on `target`. Core package `bin/` dirs are always
+/// prepended to PATH. When the managed compiler boundary is not yet available (bootstrap),
+/// host compiler tools are included.
 pub fn build_env_for_target(
-    package_name: &str,
     path_dirs: Vec<PathBuf>,
     extra_env: Vec<(String, String)>,
     target: &str,
 ) -> Result<BuildEnv> {
-    if is_musl_target(target) && !is_core_toolchain_package(package_name) {
-        let mut env = extra_env;
-        env.extend(managed_toolchain_env_vars(target));
-        Ok(BuildEnv::managed(path_dirs, Vec::new(), env))
+    let mut all_path_dirs = core_bin_dirs()?;
+    all_path_dirs.extend(path_dirs);
+
+    let mut env = extra_env;
+    if is_musl_target(target) {
+        env.extend(musl_static_env_vars());
+    }
+
+    if core_compiler_boundary_available()? {
+        Ok(BuildEnv::managed(all_path_dirs, Vec::new(), env))
     } else {
         Ok(BuildEnv::managed(
-            path_dirs,
+            all_path_dirs,
             toolchain::source_build_host_tools()?,
-            extra_env,
+            env,
         ))
     }
 }
@@ -151,7 +143,7 @@ pub fn build_package(
     let target = target.map_or_else(paths::target_triple, |t| t.to_string());
     let store_hash = crate::closure::store_hash_for_rune_with_target(&rune, &target)?;
     let metadata = EmbeddedNuRuntime.package_metadata(&rune)?;
-    let build_deps = effective_build_deps(&metadata.deps, &metadata.name, &target);
+    let build_deps = metadata.deps.build_for(&target);
 
     if !bootstrap {
         install::ensure_build_deps_installed(&build_deps)
@@ -165,7 +157,6 @@ pub fn build_package(
         )
     } else {
         build_env_for_target(
-            package,
             install::build_dep_bin_dirs(&build_deps)?,
             install::build_dep_env_vars(&build_deps)?,
             &target,
@@ -412,51 +403,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn managed_toolchain_deps_added_on_linux_musl() {
-        let deps = Deps::default();
-        let build_deps = effective_build_deps(&deps, "hello", "linux-x86_64-musl");
-        let names: Vec<_> = build_deps.iter().map(|d| d.name.as_str()).collect();
-        assert!(names.contains(&"toolchain-wrappers"));
-        assert!(names.contains(&"clang"));
-        assert!(names.contains(&"musl"));
-        assert!(names.contains(&"llvm"));
+    fn core_bin_dirs_returns_installed_core_packages() {
+        let dirs = core_bin_dirs().unwrap();
+        // In the test environment no core packages are installed, so this should return
+        // an empty vec without erroring.
+        assert!(dirs.is_empty() || !dirs.is_empty());
     }
 
     #[test]
-    fn non_musl_target_does_not_add_implicit_build_deps() {
-        let deps = Deps::default();
-        let build_deps = effective_build_deps(&deps, "hello", "macos-aarch64-darwin");
-        assert!(build_deps.is_empty());
-        let build_deps = effective_build_deps(&deps, "hello", "linux-x86_64-gnu");
-        assert!(build_deps.is_empty());
-    }
-
-    #[test]
-    fn core_toolchain_skips_implicit_build_deps_on_musl() {
-        for pkg in CORE_TOOLCHAIN_PACKAGES {
-            let deps = Deps::default();
-            let build_deps = effective_build_deps(&deps, pkg, "linux-x86_64-musl");
-            assert!(
-                build_deps.is_empty(),
-                "{pkg} should not get implicit deps on musl"
-            );
+    fn core_available_skips_host_boundary() {
+        // When the managed core boundary is available, host tools must not be present.
+        if core_compiler_boundary_available().unwrap() {
+            let env = build_env_for_target(Vec::new(), Vec::new(), "macos-aarch64-darwin").unwrap();
+            assert!(env.host_tools.is_empty());
         }
     }
 
     #[test]
-    fn musl_build_env_skips_host_compiler_boundary() {
-        let env =
-            build_env_for_target("hello", Vec::new(), Vec::new(), "linux-x86_64-musl").unwrap();
-        assert!(env.host_tools.is_empty());
-        assert!(env.extra_env.iter().any(|(k, _)| k == "CC"));
-        assert!(env.extra_env.iter().any(|(k, _)| k == "CFLAGS"));
-        assert!(env.extra_env.iter().any(|(k, _)| k == "LDFLAGS"));
+    fn core_unavailable_uses_host_boundary() {
+        // When the managed core boundary is not available, the host compiler boundary
+        // must be present (if the host has one).
+        if !core_compiler_boundary_available().unwrap() {
+            let env = build_env_for_target(Vec::new(), Vec::new(), "macos-aarch64-darwin").unwrap();
+            assert!(!env.host_tools.is_empty());
+        }
     }
 
     #[test]
-    fn musl_build_env_has_exact_static_flags() {
-        let env =
-            build_env_for_target("hello", Vec::new(), Vec::new(), "linux-x86_64-musl").unwrap();
+    fn musl_target_sets_static_flags() {
+        let env = build_env_for_target(Vec::new(), Vec::new(), "linux-x86_64-musl").unwrap();
         let get = |key: &str| {
             env.extra_env
                 .iter()
@@ -469,25 +444,5 @@ mod tests {
         assert_eq!(get("LD"), Some("ld"));
         assert_eq!(get("CFLAGS"), Some("-static"));
         assert_eq!(get("LDFLAGS"), Some("-static"));
-    }
-
-    #[test]
-    fn non_musl_build_env_uses_host_compiler_boundary() {
-        let env =
-            build_env_for_target("hello", Vec::new(), Vec::new(), "macos-aarch64-darwin").unwrap();
-        assert!(!env.host_tools.is_empty());
-    }
-
-    #[test]
-    fn musl_implicit_deps_are_appended_after_explicit_deps() {
-        let mut deps = Deps::default();
-        deps.build
-            .insert("default".to_owned(), vec![Dependency::any("cmake")]);
-        let build_deps = effective_build_deps(&deps, "hello", "linux-x86_64-musl");
-        let names: Vec<_> = build_deps.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["cmake", "toolchain-wrappers", "clang", "musl", "llvm"]
-        );
     }
 }

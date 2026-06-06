@@ -323,15 +323,10 @@ pub(crate) fn ensure_build_deps_installed(deps: &[Dependency]) -> Result<()> {
                 rune,
             )
             .with_context(|| format!("apply addendums to {}", rune.display()))?;
-            let build_deps = build::effective_build_deps(
-                &metadata.deps,
-                &metadata.name,
-                &paths::target_triple(),
-            );
+            let build_deps = metadata.deps.build_for(&paths::target_triple());
             ensure_build_deps_installed(&build_deps)
                 .with_context(|| format!("install build dependencies for `{}`", step.name))?;
             let env = build::build_env_for_target(
-                &metadata.name,
                 build_dep_bin_dirs(&build_deps)?,
                 build_dep_env_vars(&build_deps)?,
                 &paths::target_triple(),
@@ -423,7 +418,7 @@ impl Installer {
             rune.display()
         );
         let target = paths::target_triple();
-        let mut combined = build::effective_build_deps(&metadata.deps, &metadata.name, &target);
+        let mut combined = metadata.deps.build_for(&target);
         combined.extend(
             metadata
                 .deps
@@ -623,15 +618,10 @@ impl Installer {
                 ),
                 None => None,
             };
-            let build_deps = build::effective_build_deps(
-                &metadata.deps,
-                &metadata.name,
-                &paths::target_triple(),
-            );
+            let build_deps = metadata.deps.build_for(&paths::target_triple());
             self.install_deps(&build_deps)
                 .with_context(|| format!("install build dependencies for `{}`", metadata.name))?;
             let env = build::build_env_for_target(
-                &metadata.name,
                 build_dep_bin_dirs(&build_deps)?,
                 build_dep_env_vars(&build_deps)?,
                 &paths::target_triple(),
