@@ -207,7 +207,7 @@ pub fn list_generations() -> Result<Vec<Generation>> {
         }
     }
 
-    generations.sort_by(|a, b| b.id.cmp(&a.id));
+    generations.sort_by_key(|b| std::cmp::Reverse(b.id));
 
     if changed {
         if let Err(e) = write_registry(&generations) {
@@ -225,7 +225,7 @@ pub fn list_generations() -> Result<Vec<Generation>> {
 pub fn rollback() -> Result<u64> {
     let current = current_generation_id()?.context("no active generation to roll back from")?;
     let mut generations = list_generations()?;
-    generations.sort_by(|a, b| b.id.cmp(&a.id));
+    generations.sort_by_key(|b| std::cmp::Reverse(b.id));
 
     let previous = generations
         .into_iter()
@@ -246,7 +246,7 @@ pub fn rollback() -> Result<u64> {
 /// generations, then deletes any store path not referenced by a retained generation.
 pub fn gc(keep: usize) -> Result<()> {
     let mut generations = list_generations()?;
-    generations.sort_by(|a, b| b.id.cmp(&a.id));
+    generations.sort_by_key(|b| std::cmp::Reverse(b.id));
 
     if generations.is_empty() {
         report("no generations to collect");

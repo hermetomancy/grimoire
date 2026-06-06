@@ -5,7 +5,9 @@
 //! paths portable across users and machines.
 
 use anyhow::{Context, Result, bail};
-use std::{env, fs, io::Write, path::Path};
+#[cfg(target_os = "macos")]
+use std::io::Write;
+use std::{env, fs, path::Path};
 
 use crate::paths;
 
