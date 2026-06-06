@@ -270,6 +270,7 @@ impl Resolver<'_> {
                     return Dependency {
                         name: provider.clone(),
                         req: dep.req.clone(),
+                        platform: dep.platform.clone(),
                     };
                 }
             }
@@ -279,6 +280,7 @@ impl Resolver<'_> {
         Dependency {
             name: providers[0].clone(),
             req: dep.req.clone(),
+            platform: dep.platform.clone(),
         }
     }
 
@@ -332,18 +334,25 @@ impl Resolver<'_> {
         }
 
         let candidates = self.candidates_for(name)?;
+        let target = paths::target_triple();
         let mut last_err = None;
         for candidate in candidates {
             if !req.matches(&candidate.version) {
                 continue;
             }
+            let runtime: Vec<Dependency> = candidate
+                .runtime
+                .iter()
+                .filter(|d| d.matches_platform(&target))
+                .cloned()
+                .collect();
             // Try this candidate against a clone so a branch that fails deeper rolls back.
             let mut trial = chosen.clone();
             trial.insert(
                 name.clone(),
                 ChosenNode {
                     version: candidate.version.clone(),
-                    deps: candidate.runtime.iter().map(|d| d.name.clone()).collect(),
+                    deps: runtime.iter().map(|d| d.name.clone()).collect(),
                     route: Some(Route {
                         rune: candidate.rune.clone(),
                         substitutes: candidate.substitutes.clone(),
@@ -351,7 +360,7 @@ impl Resolver<'_> {
                 },
             );
             let mut next: Vec<Dependency> = rest.to_vec();
-            next.extend(candidate.runtime.iter().cloned());
+            next.extend(runtime);
             match self.resolve_list(&next, &mut trial) {
                 Ok(()) => {
                     *chosen = trial;
@@ -433,9 +442,17 @@ fn gather_candidates(name: &str, target: &str) -> Result<Vec<Candidate>> {
         for (store_hash, entry) in index.candidates(name, target) {
             let version = parse_version_relaxed(&entry.version)
                 .with_context(|| format!("index version `{}` for `{name}`", entry.version))?;
+            let filtered_runtime: Vec<Dependency> = entry
+                .runtime_deps
+                .iter()
+                .filter(|d| d.matches_platform(target))
+                .cloned()
+                .collect();
             let slot = by_version
                 .entry(version)
-                .or_insert_with(|| (entry.runtime_deps.clone(), Vec::new()));
+                .or_insert_with(|| (filtered_runtime.clone(), Vec::new()));
+            // Ensure the slot uses the filtered runtime deps even on first insertion.
+            slot.0 = filtered_runtime;
             slot.1.push(Substitute {
                 root: root.clone(),
                 store_hash: store_hash.to_string(),
@@ -459,7 +476,13 @@ fn gather_candidates(name: &str, target: &str) -> Result<Vec<Candidate>> {
             .with_context(|| format!("apply addendums to {}", rune.display()))?;
             let version = parse_version_relaxed(&metadata.version)
                 .with_context(|| format!("rune version `{}` for `{name}`", metadata.version))?;
-            Some((version, metadata.deps.runtime, rune))
+            let runtime: Vec<Dependency> = metadata
+                .deps
+                .runtime
+                .into_iter()
+                .filter(|d| d.matches_platform(target))
+                .collect();
+            Some((version, runtime, rune))
         }
         None => None,
     };
@@ -574,6 +597,7 @@ mod tests {
         Dependency {
             name: name.to_owned(),
             req: VersionReq::parse(req).expect("req"),
+            platform: None,
         }
     }
 
@@ -768,6 +792,94 @@ mod tests {
         assert!(
             format!("{err:#}").contains("shared") || format!("{err:#}").contains("conflict"),
             "unexpected error: {err:#}"
+        );
+    }
+
+    fn platform_dep(name: &str, req: &str, platform: &str) -> Dependency {
+        Dependency {
+            name: name.to_owned(),
+            req: VersionReq::parse(req).expect("req"),
+            platform: Some(platform.to_owned()),
+        }
+    }
+
+    #[test]
+    fn filters_platform_conditional_deps_that_do_not_match() {
+        let target = paths::target_triple();
+        let current_os = target.split('-').next().unwrap();
+        let other_os = if current_os == "linux" {
+            "macos"
+        } else {
+            "linux"
+        };
+        let src = source(&[
+            (
+                "app",
+                vec![cand(
+                    "1.0.0",
+                    &[
+                        platform_dep("current-os-dep", "*", current_os),
+                        platform_dep("other-os-dep", "*", other_os),
+                    ],
+                )],
+            ),
+            ("current-os-dep", vec![cand("1.0.0", &[])]),
+            ("other-os-dep", vec![cand("1.0.0", &[])]),
+        ]);
+        let steps = plan(&[dep("app", ">=1.0")], &src).expect("plan");
+        assert!(
+            steps.iter().any(|(n, _)| n == "current-os-dep"),
+            "current-os-dep should be kept: {steps:?}"
+        );
+        assert!(
+            !steps.iter().any(|(n, _)| n == "other-os-dep"),
+            "other-os-dep should be filtered out: {steps:?}"
+        );
+    }
+
+    #[test]
+    fn keeps_platform_conditional_deps_that_match_glob() {
+        let target = paths::target_triple();
+        // Build a glob that matches the current target: "*-*-*" always matches.
+        let pattern = format!(
+            "{}-*-{}",
+            target.split('-').next().unwrap(),
+            target.split('-').nth(2).unwrap()
+        );
+        let src = source(&[
+            (
+                "app",
+                vec![cand("1.0.0", &[platform_dep("matched-dep", "*", &pattern)])],
+            ),
+            ("matched-dep", vec![cand("1.0.0", &[])]),
+        ]);
+        let steps = plan(&[dep("app", ">=1.0")], &src).expect("plan");
+        assert!(steps.iter().any(|(n, _)| n == "matched-dep"), "{steps:?}");
+    }
+
+    #[test]
+    fn filters_platform_conditional_deps_that_do_not_match_glob() {
+        let target = paths::target_triple();
+        // A glob that can never match any real target triple: swap OS and ABI.
+        let pattern = format!(
+            "{}-*-{}",
+            target.split('-').nth(2).unwrap(),
+            target.split('-').next().unwrap()
+        );
+        let src = source(&[
+            (
+                "app",
+                vec![cand(
+                    "1.0.0",
+                    &[platform_dep("unmatched-dep", "*", &pattern)],
+                )],
+            ),
+            ("unmatched-dep", vec![cand("1.0.0", &[])]),
+        ]);
+        let steps = plan(&[dep("app", ">=1.0")], &src).expect("plan");
+        assert!(
+            !steps.iter().any(|(n, _)| n == "unmatched-dep"),
+            "unmatched-dep should be filtered out: {steps:?}"
         );
     }
 }

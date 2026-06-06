@@ -256,10 +256,17 @@ pub(crate) fn install_store_only(
     ));
     let version = parse_version_relaxed(&metadata.version)
         .with_context(|| format!("package version `{}` is not valid semver", metadata.version))?;
+    let target = paths::target_triple();
+    let runtime_deps: Vec<Dependency> = metadata
+        .deps
+        .runtime
+        .into_iter()
+        .filter(|d| d.matches_platform(&target))
+        .collect();
     Ok(InstalledArchive {
         name: metadata.name,
         version,
-        runtime_deps: metadata.deps.runtime,
+        runtime_deps,
     })
 }
 
@@ -410,8 +417,16 @@ impl Installer {
             metadata.version,
             rune.display()
         );
-        let mut combined = metadata.deps.build_for(&paths::target_triple());
-        combined.extend(metadata.deps.runtime.clone());
+        let target = paths::target_triple();
+        let mut combined = metadata.deps.build_for(&target);
+        combined.extend(
+            metadata
+                .deps
+                .runtime
+                .iter()
+                .filter(|d| d.matches_platform(&target))
+                .cloned(),
+        );
         if combined.is_empty() {
             return Ok(());
         }
@@ -431,10 +446,18 @@ impl Installer {
             metadata.version,
             archive_path.display()
         );
-        if metadata.deps.runtime.is_empty() {
+        let target = paths::target_triple();
+        let runtime: Vec<Dependency> = metadata
+            .deps
+            .runtime
+            .iter()
+            .filter(|d| d.matches_platform(&target))
+            .cloned()
+            .collect();
+        if runtime.is_empty() {
             return Ok(());
         }
-        let plan = solve::resolve(&metadata.deps.runtime, &self.installed, self.pins.as_ref())?;
+        let plan = solve::resolve(&runtime, &self.installed, self.pins.as_ref())?;
         print_plan_body(&plan);
         Ok(())
     }
@@ -768,13 +791,15 @@ pub(crate) fn build_dep_bin_dirs(deps: &[Dependency]) -> Result<Vec<PathBuf>> {
     Ok(dirs)
 }
 
-/// Computes additional environment variables (PKG_CONFIG_PATH, CPATH, LIBRARY_PATH) from the
-/// installed build dependencies so that compilers and pkg-config can find headers and libraries.
+/// Computes additional environment variables (PKG_CONFIG_PATH, CPATH, LIBRARY_PATH, and
+/// `<DEP>_PREFIX` for each build dep) from the installed build dependencies so that compilers
+/// and pkg-config can find headers and libraries.
 pub(crate) fn build_dep_env_vars(deps: &[Dependency]) -> Result<Vec<(String, String)>> {
     let states = installed_states()?;
     let mut pkg_config_paths = Vec::new();
     let mut cpaths = Vec::new();
     let mut library_paths = Vec::new();
+    let mut prefix_vars = Vec::new();
 
     for dep in deps {
         let Some(state) = find_dep_state(&states, &dep.name) else {
@@ -793,6 +818,8 @@ pub(crate) fn build_dep_env_vars(deps: &[Dependency]) -> Result<Vec<(String, Str
         if lib.is_dir() && !library_paths.contains(&lib) {
             library_paths.push(lib);
         }
+        let env_name = format!("{}_PREFIX", dep.name.to_ascii_uppercase().replace('-', "_"));
+        prefix_vars.push((env_name, state.store_path.clone()));
     }
 
     let mut env = Vec::new();
@@ -820,6 +847,7 @@ pub(crate) fn build_dep_env_vars(deps: &[Dependency]) -> Result<Vec<(String, Str
                 .unwrap_or_default(),
         ));
     }
+    env.extend(prefix_vars);
     Ok(env)
 }
 
@@ -1155,6 +1183,7 @@ fn write_state(
             .deps
             .runtime
             .iter()
+            .filter(|d| d.matches_platform(&paths::target_triple()))
             .map(|dep| dep.name.clone())
             .collect(),
         build_deps: metadata
