@@ -21,6 +21,9 @@ Grimoire does not shell out for its own machinery.
    package's business, not Grimoire's.
 4. If a capability seems to require an external tool, find or vendor a Rust crate. "No suitable
    crate" is a design problem, not a license to shell out.
+5. **Exception:** read-only host toolchain discovery (`cc --version`, `ld --version`, etc.) may
+   shell out because version strings are not embedded in a parseable form in all binary formats.
+   This is limited to `src/toolchain.rs` and only for identity discovery, not for builds.
 
 ## 2. Rust idiom
 

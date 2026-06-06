@@ -194,6 +194,10 @@ fn addendum_add_list_remove() {
     let state = fs::read_to_string(&state_path).unwrap();
     assert!(state.contains("name: localpatches"), "state name: {state}");
     assert!(state.contains("ref: main"), "state ref: {state}");
+    assert!(
+        !state.contains("signer_pubkeys"),
+        "unsigned addendum records no pin: {state}"
+    );
 
     let list = run(root, &["addendum", "list"]);
     assert_success(&list, "addendum list");
@@ -211,6 +215,191 @@ fn addendum_add_list_remove() {
     assert!(
         !state_path.exists(),
         "removed addendum state should be gone"
+    );
+}
+
+#[test]
+fn signed_addendum_pins_key_and_rejects_tampering() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let keypair = gen_keypair();
+    let pubkey = keypair.pk.to_base64();
+
+    // Tome with a package the addendum can patch.
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = { name: 'adtome' packages: { repo: 'dist', format: 'local', index: 'index.nuon' } }\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("adpatch.rn"),
+        "export const package = { name: 'adpatch' version: '0.1.0' bins: { adpatch: 'bin/adpatch' } }\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  echo '#!/usr/bin/env sh' | save ($ctx.package_dir | path join 'bin' 'adpatch')\n}\n",
+    )
+    .unwrap();
+
+    let addendum = TempDir::new().unwrap();
+    let addendum_path = addendum.path();
+    fs::write(
+        addendum_path.join("addendum.nuon"),
+        format!("{{ name: signedpatches signers: ['{pubkey}'] patches: [{{ package: adpatch version: '0.2.0' }}] }}\n"),
+    )
+    .unwrap();
+    sign_to(
+        &addendum_path.join("addendum.nuon.minisig"),
+        &fs::read(addendum_path.join("addendum.nuon")).unwrap(),
+        &keypair,
+    );
+
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "add tome for signed addendum test",
+    );
+    assert_success(
+        &run(
+            root,
+            &[
+                "addendum",
+                "add",
+                addendum_path.to_str().unwrap(),
+                "--ref",
+                "main",
+            ],
+        ),
+        "add signed addendum",
+    );
+
+    // `info` triggers addendum sync (first use = TOFU pin).
+    let info = run(root, &["info", "adpatch"]);
+    assert_success(&info, "info triggers addendum sync and TOFU pin");
+    let info_text = format!("{}{}", stdout(&info), stderr(&info));
+    assert!(
+        info_text.contains("pinned 1 signer(s)"),
+        "first use should report TOFU pin: {info_text}"
+    );
+
+    let state = fs::read_to_string(
+        root.join("state")
+            .join("addendums")
+            .join("signedpatches.nuon"),
+    )
+    .unwrap();
+    assert!(
+        state.contains("signer_pubkeys"),
+        "state records a pin: {state}"
+    );
+    assert!(
+        state.contains(&pubkey),
+        "state records the actual key: {state}"
+    );
+
+    // Tamper the cached manifest without re-signing.
+    let cached_manifest = root
+        .join("cache")
+        .join("addendums")
+        .join("signedpatches")
+        .join("addendum.nuon");
+    let tampered = fs::read_to_string(&cached_manifest)
+        .unwrap()
+        .replace("signedpatches", "evilpatches");
+    fs::write(&cached_manifest, tampered).unwrap();
+
+    // Re-running `info` should verify the addendum signature and fail.
+    let blocked = run(root, &["info", "adpatch"]);
+    assert_failure_contains(&blocked, "signature", "tampered addendum is refused");
+}
+
+#[test]
+fn signed_addendum_refuses_key_rotation_without_readd() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let key_a = gen_keypair();
+
+    // Tome with a package.
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = { name: 'adtome2' packages: { repo: 'dist', format: 'local', index: 'index.nuon' } }\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("adpatch2.rn"),
+        "export const package = { name: 'adpatch2' version: '0.1.0' bins: { adpatch2: 'bin/adpatch2' } }\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  echo '#!/usr/bin/env sh' | save ($ctx.package_dir | path join 'bin' 'adpatch2')\n}\n",
+    )
+    .unwrap();
+
+    let addendum = TempDir::new().unwrap();
+    let addendum_path = addendum.path();
+    fs::write(
+        addendum_path.join("addendum.nuon"),
+        format!("{{ name: rotatepatches signers: ['{}'] patches: [{{ package: adpatch2 version: '0.2.0' }}] }}\n", key_a.pk.to_base64()),
+    )
+    .unwrap();
+    sign_to(
+        &addendum_path.join("addendum.nuon.minisig"),
+        &fs::read(addendum_path.join("addendum.nuon")).unwrap(),
+        &key_a,
+    );
+
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "add tome for signed addendum rotation test",
+    );
+    assert_success(
+        &run(
+            root,
+            &[
+                "addendum",
+                "add",
+                addendum_path.to_str().unwrap(),
+                "--ref",
+                "main",
+            ],
+        ),
+        "add signed addendum",
+    );
+
+    // First use syncs and pins key A.
+    let info = run(root, &["info", "adpatch2"]);
+    assert_success(&info, "first use pins key A");
+
+    // Rebuild addendum with key B.
+    let key_b = gen_keypair();
+    fs::write(
+        addendum_path.join("addendum.nuon"),
+        format!("{{ name: rotatepatches signers: ['{}'] patches: [{{ package: adpatch2 version: '0.2.0' }}] }}\n", key_b.pk.to_base64()),
+    )
+    .unwrap();
+    sign_to(
+        &addendum_path.join("addendum.nuon.minisig"),
+        &fs::read(addendum_path.join("addendum.nuon")).unwrap(),
+        &key_b,
+    );
+
+    // Delete cache to force re-sync on next use.
+    let cache = root.join("cache").join("addendums").join("rotatepatches");
+    fs::remove_dir_all(&cache).unwrap();
+
+    // Re-sync should detect key rotation and fail.
+    let rotate = run(root, &["info", "adpatch2"]);
+    assert_failure_contains(
+        &rotate,
+        "different set of signing keys",
+        "key rotation without re-add is refused",
     );
 }
 
@@ -541,7 +730,7 @@ fn stale_prebuilt_is_rebuilt_from_source() {
     fs::write(
         dist.join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"stalepkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", store_hash: \"0000000000000000\", runtime_deps: [] }}\n  ]\n}}\n"
+            "{{\n  format: 2,\n    entries: {{\n    \"0000000000000000\": {{ name: \"stalepkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", runtime_deps: []}}\n  }}\n}}\n"
         ),
     )
     .unwrap();
@@ -977,7 +1166,7 @@ printf '%s\n' "$prefix" > configured-prefix.txt
     fs::write(
         dist.join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"minimake\", version: \"0.1.0\", target: \"{}\", archive: \"{minimake_archive_name}\", archive_hash: \"{minimake_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n",
+            "{{\n  format: 2,\n    entries: {{\n    \"cafef00dcafef00d\": {{ name: \"minimake\", version: \"0.1.0\", target: \"{}\", archive: \"{minimake_archive_name}\", archive_hash: \"{minimake_hash}\", runtime_deps: []}}\n  }}\n}}\n",
             target_triple()
         ),
     )
@@ -1735,7 +1924,7 @@ fn install_resolves_binary_over_http() {
     fs::write(
         published.join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"httppkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n"
+            "{{\n  format: 2,\n    entries: {{\n    \"cafef00dcafef00d\": {{ name: \"httppkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", runtime_deps: []}}\n  }}\n}}\n"
         ),
     )
     .unwrap();
@@ -1837,7 +2026,7 @@ fn install_pulls_in_runtime_dependencies() {
     fs::write(
         tome.join("dist").join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"app\", version: \"0.1.0\", target: \"{triple}\", archive: \"{app_name}\", archive_hash: \"{app_hash}\", store_hash: \"{app_store}\", runtime_deps: [\"lib\"] }}\n    {{ name: \"lib\", version: \"0.1.0\", target: \"{triple}\", archive: \"{lib_name}\", archive_hash: \"{lib_hash}\", store_hash: \"{lib_store}\", runtime_deps: [] }}\n  ]\n}}\n"
+            "{{\n  format: 2,\n    entries: {{\n    \"{app_store}\": {{ name: \"app\", version: \"0.1.0\", target: \"{triple}\", archive: \"{app_name}\", archive_hash: \"{app_hash}\", runtime_deps: [\"lib\"]}}\n    \"{lib_store}\": {{ name: \"lib\", version: \"0.1.0\", target: \"{triple}\", archive: \"{lib_name}\", archive_hash: \"{lib_hash}\", runtime_deps: []}}\n  }}\n}}\n"
         ),
     )
     .unwrap();
@@ -1889,39 +2078,42 @@ fn install_selects_constrained_dependency_version() {
     .unwrap();
     let dist = tome.join("dist");
     let app_name = format!("app-1.0.0-{triple}.tar.zst");
-    let app = make_versioned_archive(
+    let app = make_versioned_archive_with_hash(
         &dist.join(&app_name),
         "app",
         "1.0.0",
         &triple,
         "#!/usr/bin/env sh\nprintf 'app\\n'\n",
+        "cafef00dcafef000",
     );
     let app_hash = sha256_file(&app);
 
     let lib1_name = format!("lib-1.0.0-{triple}.tar.zst");
-    let lib1 = make_versioned_archive(
+    let lib1 = make_versioned_archive_with_hash(
         &dist.join(&lib1_name),
         "lib",
         "1.0.0",
         &triple,
         "#!/usr/bin/env sh\nprintf 'lib 1.0\\n'\n",
+        "cafef00dcafef001",
     );
     let lib1_hash = sha256_file(&lib1);
 
     let lib2_name = format!("lib-2.0.0-{triple}.tar.zst");
-    let lib2 = make_versioned_archive(
+    let lib2 = make_versioned_archive_with_hash(
         &dist.join(&lib2_name),
         "lib",
         "2.0.0",
         &triple,
         "#!/usr/bin/env sh\nprintf 'lib 2.0\\n'\n",
+        "cafef00dcafef002",
     );
     let lib2_hash = sha256_file(&lib2);
 
     fs::write(
         dist.join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"app\", version: \"1.0.0\", target: \"{triple}\", archive: \"{app_name}\", archive_hash: \"{app_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [{{ name: \"lib\", version: \"<2.0\" }}] }}\n    {{ name: \"lib\", version: \"1.0.0\", target: \"{triple}\", archive: \"{lib1_name}\", archive_hash: \"{lib1_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n    {{ name: \"lib\", version: \"2.0.0\", target: \"{triple}\", archive: \"{lib2_name}\", archive_hash: \"{lib2_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n"
+            "{{\n  format: 2,\n    entries: {{\n    \"cafef00dcafef000\": {{ name: \"app\", version: \"1.0.0\", target: \"{triple}\", archive: \"{app_name}\", archive_hash: \"{app_hash}\", runtime_deps: [{{ name: \"lib\", version: \"<2.0\" }}]}}\n    \"cafef00dcafef001\": {{ name: \"lib\", version: \"1.0.0\", target: \"{triple}\", archive: \"{lib1_name}\", archive_hash: \"{lib1_hash}\", runtime_deps: []}}\n    \"cafef00dcafef002\": {{ name: \"lib\", version: \"2.0.0\", target: \"{triple}\", archive: \"{lib2_name}\", archive_hash: \"{lib2_hash}\", runtime_deps: []}}\n  }}\n}}\n"
         ),
     )
     .unwrap();
@@ -2120,7 +2312,7 @@ fn remove_autoremoves_orphaned_runtime_dependencies() {
         // record reads from the archive, and the autoremove cascade reads from that state.
         let package_nuon = format!(
             "{{format: 1, name: \"{pkg}\", version: \"0.1.0\", target: \"{triple}\", store_path: \"{}\", bins: {{{pkg}: \"bin/{pkg}\"}}, deps: {{ runtime: {deps} }}}}\n",
-            fake_store_basename(pkg, "0.1.0")
+            fake_store_basename_with_hash(pkg, "0.1.0", &format!("cafef00dcafef00d-{pkg}"))
         );
         let archive_path = dist.join(&name);
         if let Some(parent) = archive_path.parent() {
@@ -2142,12 +2334,15 @@ fn remove_autoremoves_orphaned_runtime_dependencies() {
         finish_archive(builder);
         let hash = sha256_file(&archive_path);
         entries.push(format!(
-            "    {{ name: \"{pkg}\", version: \"0.1.0\", target: \"{triple}\", archive: \"{name}\", archive_hash: \"{hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: {deps} }}"
+            "    \"cafef00dcafef00d-{pkg}\": {{ name: \"{pkg}\", version: \"0.1.0\", target: \"{triple}\", archive: \"{name}\", archive_hash: \"{hash}\", runtime_deps: {deps}}}"
         ));
     }
     fs::write(
         dist.join("index.nuon"),
-        format!("{{\n  packages: [\n{}\n  ]\n}}\n", entries.join("\n")),
+        format!(
+            "{{\n  format: 2,\n    entries: {{\n{}\n  }}\n}}\n",
+            entries.join("\n")
+        ),
     )
     .unwrap();
 
@@ -2244,7 +2439,7 @@ fn completions_and_man_render_from_cli_definition() {
 }
 
 #[test]
-fn signed_tome_pins_key_and_rejects_index_tampering() {
+fn signed_tome_pins_key_and_rejects_archive_tampering() {
     let root = TempDir::new().unwrap();
     let root = root.path();
     let triple = target_triple();
@@ -2267,7 +2462,7 @@ fn signed_tome_pins_key_and_rejects_index_tampering() {
     assert_success(&update, "update signed tome");
     let update_text = format!("{}{}", stdout(&update), stderr(&update));
     assert!(
-        update_text.contains("pinned signing key"),
+        update_text.contains("pinned 1 signer(s)"),
         "update should report the TOFU pin: {update_text}"
     );
 
@@ -2275,7 +2470,7 @@ fn signed_tome_pins_key_and_rejects_index_tampering() {
     let state =
         fs::read_to_string(root.join("state").join("tomes").join("signedcore.nuon")).unwrap();
     assert!(
-        state.contains("signer_pubkey"),
+        state.contains("signer_pubkeys"),
         "state records a pin: {state}"
     );
     assert!(
@@ -2283,7 +2478,7 @@ fn signed_tome_pins_key_and_rejects_index_tampering() {
         "state records the actual key: {state}"
     );
 
-    // Install verifies the signed index against the pinned key and succeeds.
+    // Install verifies the signed archive against the pinned key and succeeds.
     assert_success(
         &run(root, &["install", "sgnpkg"]),
         "install from signed tome",
@@ -2294,21 +2489,22 @@ fn signed_tome_pins_key_and_rejects_index_tampering() {
     // short-circuiting as already-installed.
     assert_success(&run(root, &["remove", "sgnpkg"]), "remove before reinstall");
 
-    // Tamper the cached index without re-signing: the read path must refuse it before fetching
-    // or extracting any archive.
-    let cached_index = root
+    // Tamper the cached archive without re-signing: the read path must refuse it before
+    // extracting.
+    let archive_name = format!("sgnpkg-0.1.0-{triple}.tar.zst");
+    let cached_archive = root
         .join("cache")
         .join("tomes")
         .join("signedcore")
         .join("dist")
-        .join("index.nuon");
-    let tampered = fs::read_to_string(&cached_index)
-        .unwrap()
-        .replace("sgnpkg", "evilpkg");
-    fs::write(&cached_index, tampered).unwrap();
+        .join(&archive_name);
+    let tampered = fs::read(&cached_archive).unwrap();
+    let mut tampered = tampered;
+    tampered[0] ^= 0xFF; // flip first byte
+    fs::write(&cached_archive, tampered).unwrap();
 
     let blocked = run(root, &["install", "sgnpkg"]);
-    assert_failure_contains(&blocked, "signature", "tampered index is refused");
+    assert_failure_contains(&blocked, "signature", "tampered archive is refused");
 }
 
 #[test]
@@ -2334,15 +2530,15 @@ fn signed_tome_refuses_key_rotation_without_readd() {
         "pin key A on first update",
     );
 
-    // Re-advertise and re-sign the (byte-identical) index with a *different* key. A silent
-    // accept here would defeat the whole point of pinning, so it must be refused.
+    // Re-advertise and re-sign with a *different* key. A silent accept here would defeat the
+    // whole point of pinning, so it must be refused.
     let key_b = gen_keypair();
     build_signed_tome(tome, "rotatecore", &triple, &key_b);
 
     let rotate = run(root, &["tome", "update", "rotatecore"]);
     assert_failure_contains(
         &rotate,
-        "different signing key",
+        "different set of signing keys",
         "key rotation without re-add is refused",
     );
 }
@@ -2382,7 +2578,7 @@ fn unsigned_tome_leaves_no_pin() {
     fs::write(
         dist.join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"plainpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n"
+            "{{\n  format: 2,\n    entries: {{\n    \"cafef00dcafef00d\": {{ name: \"plainpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", runtime_deps: []}}\n  }}\n}}\n"
         ),
     )
     .unwrap();
@@ -2401,7 +2597,7 @@ fn unsigned_tome_leaves_no_pin() {
     let state =
         fs::read_to_string(root.join("state").join("tomes").join("plaincore.nuon")).unwrap();
     assert!(
-        !state.contains("signer_pubkey"),
+        !state.contains("signer_pubkeys"),
         "unsigned tome records no pin: {state}"
     );
     assert_success(
@@ -2452,7 +2648,7 @@ fn install_dry_run_prints_plan_without_touching_state() {
     fs::write(
         dist.join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"app\", version: \"0.1.0\", target: \"{triple}\", archive: \"{app_name}\", archive_hash: \"{app_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [\"lib\"] }}\n    {{ name: \"lib\", version: \"0.1.0\", target: \"{triple}\", archive: \"{lib_name}\", archive_hash: \"{lib_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n"
+            "{{\n  format: 2,\n    entries: {{\n    \"cafef00dcafef000\": {{ name: \"app\", version: \"0.1.0\", target: \"{triple}\", archive: \"{app_name}\", archive_hash: \"{app_hash}\", runtime_deps: [\"lib\"]}}\n    \"cafef00dcafef001\": {{ name: \"lib\", version: \"0.1.0\", target: \"{triple}\", archive: \"{lib_name}\", archive_hash: \"{lib_hash}\", runtime_deps: []}}\n  }}\n}}\n"
         ),
     )
     .unwrap();
@@ -2574,18 +2770,19 @@ fn hold_skips_upgrade_until_released() {
 
     let dist = tome.join("dist");
     let v1_name = format!("holdpkg-0.1.0-{triple}.tar.zst");
-    let v1 = make_versioned_archive(
+    let v1 = make_versioned_archive_with_hash(
         &dist.join(&v1_name),
         "holdpkg",
         "0.1.0",
         &triple,
         "#!/usr/bin/env sh\nprintf 'v1\\n'\n",
+        "cafef00dcafef000",
     );
     let v1_hash = sha256_file(&v1);
     fs::write(
         dist.join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"holdpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n"
+            "{{\n  format: 2,\n    entries: {{\n    \"cafef00dcafef000\": {{ name: \"holdpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", runtime_deps: []}}\n  }}\n}}\n"
         ),
     )
     .unwrap();
@@ -2618,18 +2815,19 @@ fn hold_skips_upgrade_until_released() {
 
     // Publish a newer release and refresh the tome so the upgrader sees it.
     let v2_name = format!("holdpkg-0.2.0-{triple}.tar.zst");
-    let v2 = make_versioned_archive(
+    let v2 = make_versioned_archive_with_hash(
         &dist.join(&v2_name),
         "holdpkg",
         "0.2.0",
         &triple,
         "#!/usr/bin/env sh\nprintf 'v2\\n'\n",
+        "cafef00dcafef001",
     );
     let v2_hash = sha256_file(&v2);
     fs::write(
         dist.join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"holdpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n    {{ name: \"holdpkg\", version: \"0.2.0\", target: \"{triple}\", archive: \"{v2_name}\", archive_hash: \"{v2_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n"
+            "{{\n  format: 2,\n    entries: {{\n    \"cafef00dcafef000\": {{ name: \"holdpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", runtime_deps: []}}\n    \"cafef00dcafef001\": {{ name: \"holdpkg\", version: \"0.2.0\", target: \"{triple}\", archive: \"{v2_name}\", archive_hash: \"{v2_hash}\", runtime_deps: []}}\n  }}\n}}\n"
         ),
     )
     .unwrap();
@@ -2697,18 +2895,19 @@ fn upgrade_syncs_configured_tomes_before_resolving_versions() {
     .unwrap();
 
     let v1_name = format!("uppkg-0.1.0-{triple}.tar.zst");
-    let v1 = make_versioned_archive(
+    let v1 = make_versioned_archive_with_hash(
         &dist.join(&v1_name),
         "uppkg",
         "0.1.0",
         &triple,
         "#!/usr/bin/env sh\nprintf 'v1\\n'\n",
+        "cafef00dcafef000",
     );
     let v1_hash = sha256_file(&v1);
     fs::write(
         dist.join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"uppkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n"
+            "{{\n  format: 2,\n    entries: {{\n    \"cafef00dcafef000\": {{ name: \"uppkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", runtime_deps: []}}\n  }}\n}}\n"
         ),
     )
     .unwrap();
@@ -2727,18 +2926,19 @@ fn upgrade_syncs_configured_tomes_before_resolving_versions() {
     assert_success(&run(root, &["install", "uppkg"]), "install uppkg 0.1.0");
 
     let v2_name = format!("uppkg-0.2.0-{triple}.tar.zst");
-    let v2 = make_versioned_archive(
+    let v2 = make_versioned_archive_with_hash(
         &dist.join(&v2_name),
         "uppkg",
         "0.2.0",
         &triple,
         "#!/usr/bin/env sh\nprintf 'v2\\n'\n",
+        "cafef00dcafef001",
     );
     let v2_hash = sha256_file(&v2);
     fs::write(
         dist.join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"uppkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n    {{ name: \"uppkg\", version: \"0.2.0\", target: \"{triple}\", archive: \"{v2_name}\", archive_hash: \"{v2_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n"
+            "{{\n  format: 2,\n    entries: {{\n    \"cafef00dcafef000\": {{ name: \"uppkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", runtime_deps: []}}\n    \"cafef00dcafef001\": {{ name: \"uppkg\", version: \"0.2.0\", target: \"{triple}\", archive: \"{v2_name}\", archive_hash: \"{v2_hash}\", runtime_deps: []}}\n  }}\n}}\n"
         ),
     )
     .unwrap();
@@ -2959,29 +3159,31 @@ fn install_locked_reproduces_pinned_version() {
 
     let dist = tome.join("dist");
     let v1_name = format!("lockpkg-0.1.0-{triple}.tar.zst");
-    let v1 = make_versioned_archive(
+    let v1 = make_versioned_archive_with_hash(
         &dist.join(&v1_name),
         "lockpkg",
         "0.1.0",
         &triple,
         "#!/usr/bin/env sh\nprintf 'v0.1.0\\n'\n",
+        "cafef00dcafef000",
     );
     let v1_hash = sha256_file(&v1);
 
     let v2_name = format!("lockpkg-0.2.0-{triple}.tar.zst");
-    let v2 = make_versioned_archive(
+    let v2 = make_versioned_archive_with_hash(
         &dist.join(&v2_name),
         "lockpkg",
         "0.2.0",
         &triple,
         "#!/usr/bin/env sh\nprintf 'v0.2.0\\n'\n",
+        "cafef00dcafef001",
     );
     let v2_hash = sha256_file(&v2);
 
     fs::write(
         dist.join("index.nuon"),
         format!(
-            "{{\n  packages: [\n    {{ name: \"lockpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n    {{ name: \"lockpkg\", version: \"0.2.0\", target: \"{triple}\", archive: \"{v2_name}\", archive_hash: \"{v2_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n"
+            "{{\n  format: 2,\n    entries: {{\n    \"cafef00dcafef000\": {{ name: \"lockpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{v1_name}\", archive_hash: \"{v1_hash}\", runtime_deps: []}}\n    \"cafef00dcafef001\": {{ name: \"lockpkg\", version: \"0.2.0\", target: \"{triple}\", archive: \"{v2_name}\", archive_hash: \"{v2_hash}\", runtime_deps: []}}\n  }}\n}}\n"
         ),
     )
     .unwrap();
@@ -3001,7 +3203,7 @@ fn install_locked_reproduces_pinned_version() {
     fs::write(
         state.join("grimoire.lock.nuon"),
         format!(
-            "{{\n  version: 1,\n  packages: [\n    {{ name: \"lockpkg\", version: \"0.1.0\", target: \"{triple}\", archive_hash: \"{v1_hash}\", source_hashes: {{}}, runtime_deps: [], build_deps: [] }}\n  ]\n}}\n"
+            "{{\n  version: 1,\n  packages: [\n    {{ name: \"lockpkg\", version: \"0.1.0\", archive_hash: \"{v1_hash}\", source_hashes: {{}}, runtime_deps: [], build_deps: [] }}\n  ]\n}}\n"
         ),
     )
     .unwrap();
@@ -3296,22 +3498,24 @@ fn make_fake_core_tome(triple: &str) -> TempDir {
     )
     .unwrap();
 
-    let mut entries = String::from("{\n  packages: [\n");
+    let mut entries = String::from("{\n  format: 2,\n    entries: {\n");
     for package in CORE_READINESS_PACKAGES {
+        let store_hash = format!("cafef00dcafef00d-{package}");
         let archive_name = format!("{package}-0.1.0-{triple}.tar.zst");
-        let archive = make_versioned_archive(
+        let archive = make_versioned_archive_with_hash(
             &dist.join(&archive_name),
             package,
             "0.1.0",
             triple,
             &format!("#!/usr/bin/env sh\nprintf '{package}\\n'\n"),
+            &store_hash,
         );
         let archive_hash = sha256_file(&archive);
         entries.push_str(&format!(
-            "    {{ name: \"{package}\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{archive_hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n"
+            "    \"cafef00dcafef00d-{package}\": {{ name: \"{package}\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{archive_hash}\", runtime_deps: []}}\n"
         ));
     }
-    entries.push_str("  ]\n}\n");
+    entries.push_str("  }\n}\n");
     fs::write(dist.join("index.nuon"), entries).unwrap();
 
     dir
@@ -3459,6 +3663,10 @@ fn fake_store_basename(name: &str, version: &str) -> String {
     format!("cafef00dcafef00d-{name}-{version}")
 }
 
+fn fake_store_basename_with_hash(name: &str, version: &str, hash: &str) -> String {
+    format!("{hash}-{name}-{version}")
+}
+
 /// The absolute store directory a package was installed into, read from its recorded state. Tests
 /// use this instead of guessing the content-addressed path; returns `None` when not installed.
 fn installed_store_dir(root: &Path, name: &str) -> Option<PathBuf> {
@@ -3553,7 +3761,7 @@ fn solo_index(
     runtime_deps: &str,
 ) -> String {
     format!(
-        "{{\n  packages: [\n    {{ name: \"{name}\", version: \"{version}\", target: \"{triple}\", archive: \"{archive}\", archive_hash: \"{archive_hash}\", store_hash: \"{store_hash}\", runtime_deps: {runtime_deps} }}\n  ]\n}}\n"
+        "{{\n  format: 2,\n    entries: {{\n    \"{store_hash}\": {{ name: \"{name}\", version: \"{version}\", target: \"{triple}\", archive: \"{archive}\", archive_hash: \"{archive_hash}\", runtime_deps: {runtime_deps}}}\n  }}\n}}\n"
     )
 }
 
@@ -3572,13 +3780,24 @@ fn make_versioned_archive(
     triple: &str,
     bin_script: &str,
 ) -> PathBuf {
+    make_versioned_archive_with_hash(path, name, version, triple, bin_script, "cafef00dcafef00d")
+}
+
+fn make_versioned_archive_with_hash(
+    path: &Path,
+    name: &str,
+    version: &str,
+    triple: &str,
+    bin_script: &str,
+    store_hash: &str,
+) -> PathBuf {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
     let mut builder = open_archive(path);
     let package_nuon = format!(
         "{{format: 1, name: \"{name}\", version: \"{version}\", target: \"{triple}\", store_path: \"{}\", bins: {{{name}: \"bin/{name}\"}}}}\n",
-        fake_store_basename(name, version)
+        fake_store_basename_with_hash(name, version, store_hash)
     );
     append_file(
         &mut builder,
@@ -3631,7 +3850,7 @@ fn build_signed_tome(tome: &Path, name: &str, triple: &str, keypair: &minisign::
     fs::write(
         tome.join("tome.rn"),
         format!(
-            "export const tome = {{\n  name: '{name}'\n  packages: {{ repo: 'dist', format: 'local', index: 'index.nuon', signer: '{pubkey}' }}\n}}\n"
+            "export const tome = {{\n  name: '{name}'\n  signers: ['{pubkey}']\n  packages: {{ repo: 'dist', format: 'local', index: 'index.nuon' }}\n}}\n"
         ),
     )
     .unwrap();
@@ -3647,12 +3866,12 @@ fn build_signed_tome(tome: &Path, name: &str, triple: &str, keypair: &minisign::
     );
     let hash = sha256_file(&archive);
     let index_body = format!(
-        "{{\n  packages: [\n    {{ name: \"sgnpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", store_hash: \"cafef00dcafef00d\", runtime_deps: [] }}\n  ]\n}}\n"
+        "{{\n  format: 2,\n    entries: {{\n    \"cafef00dcafef00d\": {{ name: \"sgnpkg\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", runtime_deps: []}}\n  }}\n}}\n"
     );
     fs::write(dist.join("index.nuon"), &index_body).unwrap();
     sign_to(
-        &dist.join("index.nuon.minisig"),
-        index_body.as_bytes(),
+        &dist.join(format!("{archive_name}.minisig")),
+        &fs::read(&archive).unwrap(),
         keypair,
     );
 }

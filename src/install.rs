@@ -30,7 +30,7 @@ use crate::{
     paths, profile,
     progress::{report, status, success},
     solve::{self, Plan, PlanStep, Substitute},
-    toolchain,
+    tome, toolchain,
 };
 
 /// Drives one top-level install and its dependency tree. `installed` maps already-installed
@@ -282,7 +282,9 @@ pub(crate) fn ensure_build_deps_installed(deps: &[Dependency]) -> Result<()> {
         return Ok(());
     }
 
-    let plan = solve::resolve(&missing, &installed, None)?;
+    let mut plan = solve::resolve(&missing, &installed, None)?;
+    plan.compute_store_hashes()
+        .with_context(|| "compute store hashes for build dependencies")?;
 
     for step in plan.steps {
         if installed.contains_key(&step.name) {
@@ -300,7 +302,7 @@ pub(crate) fn ensure_build_deps_installed(deps: &[Dependency]) -> Result<()> {
             install_store_only(
                 &archive,
                 Some(sub.entry.archive_hash.clone()),
-                Some(&sub.entry.store_hash),
+                Some(&sub.store_hash),
             )
         } else if let Some(rune) = &step.rune {
             let store_hash = crate::closure::store_hash_for_rune(rune)
@@ -349,11 +351,13 @@ impl Installer {
     /// Installs `name` and its transitive runtime dependencies. The solver picks a concrete
     /// version for every package in the graph and orders the plan so dependencies install first.
     fn install_named(&mut self, name: &str) -> Result<()> {
-        let plan = solve::resolve(
+        let mut plan = solve::resolve(
             &[Dependency::any(name)],
             &self.installed,
             self.pins.as_ref(),
         )?;
+        plan.compute_store_hashes()
+            .with_context(|| format!("compute store hashes for `{name}`"))?;
         if self.dry_run {
             print_plan(&plan);
             return Ok(());
@@ -368,7 +372,9 @@ impl Installer {
         if self.dry_run {
             return self.dry_run_source_root(&rune);
         }
-        let installed = self.build_and_install(&rune)?;
+        let store_hash = crate::closure::store_hash_for_rune(&rune)
+            .with_context(|| format!("compute store hash for source root `{package}`"))?;
+        let installed = self.build_and_install(&rune, &store_hash)?;
         let runtime = installed.runtime_deps.clone();
         self.record(installed);
         self.install_deps(&runtime)
@@ -439,7 +445,9 @@ impl Installer {
         if deps.is_empty() {
             return Ok(());
         }
-        let plan = solve::resolve(deps, &self.installed, self.pins.as_ref())?;
+        let mut plan = solve::resolve(deps, &self.installed, self.pins.as_ref())?;
+        plan.compute_store_hashes()
+            .with_context(|| "compute store hashes for build dependencies")?;
         self.execute_plan(plan)
     }
 
@@ -477,22 +485,20 @@ impl Installer {
         if self.pins.is_some() {
             return match (step.substitutes.first(), &step.rune) {
                 (Some(sub), _) => self.install_substitute(sub),
-                (None, Some(rune)) => self.build_and_install(rune),
+                (None, Some(rune)) => {
+                    let hash = step.store_hash.as_deref().with_context(|| {
+                        format!("cannot compute store hash for `{}`", step.name)
+                    })?;
+                    self.build_and_install(rune, hash)
+                }
                 (None, None) => bail!("no pinned artifact available for `{}`", step.name),
             };
         }
 
-        let wanted = match &step.rune {
-            Some(rune) => self.wanted_store_hash(rune)?,
-            None => None,
-        };
-
-        if let Some(sub) = step
-            .substitutes
-            .iter()
-            .find(|sub| substitute_matches(sub, wanted.as_deref()))
-        {
-            return self.install_substitute(sub);
+        if let Some(hash) = &step.store_hash {
+            if let Some(sub) = step.substitutes.iter().find(|s| s.store_hash == *hash) {
+                return self.install_substitute(sub);
+            }
         }
 
         match &step.rune {
@@ -503,7 +509,11 @@ impl Installer {
                         step.name, step.version
                     ));
                 }
-                self.build_and_install(rune)
+                let hash = step
+                    .store_hash
+                    .as_deref()
+                    .with_context(|| format!("cannot compute store hash for `{}`", step.name))?;
+                self.build_and_install(rune, hash)
             }
             None => bail!(
                 "no installable prebuilt or source for `{}` {}",
@@ -515,6 +525,18 @@ impl Installer {
 
     /// Fetches, verifies, and installs a prebuilt substitute.
     fn install_substitute(&self, sub: &Substitute) -> Result<InstalledArchive> {
+        let source_archive = sub.root.join(&sub.entry.archive);
+        if let Some(tome) = tome::load_tomes()?
+            .into_iter()
+            .find(|t| t.name == sub.tome_name)
+        {
+            tome::verify_archive(&source_archive, &tome).with_context(|| {
+                format!(
+                    "verify archive signature for `{}` {}",
+                    sub.entry.name, sub.entry.version
+                )
+            })?;
+        }
         let archive = fetch::fetch_verified(
             &sub.entry.archive,
             &sub.root,
@@ -525,7 +547,7 @@ impl Installer {
         install_archive(
             &archive,
             Some(sub.entry.archive_hash.clone()),
-            Some(&sub.entry.store_hash),
+            Some(&sub.store_hash),
         )
     }
 
@@ -538,27 +560,12 @@ impl Installer {
     /// the build environment: such a host cannot rebuild anyway and takes the published prebuilt as
     /// authoritative. A fixed-output package is always reproducible (its address ignores the
     /// toolchain), so it is always `Some`.
-    fn wanted_store_hash(&self, rune: &Path) -> Result<Option<String>> {
-        let mut metadata = EmbeddedNuRuntime
-            .package_metadata(rune)
-            .with_context(|| format!("read rune metadata {}", rune.display()))?;
-        addendum::patched_package_metadata(
-            &mut metadata,
-            build::tome_name_for_rune(rune)?.as_deref(),
-            rune,
-        )
-        .with_context(|| format!("apply addendums to {}", rune.display()))?;
-
-        if !metadata.fixed_output && toolchain::build_env_id().is_none() {
-            return Ok(None);
-        }
-        Ok(Some(crate::closure::store_hash_for_rune(rune)?))
-    }
-
     /// Builds the rune at `rune` from source and installs the resulting archive. Build
     /// dependencies are resolved and installed first so they are present when the rune runs; the
     /// `building` guard rejects a build dependency that cycles back to the package being built.
-    fn build_and_install(&mut self, rune: &Path) -> Result<InstalledArchive> {
+    fn build_and_install(&mut self, rune: &Path, store_hash: &str) -> Result<InstalledArchive> {
+        tome::verify_rune(rune)
+            .with_context(|| format!("verify rune signature {}", rune.display()))?;
         let mut metadata = EmbeddedNuRuntime
             .package_metadata(rune)
             .with_context(|| format!("read rune metadata {}", rune.display()))?;
@@ -588,11 +595,6 @@ impl Installer {
                 ),
                 None => None,
             };
-            // The store hash is computed over the runtime dependency closure, which is installed
-            // before this step; a fixed-output package needs no toolchain to reproduce its address.
-            let store_hash = self
-                .wanted_store_hash(rune)?
-                .with_context(|| format!("cannot compute store hash for `{}`", metadata.name))?;
             let build_deps = metadata.deps.build_for(&paths::target_triple());
             self.install_deps(&build_deps)
                 .with_context(|| format!("install build dependencies for `{}`", metadata.name))?;
@@ -605,7 +607,7 @@ impl Installer {
                 &rune.to_string_lossy(),
                 &paths::build_output_dir()?,
                 &env,
-                &store_hash,
+                store_hash,
             )?;
             install_archive(&result.archive, expected_hash, Some(&result.store_hash))
         })();
@@ -1244,17 +1246,6 @@ fn describe_origin(step: &PlanStep) -> String {
         (Some(sub), None) => format!("binary archive {}", sub.entry.archive),
         (None, Some(rune)) => format!("source rune {}", rune.display()),
         (None, None) => "unavailable".to_owned(),
-    }
-}
-
-/// Whether a substitute is acceptable for the inputs we would otherwise build. When the wanted
-/// content address is known, the substitute's published `store_hash` must match it. When it cannot
-/// be computed — a compiled package on a host with no toolchain boundary — the published prebuilt is
-/// taken as authoritative.
-fn substitute_matches(sub: &Substitute, wanted: Option<&str>) -> bool {
-    match wanted {
-        Some(want) => sub.entry.store_hash == want,
-        None => true,
     }
 }
 

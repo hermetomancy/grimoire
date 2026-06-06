@@ -111,7 +111,7 @@ pub struct PackageState {
 /// package repository offers. Read-only data — Grimoire reads it, never executes it (§3).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageIndex {
-    pub packages: Vec<IndexEntry>,
+    pub entries: BTreeMap<String, IndexEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,10 +123,6 @@ pub struct IndexEntry {
     /// repository or an `http(s)` URL.
     pub archive: String,
     pub archive_hash: String,
-    /// The content-addressed store hash computed from the package's build inputs. Written by
-    /// `grm tome build` and required: it is how the installer queries the binhost by store hash to
-    /// decide whether this prebuilt is a valid substitute for the inputs it would otherwise build.
-    pub store_hash: String,
     #[serde(default)]
     pub runtime_deps: Vec<Dependency>,
 }
@@ -143,12 +139,12 @@ pub struct TomeState {
     pub checked_commit: Option<String>,
     #[serde(default)]
     pub tome: Option<TomeManifest>,
-    /// The minisign public key this tome's package index is verified against, pinned on first
-    /// sync (trust-on-first-use). `None` for an unsigned tome that has never advertised a
-    /// signer. Once set, a sync that presents a different key — or an index that no longer
-    /// verifies — is refused. See `src/signing.rs`.
+    /// The minisign public keys this tome's packages are verified against, pinned on first sync
+    /// (trust-on-first-use). Empty for an unsigned tome. Once set, every later sync must
+    /// present the same set; packages without a valid signature from one of these keys are
+    /// refused. See `src/signing.rs`.
     #[serde(default)]
-    pub signer_pubkey: Option<String>,
+    pub signer_pubkeys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +159,11 @@ pub struct AddendumState {
     pub checked_commit: Option<String>,
     #[serde(default)]
     pub addendum: Option<AddendumManifest>,
+    /// The minisign public keys this addendum is verified against, pinned on first sync
+    /// (trust-on-first-use). Empty for an unsigned addendum. Once set, every later sync must
+    /// present the same set.
+    #[serde(default)]
+    pub signer_pubkeys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,6 +173,9 @@ pub struct AddendumManifest {
     pub description: Option<String>,
     #[serde(default)]
     pub patches: Vec<AddendumPatch>,
+    /// Minisign public keys (base64) that may sign this addendum's `addendum.nuon`.
+    #[serde(default)]
+    pub signers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -202,6 +206,10 @@ pub struct TomeManifest {
     pub description: Option<String>,
     #[serde(default)]
     pub packages: Option<TomePackages>,
+    /// Minisign public keys that may sign packages in this tome. When non-empty, every
+    /// package (rune and archive) must carry a valid detached `.minisig` from one of these keys.
+    #[serde(default)]
+    pub signers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,12 +217,6 @@ pub struct TomePackages {
     pub repo: String,
     pub format: String,
     pub index: String,
-    /// The minisign public key (the single-line `untrusted comment`-less base64 string
-    /// `minisign -p` emits) the tome author signs `index` with. When present, the index must
-    /// carry a valid `<index>.minisig` signature; when absent, the tome publishes an unsigned
-    /// index and installs proceed without signature verification.
-    #[serde(default)]
-    pub signer: Option<String>,
 }
 
 impl Deps {
@@ -375,57 +377,56 @@ impl Deps {
 impl PackageIndex {
     pub fn from_value(value: Value) -> Result<Self> {
         let record = expect_record(value, "package index")?;
-        let packages = match record.get("packages") {
-            Some(Value::List { vals, .. }) => vals
-                .iter()
-                .map(IndexEntry::from_value)
-                .collect::<Result<Vec<_>>>()?,
-            Some(_) => bail!("package index field `packages` must be a list"),
-            None => bail!("package index is missing required field `packages`"),
+        let format = match record.get("format") {
+            Some(Value::Int { val, .. }) => *val,
+            Some(_) => bail!("package index field `format` must be an integer"),
+            None => 1,
         };
-        Ok(Self { packages })
+        if format != 2 {
+            bail!("unsupported package index format {format}; expected 2");
+        }
+        let entries_record = match record.get("entries") {
+            Some(Value::Record { val, .. }) => val,
+            Some(_) => bail!("package index field `entries` must be a record"),
+            None => bail!("package index is missing required field `entries`"),
+        };
+        let mut entries = BTreeMap::new();
+        for (hash, entry_value) in entries_record.iter() {
+            let entry = IndexEntry::from_value(entry_value)
+                .with_context(|| format!("parse index entry for hash `{hash}`"))?;
+            entries.insert(hash.clone(), entry);
+        }
+        Ok(Self { entries })
     }
 
     /// Every entry for `name`/`target`, newest version first. The index may list several
     /// versions of a package so the resolver can pick one satisfying a requirement.
-    pub fn candidates(&self, name: &str, target: &str) -> Vec<&IndexEntry> {
-        let mut entries = self
-            .packages
+    /// Returns `(store_hash, entry)` pairs so the caller can associate the hash with the entry.
+    pub fn candidates(&self, name: &str, target: &str) -> Vec<(&str, &IndexEntry)> {
+        let mut entries: Vec<_> = self
+            .entries
             .iter()
-            .filter(|entry| entry.name == name && entry.target == target)
-            .collect::<Vec<_>>();
-        entries.sort_by(|a, b| compare_versions(&b.version, &a.version));
+            .filter(|(_, entry)| entry.name == name && entry.target == target)
+            .map(|(hash, entry)| (hash.as_str(), entry))
+            .collect();
+        entries.sort_by(|a, b| compare_versions(&b.1.version, &a.1.version));
         entries
     }
 
-    /// Inserts `entry`, replacing any existing entry for the same name, version, and target so
-    /// rebuilding the same version updates in place while distinct versions accumulate. Entries
-    /// are kept sorted by name, then target, then version so the written index is deterministic.
-    pub fn upsert(&mut self, entry: IndexEntry) {
-        match self.packages.iter_mut().find(|existing| {
-            existing.name == entry.name
-                && existing.version == entry.version
-                && existing.target == entry.target
-        }) {
-            Some(existing) => *existing = entry,
-            None => self.packages.push(entry),
-        }
-        self.packages.sort_by(|a, b| {
-            a.name
-                .cmp(&b.name)
-                .then(a.target.cmp(&b.target))
-                .then_with(|| compare_versions(&a.version, &b.version))
-        });
+    /// Inserts `entry` at `hash`, replacing any existing entry with the same hash so
+    /// rebuilding the same inputs updates in place.
+    pub fn upsert(&mut self, hash: String, entry: IndexEntry) {
+        self.entries.insert(hash, entry);
     }
 
     pub fn to_value(&self) -> Value {
         let mut record = Record::new();
-        let entries = self
-            .packages
-            .iter()
-            .map(IndexEntry::to_value)
-            .collect::<Vec<_>>();
-        record.push("packages", Value::list(entries, Span::unknown()));
+        record.push("format", Value::int(2, Span::unknown()));
+        let mut entries = Record::new();
+        for (hash, entry) in &self.entries {
+            entries.push(hash, entry.to_value());
+        }
+        record.push("entries", Value::record(entries, Span::unknown()));
         Value::record(record, Span::unknown())
     }
 }
@@ -450,7 +451,6 @@ impl IndexEntry {
         validate_archive_location(&archive)?;
         let archive_hash = required_field_string(val, "index entry", "archive_hash")?;
         validate_sha256(&archive_hash, "index entry archive_hash")?;
-        let store_hash = required_field_string(val, "index entry", "store_hash")?;
 
         let runtime_deps = match val.get("runtime_deps") {
             Some(value) => parse_dependency_list(value, "index entry runtime_deps")?,
@@ -463,7 +463,6 @@ impl IndexEntry {
             target,
             archive,
             archive_hash,
-            store_hash,
             runtime_deps,
         })
     }
@@ -477,10 +476,6 @@ impl IndexEntry {
         record.push(
             "archive_hash",
             Value::string(&self.archive_hash, Span::unknown()),
-        );
-        record.push(
-            "store_hash",
-            Value::string(&self.store_hash, Span::unknown()),
         );
         record.push("runtime_deps", dependency_list_value(&self.runtime_deps));
         Value::record(record, Span::unknown())
@@ -692,6 +687,7 @@ impl AddendumState {
                 Some(Value::Nothing { .. }) | None => None,
                 Some(value) => Some(AddendumManifest::from_value(value.clone())?),
             },
+            signer_pubkeys: optional_string_list(&record, "signer_pubkeys")?,
         })
     }
 
@@ -712,6 +708,9 @@ impl AddendumState {
         if let Some(addendum) = &self.addendum {
             record.push("addendum", addendum.to_value());
         }
+        if !self.signer_pubkeys.is_empty() {
+            record.push("signer_pubkeys", string_list_value(&self.signer_pubkeys));
+        }
         Value::record(record, Span::unknown())
     }
 }
@@ -730,11 +729,13 @@ impl AddendumManifest {
             Some(_) => bail!("addendum manifest field `patches` must be a list"),
             None => Vec::new(),
         };
+        let signers = optional_string_list(&record, "signers")?;
 
         Ok(Self {
             name,
             description,
             patches,
+            signers,
         })
     }
 
@@ -750,6 +751,9 @@ impl AddendumManifest {
             .map(AddendumPatch::to_value)
             .collect::<Vec<_>>();
         record.push("patches", Value::list(patches, Span::unknown()));
+        if !self.signers.is_empty() {
+            record.push("signers", string_list_value(&self.signers));
+        }
         Value::record(record, Span::unknown())
     }
 }
@@ -868,7 +872,7 @@ impl TomeState {
                 Some(Value::Nothing { .. }) | None => None,
                 Some(value) => Some(TomeManifest::from_value(value.clone())?),
             },
-            signer_pubkey: optional_string(&record, "signer_pubkey")?,
+            signer_pubkeys: optional_string_list(&record, "signer_pubkeys")?,
         })
     }
 
@@ -889,8 +893,8 @@ impl TomeState {
         if let Some(tome) = &self.tome {
             record.push("tome", tome.to_value());
         }
-        if let Some(signer) = &self.signer_pubkey {
-            record.push("signer_pubkey", Value::string(signer, Span::unknown()));
+        if !self.signer_pubkeys.is_empty() {
+            record.push("signer_pubkeys", string_list_value(&self.signer_pubkeys));
         }
         Value::record(record, Span::unknown())
     }
@@ -906,11 +910,13 @@ impl TomeManifest {
             Some(value) => Some(TomePackages::from_value(value)?),
             None => None,
         };
+        let signers = optional_string_list(&record, "signers")?;
 
         Ok(Self {
             name,
             description,
             packages,
+            signers,
         })
     }
 
@@ -922,6 +928,9 @@ impl TomeManifest {
         }
         if let Some(packages) = &self.packages {
             record.push("packages", packages.to_value());
+        }
+        if !self.signers.is_empty() {
+            record.push("signers", string_list_value(&self.signers));
         }
         Value::record(record, Span::unknown())
     }
@@ -937,7 +946,6 @@ impl TomePackages {
             repo: required_field_string(val, "tome packages", "repo")?,
             format: required_field_string(val, "tome packages", "format")?,
             index: required_field_string(val, "tome packages", "index")?,
-            signer: optional_string(val, "signer")?,
         })
     }
 
@@ -946,9 +954,6 @@ impl TomePackages {
         record.push("repo", Value::string(&self.repo, Span::unknown()));
         record.push("format", Value::string(&self.format, Span::unknown()));
         record.push("index", Value::string(&self.index, Span::unknown()));
-        if let Some(signer) = &self.signer {
-            record.push("signer", Value::string(signer, Span::unknown()));
-        }
         Value::record(record, Span::unknown())
     }
 }

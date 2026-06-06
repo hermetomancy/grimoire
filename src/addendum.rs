@@ -20,7 +20,7 @@ use crate::{
     nu::nuon_io,
     paths,
     progress::{report, status},
-    tome,
+    signing, tome,
 };
 
 const MANIFEST: &str = "addendum.nuon";
@@ -48,6 +48,7 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
         checked_ref: None,
         checked_commit: None,
         addendum: None,
+        signer_pubkeys: Vec::new(),
     };
     nuon_io::write_nuon(&state_path, &state.to_value())?;
     report(&format!("added addendum {name}"));
@@ -86,6 +87,8 @@ pub fn apply_patches(
 ) -> Result<()> {
     for state in load_addendums()? {
         let cache = ensure_addendum_cache(&state)?;
+        verify_addendum(&cache, &state)
+            .with_context(|| format!("verify addendum `{}`", state.name))?;
         let manifest =
             read_manifest(&cache).with_context(|| format!("read addendum `{}`", state.name))?;
         for patch in &manifest.patches {
@@ -217,11 +220,70 @@ fn record_addendum_sync_state(state: &AddendumState, cache_path: &Path) -> Resul
     validate_addendum_cache(state, &manifest)?;
     let commit = tome::git::head_commit(cache_path)?;
     let mut state = load_addendum(&state.name).unwrap_or_else(|_| state.clone());
+    let signer_pubkeys =
+        capture_addendum_signer(&state, cache_path, &manifest, &state.signer_pubkeys)?;
     state.checked_ref = Some(state.ref_name.clone());
     state.checked_commit = commit;
     state.addendum = Some(manifest);
+    state.signer_pubkeys = signer_pubkeys;
     let state_path = addendum_state_dir()?.join(format!("{}.nuon", state.name));
     nuon_io::write_nuon(&state_path, &state.to_value())
+}
+
+/// Trust-on-first-use for addendum signing keys. Mirrors `tome::capture_signer` — the first sync
+/// pins whatever `signers` the manifest advertises; later syncs must present the exact same set.
+fn capture_addendum_signer(
+    state: &AddendumState,
+    _cache: &Path,
+    manifest: &AddendumManifest,
+    existing: &[String],
+) -> Result<Vec<String>> {
+    let advertised = manifest.signers.clone();
+
+    if existing.is_empty() && advertised.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if !existing.is_empty() && advertised.is_empty() {
+        bail!(
+            "addendum `{}` previously advertised signers but no longer does; refusing. \
+             Remove and re-add the addendum to trust an unsigned manifest.",
+            state.name
+        );
+    }
+
+    if existing.is_empty() && !advertised.is_empty() {
+        report(&format!(
+            "pinned {} signer(s) for addendum `{}` (trust on first use)",
+            advertised.len(),
+            state.name
+        ));
+        return Ok(advertised);
+    }
+
+    let sets_match =
+        existing.len() == advertised.len() && existing.iter().all(|k| advertised.contains(k));
+    if !sets_match {
+        bail!(
+            "addendum `{}` now advertises a different set of signing keys than the one pinned on \
+             first use; refusing. Remove and re-add the addendum to trust the new keys.",
+            state.name
+        );
+    }
+
+    Ok(existing.to_vec())
+}
+
+/// Verifies an addendum's detached signature (`addendum.nuon.minisig`) against the addendum's
+/// pinned signers. Returns `Ok` when the addendum has no pinned signers or when the signature
+/// verifies.
+pub fn verify_addendum(cache_path: &Path, state: &AddendumState) -> Result<()> {
+    if state.signer_pubkeys.is_empty() {
+        return Ok(());
+    }
+    let manifest_path = cache_path.join(MANIFEST);
+    signing::verify_detached(&manifest_path, &state.signer_pubkeys)
+        .with_context(|| format!("verify addendum signature for {}", state.name))
 }
 
 fn load_addendum(name: &str) -> Result<AddendumState> {
@@ -292,6 +354,7 @@ fn validate_local_addendum_if_available(name: &str, url: &str) -> Result<()> {
             checked_ref: None,
             checked_commit: None,
             addendum: None,
+            signer_pubkeys: Vec::new(),
         },
         &manifest,
     )
