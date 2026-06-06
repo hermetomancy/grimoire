@@ -95,6 +95,11 @@ pub enum Command {
     /// any leftover transaction staging directories. Installed packages, profiles, state, tomes,
     /// addenda, and the lockfile are untouched; the next install will re-fetch what it needs.
     Clean,
+    /// Create the fixed Grimoire store directory (/grm on Unix, C:\grm on Windows).
+    /// On Linux this creates the directory and adjusts ownership. On macOS it registers
+    /// the directory in /etc/synthetic.conf and prompts for a reboot.
+    #[command(visible_alias = "st")]
+    Setup,
 
     // -----------------------------------------------------------------------
     // Catalogs
@@ -283,6 +288,10 @@ pub struct TomeBuildArgs {
     /// Allow host build-tool discovery instead of using only the grimoire-managed toolchain.
     #[arg(long)]
     pub bootstrap: bool,
+    /// Rebuild the binary package index (`index.nuon`) from existing archives in `dist/`
+    /// without building any packages.
+    #[arg(long, conflicts_with_all = ["package", "all"])]
+    pub index: bool,
 }
 
 #[derive(Debug, Args)]

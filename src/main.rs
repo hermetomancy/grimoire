@@ -26,6 +26,7 @@ mod process_lock;
 mod profile;
 mod progress;
 mod query;
+mod setup;
 mod signing;
 mod solve;
 mod store;
@@ -69,6 +70,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Install(args) => install::install(args),
         Command::Remove(args) => install::remove(args),
         Command::Clean => clean::clean(),
+        Command::Setup => setup::setup(),
         Command::List => install::list(),
         Command::Doctor => doctor::doctor(),
         Command::Search(args) => query::search(args),
@@ -160,7 +162,8 @@ fn mutates_install_root(command: &Command) -> bool {
         | Command::Generations
         | Command::StoreHash(_)
         | Command::Completions(_)
-        | Command::Man(_) => false,
+        | Command::Man(_)
+        | Command::Setup => false,
     }
 }
 

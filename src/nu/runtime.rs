@@ -49,6 +49,8 @@ pub struct BuildEnv {
     pub path_dirs: Vec<PathBuf>,
     pub host_tools: Vec<HostTool>,
     pub inherit_host_path: bool,
+    /// Additional environment variables to set in the build sandbox.
+    pub extra_env: Vec<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -59,28 +61,34 @@ pub struct BuildDirs {
 }
 
 impl BuildEnv {
-    /// Stage-0 authoring/bootstrap builds inherit the host PATH. Source installs use
-    /// [`BuildEnv::managed`] instead so they do not accidentally depend on random host tools.
-    pub fn bootstrap() -> Self {
+    /// Stage-0 authoring/bootstrap builds inherit the host PATH but still include installed
+    /// build dependencies so later packages in a tome can find seeds built earlier.
+    pub fn bootstrap(path_dirs: Vec<PathBuf>, extra_env: Vec<(String, String)>) -> Self {
         Self {
-            path_dirs: Vec::new(),
+            path_dirs,
             host_tools: Vec::new(),
             inherit_host_path: true,
+            extra_env,
         }
     }
 
-    pub fn managed(path_dirs: Vec<PathBuf>, host_tools: Vec<HostTool>) -> Self {
+    pub fn managed(
+        path_dirs: Vec<PathBuf>,
+        host_tools: Vec<HostTool>,
+        extra_env: Vec<(String, String)>,
+    ) -> Self {
         Self {
             path_dirs,
             host_tools,
             inherit_host_path: false,
+            extra_env,
         }
     }
 }
 
 impl Default for BuildEnv {
     fn default() -> Self {
-        Self::bootstrap()
+        Self::bootstrap(Vec::new(), Vec::new())
     }
 }
 
@@ -124,6 +132,7 @@ impl RuneRuntime for EmbeddedNuRuntime {
             sources,
             build_flags,
             path.as_deref(),
+            &env.extra_env,
         );
         let env_prefix = path_env_assignment(&path_entries)?;
         let source = format!(
@@ -137,6 +146,7 @@ impl RuneRuntime for EmbeddedNuRuntime {
             Some(&format!("grimoire-build-{}", rune.display())),
             package_dir.parent().unwrap_or(&package_dir),
             path.as_deref(),
+            &env.extra_env,
         )
     }
 }
@@ -150,6 +160,7 @@ fn build_context(
     sources: &BTreeMap<String, FetchedSource>,
     build_flags: &BTreeMap<String, String>,
     path: Option<&str>,
+    extra_env: &[(String, String)],
 ) -> Value {
     let span = Span::unknown();
     let mut ctx = Record::new();
@@ -189,6 +200,9 @@ fn build_context(
         "GRIMOIRE_VERBOSITY",
         Value::string(progress::verbosity_name(), span),
     );
+    for (key, value) in extra_env {
+        env.push(key, Value::string(value, span));
+    }
     ctx.push("env", Value::record(env, span));
 
     Value::record(ctx, span)
@@ -234,6 +248,7 @@ fn eval_nu_source(
     source_name: Option<&str>,
     cwd: &Path,
     path: Option<&str>,
+    extra_env: &[(String, String)],
 ) -> Result<()> {
     let _working_dir = WorkingDirectoryGuard::enter(cwd)?;
     let mut engine_state =
@@ -252,6 +267,11 @@ fn eval_nu_source(
         let value = path_value_from_string(path);
         engine_state.add_env_var("PATH".to_string(), value.clone());
         stack.add_env_var("PATH".to_string(), value);
+    }
+    for (key, value) in extra_env {
+        let v = Value::string(value, nu_protocol::Span::unknown());
+        engine_state.add_env_var(key.clone(), v.clone());
+        stack.add_env_var(key.clone(), v);
     }
 
     let (block, delta) = {
@@ -332,7 +352,6 @@ fn describe_shell_error(error: &ShellError) -> String {
         ShellError::NonZeroExitCode { exit_code, .. } => {
             format!("external command exited with code {exit_code}")
         }
-        #[cfg(unix)]
         ShellError::TerminatedBySignal {
             signal_name,
             signal,
@@ -428,18 +447,10 @@ fn spawn_build_log_reader(reader: os_pipe::PipeReader, tail: BuildTail) -> threa
     })
 }
 
-#[cfg(unix)]
 fn pipe_writer_file(writer: os_pipe::PipeWriter) -> std::fs::File {
     use std::os::fd::OwnedFd;
 
     OwnedFd::from(writer).into()
-}
-
-#[cfg(windows)]
-fn pipe_writer_file(writer: os_pipe::PipeWriter) -> std::fs::File {
-    use std::os::windows::io::OwnedHandle;
-
-    OwnedHandle::from(writer).into()
 }
 
 struct WorkingDirectoryGuard {
@@ -467,10 +478,24 @@ fn nuon_string(value: &str) -> Result<String> {
     nuon_io::to_nuon_string(&Value::string(value, nu_protocol::Span::unknown()))
 }
 
+/// Directories containing POSIX-mandated utilities that the host OS provides.
+/// These are always included in managed build PATH so runes don't need to declare
+/// `coreutils`, `sed`, `grep`, `awk`, `find`, etc. as build dependencies.
+fn posix_ambient_dirs() -> Vec<PathBuf> {
+    vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")]
+}
+
 fn build_path_entries(env: &BuildEnv, host_tool_dir: Option<&Path>) -> Vec<PathBuf> {
     let mut entries = env.path_dirs.clone();
     if let Some(dir) = host_tool_dir {
         entries.push(dir.to_path_buf());
+    }
+    // POSIX ambient utilities are always available in managed builds:
+    // sed, grep, awk, find, mkdir, cp, chmod, expr, test, etc.
+    for dir in posix_ambient_dirs() {
+        if dir.is_dir() && !entries.contains(&dir) {
+            entries.push(dir);
+        }
     }
     if env.inherit_host_path {
         let Some(existing) = std::env::var_os("PATH") else {
@@ -494,24 +519,12 @@ fn prepare_host_tool_dir(work_dir: &Path, host_tools: &[HostTool]) -> Result<Opt
     Ok(Some(dir))
 }
 
-#[cfg(unix)]
 fn link_host_tool(link: &Path, source: &Path) -> Result<()> {
     if link.exists() {
         fs::remove_file(link).with_context(|| format!("replace host tool {}", link.display()))?;
     }
     std::os::unix::fs::symlink(source, link)
         .with_context(|| format!("link host tool {} -> {}", link.display(), source.display()))
-}
-
-#[cfg(windows)]
-fn link_host_tool(link: &Path, source: &Path) -> Result<()> {
-    let link = match source.extension().and_then(|ext| ext.to_str()) {
-        Some(ext) if link.extension().is_none() => link.with_extension(ext),
-        _ => link.to_path_buf(),
-    };
-    fs::copy(source, &link)
-        .with_context(|| format!("copy host tool {} -> {}", source.display(), link.display()))?;
-    Ok(())
 }
 
 fn build_path_string(path_entries: &[PathBuf]) -> Option<String> {

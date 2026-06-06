@@ -77,7 +77,7 @@ pub fn profiles_dir() -> Result<PathBuf> {
 }
 
 /// The user-facing profile directory. This is always under the install root and holds the
-/// `current` symlink (or junction) that users put on their PATH.
+/// `current` symlink that users put on their PATH.
 pub fn user_profiles_dir() -> Result<PathBuf> {
     Ok(install_root()?.join("profiles"))
 }
@@ -97,7 +97,8 @@ pub fn fixed_store_setup_instructions() -> Option<String> {
     #[cfg(target_os = "macos")]
     return Some(format!(
         "the fixed store directory `{}` does not exist\n\n\
-         On macOS the root filesystem is read-only. Create it with:\n\
+         Run `sudo grm setup` to register it, then reboot.\n\
+         Alternatively, create it manually with:\n\
          \techo 'grm' | sudo tee -a /etc/synthetic.conf\n\
          \t# Reboot, then optionally mount a dedicated APFS volume:\n\
          \tsudo diskutil apfs addVolume disk1 'Grimoire' /grm\n",
@@ -107,23 +108,8 @@ pub fn fixed_store_setup_instructions() -> Option<String> {
     #[cfg(target_os = "linux")]
     return Some(format!(
         "the fixed store directory `{}` does not exist\n\n\
-         Create it with:\n\
+         Run `sudo grm setup` to create it, or manually:\n\
          \tsudo mkdir /grm\n",
-        parent.display()
-    ));
-
-    #[cfg(target_os = "windows")]
-    return Some(format!(
-        "the fixed store directory `{}` does not exist\n\n\
-         Create it with Administrator privileges:\n\
-         \tNew-Item -ItemType Directory -Path C:\\grm\n",
-        parent.display()
-    ));
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    return Some(format!(
-        "the fixed store directory `{}` does not exist\n\n\
-         Create it manually with appropriate privileges.\n",
         parent.display()
     ));
 }
@@ -141,7 +127,7 @@ pub fn target_triple() -> String {
     let arch = env::consts::ARCH;
     let abi = match os {
         "macos" => "darwin",
-        "windows" | "linux" => "gnu",
+        "linux" => "gnu",
         _ => "unknown",
     };
 

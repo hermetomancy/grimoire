@@ -18,10 +18,54 @@ use std::{
 
 use crate::{
     addendum, archive, build,
-    model::{Dependency, IndexEntry},
+    model::{Dependency, IndexEntry, parse_version_relaxed},
     nu::runtime::{EmbeddedNuRuntime, RuneRuntime},
     paths, tome,
 };
+
+/// Maps capability names (e.g. "awk", "sh") to the package names that provide them
+/// via their `bins` map. Built once per resolve by scanning all runes.
+#[derive(Clone)]
+struct CapabilityIndex {
+    map: HashMap<String, Vec<String>>,
+}
+
+impl CapabilityIndex {
+    fn build() -> Result<Self> {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for tome in tome::load_tomes()? {
+            let cache = tome::ensure_tome_cache(&tome)?;
+            let runes_dir = cache.join("runes");
+            if !runes_dir.exists() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&runes_dir)? {
+                let path = entry?.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("rn") {
+                    continue;
+                }
+                let metadata = match EmbeddedNuRuntime.package_metadata(&path) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                for bin_name in metadata.bins.keys() {
+                    if *bin_name == metadata.name {
+                        continue;
+                    }
+                    let providers = map.entry(bin_name.clone()).or_default();
+                    if !providers.contains(&metadata.name) {
+                        providers.push(metadata.name.clone());
+                    }
+                }
+            }
+        }
+        Ok(Self { map })
+    }
+
+    fn providers(&self, capability: &str) -> Vec<String> {
+        self.map.get(capability).cloned().unwrap_or_default()
+    }
+}
 
 /// A package pinned by the lockfile: the exact version and archive hash last installed. Used by
 /// `install --locked` to constrain resolution to the recorded reproducible set.
@@ -84,11 +128,15 @@ fn resolve_with(
     pins: Option<&Pins>,
     source: &dyn CandidateSource,
 ) -> Result<Plan> {
+    let capabilities = CapabilityIndex::build().unwrap_or_else(|_| CapabilityIndex {
+        map: HashMap::new(),
+    });
     let mut resolver = Resolver {
         installed,
         pins,
         source,
         candidates: HashMap::new(),
+        capabilities,
     };
     let mut chosen: BTreeMap<String, ChosenNode> = BTreeMap::new();
     // All roots are resolved as one worklist so backtracking can revise an early choice when a
@@ -150,9 +198,43 @@ struct Resolver<'a> {
     pins: Option<&'a Pins>,
     source: &'a dyn CandidateSource,
     candidates: HashMap<String, Vec<Candidate>>,
+    capabilities: CapabilityIndex,
 }
 
 impl Resolver<'_> {
+    /// If `dep.name` is a capability (no literal package by that name, but one or more packages
+    /// provide it via their `bins` map), expand it to a concrete provider dependency.
+    /// Otherwise return the dep unchanged.
+    fn expand_capability(&mut self, dep: &Dependency) -> Dependency {
+        // Fast path: literal package exists
+        if let Ok(cands) = self.source.candidates(&dep.name) {
+            if !cands.is_empty() {
+                return dep.clone();
+            }
+        }
+        let providers = self.capabilities.providers(&dep.name);
+        if providers.is_empty() {
+            return dep.clone();
+        }
+        // Prefer an already-installed provider that satisfies the version constraint.
+        for provider in &providers {
+            if let Some(version) = self.installed.get(provider) {
+                if dep.req.matches(version) {
+                    return Dependency {
+                        name: provider.clone(),
+                        req: dep.req.clone(),
+                    };
+                }
+            }
+        }
+        // No installed provider matches; use the first available one.
+        // TODO: prompt user when multiple uninstalled providers exist.
+        Dependency {
+            name: providers[0].clone(),
+            req: dep.req.clone(),
+        }
+    }
+
     /// Resolves an ordered worklist of requirements into `chosen`, backtracking across the whole
     /// list. The head requirement is satisfied first; the chosen package's own runtime deps are
     /// appended to the remaining worklist so a conflict they introduce can backtrack *this* choice
@@ -167,7 +249,8 @@ impl Resolver<'_> {
         let Some((dep, rest)) = worklist.split_first() else {
             return Ok(());
         };
-        let (name, req) = (&dep.name, &dep.req);
+        let expanded = self.expand_capability(dep);
+        let (name, req) = (&expanded.name, &expanded.req);
 
         // Already chosen for another requirement: it must satisfy this one too, then carry on.
         if let Some(node) = chosen.get(name) {
@@ -301,7 +384,7 @@ fn gather_candidates(name: &str, target: &str) -> Result<Vec<Candidate>> {
             continue;
         };
         for entry in index.candidates(name, target) {
-            let version = Version::parse(&entry.version)
+            let version = parse_version_relaxed(&entry.version)
                 .with_context(|| format!("index version `{}` for `{name}`", entry.version))?;
             let slot = by_version
                 .entry(version)
@@ -325,7 +408,7 @@ fn gather_candidates(name: &str, target: &str) -> Result<Vec<Candidate>> {
                 &rune,
             )
             .with_context(|| format!("apply addendums to {}", rune.display()))?;
-            let version = Version::parse(&metadata.version)
+            let version = parse_version_relaxed(&metadata.version)
                 .with_context(|| format!("rune version `{}` for `{name}`", metadata.version))?;
             Some((version, metadata.deps.runtime, rune))
         }
@@ -446,7 +529,7 @@ mod tests {
     /// A source candidate at `version` requiring `deps`; sorting still keeps highest first.
     fn cand(version: &str, deps: &[Dependency]) -> Candidate {
         Candidate {
-            version: Version::parse(version).expect("version"),
+            version: parse_version_relaxed(version).expect("version"),
             runtime: deps.to_vec(),
             rune: Some(PathBuf::from(format!("{version}.rn"))),
             substitutes: Vec::new(),
@@ -564,7 +647,7 @@ mod tests {
     fn reuses_installed_version_without_emitting_step() {
         let src = source(&[("lib", vec![cand("1.0.0", &[]), cand("1.1.0", &[])])]);
         let mut installed = BTreeMap::new();
-        installed.insert("lib".to_owned(), Version::parse("1.0.0").unwrap());
+        installed.insert("lib".to_owned(), parse_version_relaxed("1.0.0").unwrap());
         let resolved = resolve_with(&[dep("lib", ">=1.0")], &installed, None, &src).expect("plan");
         assert!(
             resolved.steps.is_empty(),
@@ -591,7 +674,7 @@ mod tests {
         pins.insert(
             "app".to_owned(),
             Pin {
-                version: Version::parse("1.0.0").unwrap(),
+                version: parse_version_relaxed("1.0.0").unwrap(),
                 archive_hash: String::new(),
             },
         );

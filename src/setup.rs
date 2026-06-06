@@ -1,0 +1,174 @@
+//! Set up the fixed Grimoire store directory (`/grm` on POSIX systems).
+//!
+//! When `GRIMOIRE_ROOT` is set, the store lives under the install root and no system-wide setup
+//! is needed. Otherwise this command creates the fixed store directory that makes baked absolute
+//! paths portable across users and machines.
+
+use anyhow::{Context, Result, bail};
+use std::{env, fs, io::Write, path::Path};
+
+use crate::paths;
+
+pub fn setup() -> Result<()> {
+    if env::var_os("GRIMOIRE_ROOT").is_some() {
+        let root = paths::install_root()?;
+        println!(
+            "GRIMOIRE_ROOT is set; using {} as the store root. No system-wide setup needed.",
+            root.display()
+        );
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    return setup_macos();
+
+    #[cfg(target_os = "linux")]
+    return setup_linux();
+}
+
+#[cfg(target_os = "linux")]
+fn setup_linux() -> Result<()> {
+    let path = Path::new("/grm");
+
+    if path.exists() {
+        if is_writable(path)? {
+            println!("Grimoire store {} is already set up.", path.display());
+            return Ok(());
+        }
+        if let Some((uid, gid)) = sudo_identity() {
+            chown_path(path, uid, gid)?;
+            println!("Made {} writable for the invoking user.", path.display());
+            return Ok(());
+        }
+        bail!(
+            "{} exists but is not writable. Run: sudo chown $(whoami): {}",
+            path.display(),
+            path.display()
+        );
+    }
+
+    fs::create_dir_all(path)
+        .with_context(|| format!("create {} (try running with sudo)", path.display()))?;
+
+    if let Some((uid, gid)) = sudo_identity() {
+        chown_path(path, uid, gid)?;
+        println!(
+            "Created {} and made it owned by the invoking user.",
+            path.display()
+        );
+    } else {
+        println!("Created {} (owned by root).", path.display());
+        println!(
+            "To make it user-writable, run: sudo chown $(whoami): {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn setup_macos() -> Result<()> {
+    let path = Path::new("/grm");
+
+    if path.exists() {
+        if is_writable(path)? {
+            println!("Grimoire store {} is already set up.", path.display());
+            return Ok(());
+        }
+        if let Some((uid, gid)) = sudo_identity() {
+            chown_path(path, uid, gid)?;
+            println!("Made {} writable for the invoking user.", path.display());
+            return Ok(());
+        }
+        bail!(
+            "{} exists but is not writable. Run: sudo chown $(whoami): {}",
+            path.display(),
+            path.display()
+        );
+    }
+
+    let synthetic = Path::new("/etc/synthetic.conf");
+    let marker = "grm";
+
+    let content = if synthetic.exists() {
+        fs::read_to_string(synthetic).with_context(|| format!("read {}", synthetic.display()))?
+    } else {
+        String::new()
+    };
+
+    if content.lines().map(str::trim).any(|line| line == marker) {
+        bail!(
+            "'{marker}' is already registered in {} but {} does not exist yet. \
+             Reboot your Mac, then rerun `grm setup` if needed.",
+            synthetic.display(),
+            path.display()
+        );
+    }
+
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(synthetic)
+        .with_context(|| {
+            format!(
+                "open {} for writing (try running with sudo)",
+                synthetic.display()
+            )
+        })?;
+
+    if !content.is_empty() && !content.ends_with('\n') {
+        file.write_all(b"\n")?;
+    }
+    file.write_all(b"grm\n")?;
+
+    println!("Added '{marker}' to {}.", synthetic.display());
+    println!(
+        "Reboot your Mac. After reboot, {} will exist.",
+        path.display()
+    );
+    println!("Then rerun `grm setup` to adjust permissions, or run:");
+    println!("  sudo chown $(whoami): {}", path.display());
+    Ok(())
+}
+
+/// Best-effort check whether the current process can write into `dir`.
+fn is_writable(dir: &Path) -> Result<bool> {
+    let probe = dir.join(".grimoire-write-test");
+    match fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = fs::remove_file(&probe);
+            Ok(true)
+        }
+        Err(_) => Ok(false),
+    }
+}
+
+/// Returns the uid/gid of the user that invoked sudo, if available.
+fn sudo_identity() -> Option<(u32, u32)> {
+    let uid = env::var("SUDO_UID").ok()?.parse::<u32>().ok()?;
+    let gid = env::var("SUDO_GID").ok()?.parse::<u32>().ok()?;
+    Some((uid, gid))
+}
+
+fn chown_path(path: &Path, uid: u32, gid: u32) -> Result<()> {
+    std::os::unix::fs::chown(path, Some(uid), Some(gid))
+        .with_context(|| format!("chown {} to uid {uid} gid {gid}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_writable_detects_writable_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(is_writable(temp.path()).unwrap());
+        assert!(!temp.path().join(".grimoire-write-test").exists());
+    }
+
+    #[test]
+    fn is_writable_detects_non_writable_directory() {
+        // A non-existent path is not writable.
+        assert!(!is_writable(Path::new("/does/not/exist/.grimoire-test")).unwrap());
+    }
+}
