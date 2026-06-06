@@ -21,11 +21,95 @@ use crate::{
     cli::BuildArgs,
     fetch::{self, FetchedSource},
     install,
+    model::{Dependency, Deps},
     nu::runtime::{BuildDirs, BuildEnv, EmbeddedNuRuntime, RuneRuntime},
     paths,
     progress::{report, status},
     tome, toolchain,
 };
+
+/// Core toolchain packages that bootstrap the musl target and must not receive implicit
+/// musl toolchain dependencies (to avoid circular deps).
+const CORE_TOOLCHAIN_PACKAGES: &[&str] = &[
+    "linux-headers",
+    "musl",
+    "compiler-rt",
+    "llvm",
+    "clang",
+    "make",
+    "busybox",
+    "fhs-compat",
+];
+
+/// Packages automatically injected as build dependencies for `linux-*-musl` targets.
+const MUSL_IMPLICIT_DEPS: &[&str] = &["fhs-compat", "clang", "musl", "llvm"];
+
+/// Returns `true` when `target` is a Linux musl triple.
+pub fn is_musl_target(target: &str) -> bool {
+    target.starts_with("linux-") && target.ends_with("-musl")
+}
+
+fn is_core_toolchain_package(name: &str) -> bool {
+    CORE_TOOLCHAIN_PACKAGES.contains(&name)
+}
+
+/// Build dependencies that are implicitly required for musl-target builds, excluding core
+/// toolchain packages to prevent circular dependencies.
+pub fn musl_implicit_build_deps(package_name: &str, target: &str) -> Vec<Dependency> {
+    if !is_musl_target(target) || is_core_toolchain_package(package_name) {
+        return Vec::new();
+    }
+    MUSL_IMPLICIT_DEPS
+        .iter()
+        .map(|name| Dependency::any(*name))
+        .collect()
+}
+
+/// Resolved build dependencies for a package, including any musl-target implicit deps.
+pub fn effective_build_deps(deps: &Deps, package_name: &str, target: &str) -> Vec<Dependency> {
+    let mut build_deps = deps.build_for(target);
+    for dep in musl_implicit_build_deps(package_name, target) {
+        if !build_deps.iter().any(|d| d.name == dep.name) {
+            build_deps.push(dep);
+        }
+    }
+    build_deps
+}
+
+/// Environment variables injected for musl-target builds.
+pub fn musl_build_env_vars() -> Vec<(String, String)> {
+    vec![
+        ("CC".to_string(), "cc".to_string()),
+        ("CXX".to_string(), "c++".to_string()),
+        ("AR".to_string(), "ar".to_string()),
+        ("LD".to_string(), "ld".to_string()),
+        ("NM".to_string(), "nm".to_string()),
+        ("RANLIB".to_string(), "ranlib".to_string()),
+        ("STRIP".to_string(), "strip".to_string()),
+        ("CFLAGS".to_string(), "-static".to_string()),
+        ("LDFLAGS".to_string(), "-static".to_string()),
+    ]
+}
+
+/// Constructs a [`BuildEnv`] for `target`. For musl targets the host compiler boundary is
+/// skipped because the musl toolchain (fhs-compat wrappers) is already on PATH from build deps.
+pub fn build_env_for_target(
+    path_dirs: Vec<PathBuf>,
+    extra_env: Vec<(String, String)>,
+    target: &str,
+) -> Result<BuildEnv> {
+    if is_musl_target(target) {
+        let mut env = extra_env;
+        env.extend(musl_build_env_vars());
+        Ok(BuildEnv::managed(path_dirs, Vec::new(), env))
+    } else {
+        Ok(BuildEnv::managed(
+            path_dirs,
+            toolchain::source_build_host_tools()?,
+            extra_env,
+        ))
+    }
+}
 
 /// The result of a source build: the archive path and the computed store hash.
 pub struct BuildResult {
@@ -55,7 +139,7 @@ pub fn build_package(
     let target = target.map_or_else(paths::target_triple, |t| t.to_string());
     let store_hash = crate::closure::store_hash_for_rune_with_target(&rune, &target)?;
     let metadata = EmbeddedNuRuntime.package_metadata(&rune)?;
-    let build_deps = metadata.deps.build_for(&target);
+    let build_deps = effective_build_deps(&metadata.deps, &metadata.name, &target);
 
     if !bootstrap {
         install::ensure_build_deps_installed(&build_deps)
@@ -68,11 +152,11 @@ pub fn build_package(
             install::build_dep_env_vars(&build_deps)?,
         )
     } else {
-        BuildEnv::managed(
+        build_env_for_target(
             install::build_dep_bin_dirs(&build_deps)?,
-            toolchain::source_build_host_tools()?,
             install::build_dep_env_vars(&build_deps)?,
-        )
+            &target,
+        )?
     };
     env.target = target;
     build_package_with_env(package, output, &env, &store_hash)
@@ -308,4 +392,48 @@ pub fn find_rune(package: &str) -> Result<Option<PathBuf>> {
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn musl_target_adds_implicit_build_deps() {
+        let deps = Deps::default();
+        let build_deps = effective_build_deps(&deps, "hello", "linux-x86_64-musl");
+        let names: Vec<_> = build_deps.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"fhs-compat"));
+        assert!(names.contains(&"clang"));
+        assert!(names.contains(&"musl"));
+        assert!(names.contains(&"llvm"));
+    }
+
+    #[test]
+    fn non_musl_target_does_not_add_implicit_build_deps() {
+        let deps = Deps::default();
+        let build_deps = effective_build_deps(&deps, "hello", "linux-x86_64-gnu");
+        assert!(build_deps.is_empty());
+    }
+
+    #[test]
+    fn core_toolchain_skips_implicit_build_deps_on_musl() {
+        for pkg in CORE_TOOLCHAIN_PACKAGES {
+            let deps = Deps::default();
+            let build_deps = effective_build_deps(&deps, pkg, "linux-x86_64-musl");
+            assert!(
+                build_deps.is_empty(),
+                "{pkg} should not get implicit deps on musl"
+            );
+        }
+    }
+
+    #[test]
+    fn musl_build_env_skips_host_compiler_boundary() {
+        let env = build_env_for_target(Vec::new(), Vec::new(), "linux-x86_64-musl").unwrap();
+        assert!(env.host_tools.is_empty());
+        assert!(env.extra_env.iter().any(|(k, _)| k == "CC"));
+        assert!(env.extra_env.iter().any(|(k, _)| k == "CFLAGS"));
+        assert!(env.extra_env.iter().any(|(k, _)| k == "LDFLAGS"));
+    }
 }
