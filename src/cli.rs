@@ -155,6 +155,9 @@ pub struct BuildArgs {
     /// This is useful for bootstrapping before the managed core userland is installed.
     #[arg(long)]
     pub bootstrap: bool,
+    /// Target triple to build for (defaults to the host target).
+    #[arg(short, long)]
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Args)]

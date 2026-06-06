@@ -127,7 +127,7 @@ pub fn target_triple() -> String {
     let arch = env::consts::ARCH;
     let abi = match os {
         "macos" => "darwin",
-        "linux" => "gnu",
+        "linux" => "musl",
         _ => "unknown",
     };
 

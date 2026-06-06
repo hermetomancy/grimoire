@@ -231,7 +231,8 @@ fn build_rune_into(
         bail!("rune not found: {}", rune_path.display());
     }
 
-    let result = crate::build::build_package(&rune_path.to_string_lossy(), dist_dir, bootstrap)?;
+    let result =
+        crate::build::build_package(&rune_path.to_string_lossy(), dist_dir, bootstrap, None)?;
     let archive_hash = crate::archive::archive_hash(&result.archive)?;
     let archive_file = result
         .archive
@@ -474,7 +475,7 @@ fn rune_template(name: &str, version: &str) -> String {
   name: "{NAME}"
   version: "{VERSION}"
   summary: "TODO: one-line summary of {NAME}"
-  targets: ["linux-x86_64-gnu" "macos-aarch64-darwin" "windows-x86_64-gnu"]
+  targets: ["linux-x86_64-gnu" "linux-x86_64-musl" "linux-aarch64-gnu" "linux-aarch64-musl" "macos-x86_64-darwin" "macos-aarch64-darwin" "freebsd-x86_64-unknown" "freebsd-aarch64-unknown"]
 
   # Declare sources here; each is fetched and checksum-verified before `build` runs.
   # sources: {
