@@ -4011,6 +4011,97 @@ fn reject_bad_archive_metadata() {
     );
 }
 
+#[test]
+fn core_runes_parse_correctly() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let runes_dir = Path::new("tome-core/runes");
+    let entries = fs::read_dir(runes_dir).unwrap();
+    for entry in entries {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("rn") {
+            let out = run(root, &["store-hash", path.to_str().unwrap()]);
+            assert_success(&out, &format!("parse core rune {}", path.display()));
+        }
+    }
+}
+
+#[test]
+fn platform_conditional_build_deps_only_set_matching_prefix() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let out = TempDir::new().unwrap();
+    let out = out.path();
+
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'prefixtome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+
+    fs::write(
+        runes.join("matchdep.rn"),
+        "export const package = {\n  name: 'matchdep'\n  version: '0.1.0'\n  bins: { matchdep: 'bin/matchdep' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'matchdep\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'matchdep')\n}\n",
+    )
+    .unwrap();
+
+    let other_os = if std::env::consts::OS == "linux" {
+        "macos"
+    } else {
+        "linux"
+    };
+    fs::write(
+        runes.join("skipdep.rn"),
+        "export const package = {\n  name: 'skipdep'\n  version: '0.1.0'\n  bins: { skipdep: 'bin/skipdep' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'skipdep\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'skipdep')\n}\n",
+    )
+    .unwrap();
+
+    fs::write(
+        runes.join("consumer.rn"),
+        format!(
+            "export const package = {{\n  name: 'consumer'\n  version: '0.1.0'\n  deps: {{ build: {{ default: ['matchdep', 'skipdep[{}]'] }}, runtime: [] }}\n  bins: {{ consumer: 'bin/consumer' }}\n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  sh -c $\"env > '($ctx.package_dir | path join 'env.txt')'\"\n  \"#!/usr/bin/env sh\\nprintf 'consumer\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'consumer')\n}}\n",
+            other_os
+        ),
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "add prefix tome");
+
+    assert_success(&run(root, &["install", "matchdep"]), "install matchdep");
+
+    let build = run(
+        root,
+        &[
+            "build",
+            runes.join("consumer.rn").to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert_success(&build, "build consumer");
+
+    let archive = out.join(format!("consumer-0.1.0-{}.tar.zst", target_triple()));
+    let env_text = archive_member_text(&archive, "env.txt");
+    assert!(
+        env_text.contains("MATCHDEP_PREFIX="),
+        "MATCHDEP_PREFIX should be set for matching platform dep: {env_text}"
+    );
+    assert!(
+        !env_text.contains("SKIPDEP_PREFIX="),
+        "SKIPDEP_PREFIX should not be set for non-matching platform dep: {env_text}"
+    );
+}
+
 fn make_fake_tome() -> TempDir {
     let dir = TempDir::new().unwrap();
     let runes = dir.path().join("runes");
