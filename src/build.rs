@@ -37,11 +37,11 @@ const CORE_TOOLCHAIN_PACKAGES: &[&str] = &[
     "llvm",
     "clang",
     "make",
-    "fhs-compat",
+    "toolchain-wrappers",
 ];
 
 /// Packages automatically injected as build dependencies for `linux-*-musl` targets.
-const MUSL_IMPLICIT_DEPS: &[&str] = &["fhs-compat", "clang", "musl", "llvm"];
+const MUSL_IMPLICIT_DEPS: &[&str] = &["toolchain-wrappers", "clang", "musl", "llvm"];
 
 /// Returns `true` when `target` is a Linux musl triple.
 pub fn is_musl_target(target: &str) -> bool {
@@ -91,7 +91,7 @@ pub fn musl_build_env_vars() -> Vec<(String, String)> {
 }
 
 /// Constructs a [`BuildEnv`] for `target`. For musl targets the host compiler boundary is
-/// skipped because the musl toolchain (fhs-compat wrappers) is already on PATH from build deps.
+/// skipped because the musl toolchain (toolchain-wrappers) is already on PATH from build deps.
 pub fn build_env_for_target(
     path_dirs: Vec<PathBuf>,
     extra_env: Vec<(String, String)>,
@@ -402,7 +402,7 @@ mod tests {
         let deps = Deps::default();
         let build_deps = effective_build_deps(&deps, "hello", "linux-x86_64-musl");
         let names: Vec<_> = build_deps.iter().map(|d| d.name.as_str()).collect();
-        assert!(names.contains(&"fhs-compat"));
+        assert!(names.contains(&"toolchain-wrappers"));
         assert!(names.contains(&"clang"));
         assert!(names.contains(&"musl"));
         assert!(names.contains(&"llvm"));
@@ -460,6 +460,9 @@ mod tests {
             .insert("default".to_owned(), vec![Dependency::any("cmake")]);
         let build_deps = effective_build_deps(&deps, "hello", "linux-x86_64-musl");
         let names: Vec<_> = build_deps.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(names, vec!["cmake", "fhs-compat", "clang", "musl", "llvm"]);
+        assert_eq!(
+            names,
+            vec!["cmake", "toolchain-wrappers", "clang", "musl", "llvm"]
+        );
     }
 }
