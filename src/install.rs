@@ -331,6 +331,7 @@ pub(crate) fn ensure_build_deps_installed(deps: &[Dependency]) -> Result<()> {
             ensure_build_deps_installed(&build_deps)
                 .with_context(|| format!("install build dependencies for `{}`", step.name))?;
             let env = build::build_env_for_target(
+                &metadata.name,
                 build_dep_bin_dirs(&build_deps)?,
                 build_dep_env_vars(&build_deps)?,
                 &paths::target_triple(),
@@ -630,6 +631,7 @@ impl Installer {
             self.install_deps(&build_deps)
                 .with_context(|| format!("install build dependencies for `{}`", metadata.name))?;
             let env = build::build_env_for_target(
+                &metadata.name,
                 build_dep_bin_dirs(&build_deps)?,
                 build_dep_env_vars(&build_deps)?,
                 &paths::target_triple(),
