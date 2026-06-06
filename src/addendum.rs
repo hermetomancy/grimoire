@@ -12,7 +12,7 @@ use std::{
 };
 
 use crate::{
-    cli::{TomeAddArgs, TomeRemoveArgs},
+    cli::{TomeAddArgs, TomeRemoveArgs, TomeUpdateArgs},
     model::{
         AddendumManifest, AddendumState, PackageMetadata, validate_tome_name, validate_tome_ref,
         validate_tome_url,
@@ -73,6 +73,37 @@ pub fn remove(args: TomeRemoveArgs) -> Result<()> {
 pub fn list() -> Result<()> {
     for state in load_addendums()? {
         println!("{}\t{}\t{}", state.name, state.url, state.ref_name);
+    }
+    Ok(())
+}
+
+pub fn update(args: TomeUpdateArgs) -> Result<()> {
+    let addenda = match args.name {
+        Some(name) => {
+            validate_tome_name(&name)?;
+            vec![load_addendum(&name)?]
+        }
+        None => load_addendums()?,
+    };
+
+    if addenda.is_empty() {
+        report("no addenda configured");
+        return Ok(());
+    }
+
+    let mut any_failed = false;
+    for state in addenda {
+        match sync_addendum_cache(&state) {
+            Ok(()) => report(&format!("updated addendum {}", state.name)),
+            Err(e) => {
+                report(&format!("failed to update addendum {}: {e}", state.name));
+                any_failed = true;
+            }
+        }
+    }
+
+    if any_failed {
+        bail!("one or more addenda failed to update");
     }
     Ok(())
 }
@@ -152,7 +183,7 @@ fn ensure_addendum_cache(state: &AddendumState) -> Result<PathBuf> {
     Ok(cache_path)
 }
 
-fn sync_addendum_cache(state: &AddendumState) -> Result<()> {
+pub(crate) fn sync_addendum_cache(state: &AddendumState) -> Result<()> {
     let cache_dir = addendum_cache_dir()?;
     let cache_path = addendum_cache_path(&state.name)?;
     fs::create_dir_all(&cache_dir)?;

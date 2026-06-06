@@ -326,4 +326,7 @@ pub enum AddendumCommand {
     /// List configured addenda.
     #[command(visible_alias = "ls")]
     List,
+    /// Sync configured addenda, fetching the latest commit for their tracked ref.
+    #[command(visible_aliases = ["up", "sync"])]
+    Update(TomeUpdateArgs),
 }
