@@ -5,7 +5,7 @@
 //! Everything removed here is reproducible from the original sources, so a later install just
 //! re-fetches and re-verifies what it needs.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -56,6 +56,9 @@ fn clean_dir(dir: &Path) -> Result<(u64, u64)> {
     if !dir.exists() {
         return Ok((0, 0));
     }
+    if fs::symlink_metadata(dir)?.file_type().is_symlink() {
+        bail!("refusing to clean `{}`: it is a symlink", dir.display());
+    }
     let mut bytes = 0u64;
     let mut entries = 0u64;
     for entry in fs::read_dir(dir)? {
@@ -77,6 +80,7 @@ fn clean_dir(dir: &Path) -> Result<(u64, u64)> {
 /// whole clean.
 fn path_size(path: &Path) -> u64 {
     WalkDir::new(path)
+        .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
         .filter_map(|entry| entry.metadata().ok())
