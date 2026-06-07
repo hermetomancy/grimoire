@@ -190,19 +190,21 @@ pub fn list_generations() -> Result<Vec<Generation>> {
             if !gen_path.join("gen.nuon").exists() {
                 continue;
             }
-            if let Ok(id) = parse_generation_id(name) {
-                if !generations.iter().any(|g| g.id == id) {
-                    match read_generation_metadata(&gen_path) {
-                        Ok(g) => {
-                            generations.push(g);
-                            changed = true;
-                        }
-                        Err(e) => report(&format!(
-                            "warning: could not read generation metadata {}: {e}",
-                            gen_path.display()
-                        )),
-                    }
+            let Ok(id) = parse_generation_id(name) else {
+                continue;
+            };
+            if generations.iter().any(|g| g.id == id) {
+                continue;
+            }
+            match read_generation_metadata(&gen_path) {
+                Ok(g) => {
+                    generations.push(g);
+                    changed = true;
                 }
+                Err(e) => report(&format!(
+                    "warning: could not read generation metadata {}: {e}",
+                    gen_path.display()
+                )),
             }
         }
     }
@@ -256,8 +258,22 @@ pub fn gc(keep: usize) -> Result<()> {
     let current = current_generation_id()?;
     let to_retain: BTreeSet<u64> = generations.iter().take(keep).map(|g| g.id).collect();
 
-    let mut freed_generations = 0;
-    for g in &generations {
+    let freed_generations = delete_old_generations(&generations, &to_retain, current)?;
+    prune_registry()?;
+    let referenced = collect_referenced_paths(&to_retain)?;
+    let freed_stores = collect_unreferenced_stores(&referenced)?;
+
+    report_gc_result(freed_stores, freed_generations);
+    Ok(())
+}
+
+fn delete_old_generations(
+    generations: &[Generation],
+    to_retain: &BTreeSet<u64>,
+    current: Option<u64>,
+) -> Result<usize> {
+    let mut freed = 0;
+    for g in generations {
         if to_retain.contains(&g.id) {
             continue;
         }
@@ -268,15 +284,16 @@ pub fn gc(keep: usize) -> Result<()> {
         let dir = generation_dir(g.id)?;
         if dir.exists() {
             fs::remove_dir_all(&dir)?;
-            freed_generations += 1;
+            freed += 1;
         }
     }
-
-    if freed_generations > 0 {
-        report(&format!("removed {freed_generations} old generation(s)"));
+    if freed > 0 {
+        report(&format!("removed {freed} old generation(s)"));
     }
+    Ok(freed)
+}
 
-    // Prune the registry to match what remains on disk.
+fn prune_registry() -> Result<()> {
     let mut registry = read_registry().unwrap_or_default();
     let before = registry.len();
     registry.retain(|g| generation_dir(g.id).map(|d| d.exists()).unwrap_or(false));
@@ -287,10 +304,12 @@ pub fn gc(keep: usize) -> Result<()> {
             ));
         }
     }
+    Ok(())
+}
 
-    // Collect store paths referenced by retained generations
+fn collect_referenced_paths(to_retain: &BTreeSet<u64>) -> Result<BTreeSet<String>> {
     let mut referenced: BTreeSet<String> = BTreeSet::new();
-    for id in &to_retain {
+    for id in to_retain {
         let dir = generation_dir(*id)?;
         let meta = dir.join("gen.nuon");
         if meta.exists() {
@@ -299,31 +318,37 @@ pub fn gc(keep: usize) -> Result<()> {
             }
         }
     }
+    Ok(referenced)
+}
 
-    // Walk the store and delete unreferenced paths
+fn collect_unreferenced_stores(referenced: &BTreeSet<String>) -> Result<usize> {
     let store_root = paths::store_root()?;
     if !store_root.exists() {
         report("store root does not exist, nothing to collect");
-        return Ok(());
+        return Ok(0);
     }
 
-    let mut freed_stores = 0;
+    let mut freed = 0;
     for entry in fs::read_dir(&store_root)? {
         let entry = entry?;
         let path = entry.path();
         let path_str = path.display().to_string();
-        if !referenced.contains(&path_str) {
-            let size = du(&path)?;
-            fs::remove_dir_all(&path)?;
-            report(&format!(
-                "collected {} ({:.2} MiB)",
-                path.file_name().unwrap_or_default().to_string_lossy(),
-                size as f64 / (1024.0 * 1024.0)
-            ));
-            freed_stores += 1;
+        if referenced.contains(&path_str) {
+            continue;
         }
+        let size = du(&path)?;
+        fs::remove_dir_all(&path)?;
+        report(&format!(
+            "collected {} ({:.2} MiB)",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            size as f64 / (1024.0 * 1024.0)
+        ));
+        freed += 1;
     }
+    Ok(freed)
+}
 
+fn report_gc_result(freed_stores: usize, freed_generations: usize) {
     if freed_stores == 0 && freed_generations == 0 {
         report("nothing to collect");
     } else {
@@ -331,8 +356,6 @@ pub fn gc(keep: usize) -> Result<()> {
             "gc complete: removed {freed_stores} store path(s) and {freed_generations} generation(s)"
         ));
     }
-
-    Ok(())
 }
 
 /// Deletes a specific generation by ID.
@@ -484,6 +507,8 @@ fn try_cow_clone(src: &Path, dst: &Path) -> Result<()> {
         .with_context(|| format!("convert src path to C string: {}", src.display()))?;
     let dst_c = std::ffi::CString::new(dst.as_os_str().as_bytes())
         .with_context(|| format!("convert dst path to C string: {}", dst.display()))?;
+    // SAFETY: `clonefile` is a read-only CoW clone syscall. `src_c` and `dst_c` are valid
+    // NUL-terminated CStrings that outlive the call, derived from existing paths.
     let rc = unsafe { libc::clonefile(src_c.as_ptr(), dst_c.as_ptr(), 0) };
     if rc == 0 {
         Ok(())
@@ -510,6 +535,9 @@ fn try_cow_clone(src: &Path, dst: &Path) -> Result<()> {
     // FICLONE = _IOW(0x94, 9, int)
     const FICLONE: libc::c_ulong = 0x40049409;
 
+    // SAFETY: `ioctl(FICLONE)` is a reflink operation. `src_fd` and `dst_fd` are valid,
+    // owned file descriptors that outlive the call. `FICLONE` is the correct ioctl constant
+    // for Linux reflink (`_IOW(0x94, 9, int)`).
     let rc = unsafe { libc::ioctl(dst_fd, FICLONE, src_fd) };
     if rc == 0 {
         Ok(())
