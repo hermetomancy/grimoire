@@ -45,6 +45,11 @@ pub fn build_output_dir() -> Result<PathBuf> {
     Ok(install_root()?.join("cache").join("builds"))
 }
 
+/// Directory for full build logs written during source builds.
+pub fn build_log_dir() -> Result<PathBuf> {
+    Ok(install_root()?.join("logs").join("builds"))
+}
+
 /// The content-addressed store root.
 ///
 /// By default this is `/grm/store` — a single fixed path that is identical on every machine

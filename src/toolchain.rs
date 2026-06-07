@@ -145,6 +145,28 @@ fn is_binary_affecting_tool(name: &str) -> bool {
     )
 }
 
+/// Returns the macOS system SDK path (e.g. "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk")
+/// when running on macOS with `xcrun` available. Passed to builds as `SDKROOT` so the managed
+/// compiler can locate system headers and libraries.
+pub fn macos_sdk_path() -> Option<String> {
+    if env::consts::OS != "macos" {
+        return None;
+    }
+    let output = std::process::Command::new("xcrun")
+        .args(["--show-sdk-path"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let path = stdout.lines().next()?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some(path.to_string())
+}
+
 /// Returns the macOS system SDK version (e.g. "15.2") when running on macOS with
 /// `xcrun` available. This affects headers, libraries, and binary output, so it is
 /// part of the build-environment identity.

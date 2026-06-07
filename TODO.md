@@ -89,6 +89,15 @@ pointing to the active generation's `bin/`. Current user-local
   platform-specific post-link tools.
 - macOS SDK version captured via `xcrun --show-sdk-version`.
 
+### Managed build environment sandboxing
+
+- Managed builds clear host discovery variables and layer declared build dependency prefixes
+  back in through `CMAKE_PREFIX_PATH`, `PKG_CONFIG_*`, `CPATH`, `LIBRARY_PATH`, `ACLOCAL_PATH`,
+  and `<DEP>_PREFIX`.
+- `HOME`, temp directories, and XDG directories point inside `ctx.work_dir` for rune builds.
+- External build commands receive blank overrides for inherited host environment variables unless
+  Grimoire deliberately provides them.
+
 ### CoW filesystem optimization
 
 - `clone_or_hard_link()` in `src/profile.rs` tries APFS `clonefile` (macOS)

@@ -15,7 +15,7 @@ use crate::{
     install,
     model::{PackageMetadata, PackageState, parse_version_relaxed},
     nu::runtime::{EmbeddedNuRuntime, RuneRuntime},
-    progress, solve, tome,
+    paths, progress, solve, tome,
 };
 
 #[derive(Debug, Clone)]
@@ -260,9 +260,11 @@ fn print_available(package: &TomePackage) {
     if let Some(summary) = &package.metadata.summary {
         println!("  summary: {summary}");
     }
-    if !package.metadata.bins.is_empty() {
+    let target = paths::target_triple();
+    let bins = package.metadata.bins_for(&target);
+    if !bins.is_empty() {
         println!("  bins:");
-        for (name, path) in &package.metadata.bins {
+        for (name, path) in &bins {
             println!("    {name}: {path}");
         }
     }

@@ -26,6 +26,8 @@ fn core_readiness_packages() -> &'static [&'static str] {
             "compiler-rt",
             "llvm",
             "clang",
+            "cmake",
+            "python3",
             "make",
             "toybox",
             "toolchain-wrappers",
@@ -35,6 +37,8 @@ fn core_readiness_packages() -> &'static [&'static str] {
             "llvm",
             "clang",
             "compiler-rt",
+            "cmake",
+            "python3",
             "make",
             "toybox",
             "toolchain-wrappers",
@@ -302,7 +306,7 @@ fn addendum_staleness_warning_on_use() {
     .unwrap();
     fs::write(
         runes.join("stalepkg.rn"),
-        "export const package = { name: 'stalepkg' version: '0.1.0' bins: { stalepkg: 'bin/stalepkg' } }\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  echo '#!/usr/bin/env sh' | save ($ctx.package_dir | path join 'bin' 'stalepkg')\n}\n",
+        "export const package = { name: 'stalepkg' version: '0.1.0' }\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  echo '#!/usr/bin/env sh' | save ($ctx.package_dir | path join 'bin' 'stalepkg')\n}\n",
     )
     .unwrap();
 
@@ -385,7 +389,7 @@ fn signed_addendum_pins_key_and_rejects_tampering() {
     .unwrap();
     fs::write(
         runes.join("adpatch.rn"),
-        "export const package = { name: 'adpatch' version: '0.1.0' bins: { adpatch: 'bin/adpatch' } }\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  echo '#!/usr/bin/env sh' | save ($ctx.package_dir | path join 'bin' 'adpatch')\n}\n",
+        "export const package = { name: 'adpatch' version: '0.1.0' }\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  echo '#!/usr/bin/env sh' | save ($ctx.package_dir | path join 'bin' 'adpatch')\n}\n",
     )
     .unwrap();
 
@@ -482,7 +486,7 @@ fn signed_addendum_refuses_key_rotation_without_readd() {
     .unwrap();
     fs::write(
         runes.join("adpatch2.rn"),
-        "export const package = { name: 'adpatch2' version: '0.1.0' bins: { adpatch2: 'bin/adpatch2' } }\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  echo '#!/usr/bin/env sh' | save ($ctx.package_dir | path join 'bin' 'adpatch2')\n}\n",
+        "export const package = { name: 'adpatch2' version: '0.1.0' }\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  echo '#!/usr/bin/env sh' | save ($ctx.package_dir | path join 'bin' 'adpatch2')\n}\n",
     )
     .unwrap();
 
@@ -570,7 +574,7 @@ fn signed_addendum_rejects_manifest_without_signature_on_first_sync() {
     .unwrap();
     fs::write(
         runes.join("nosigpatch.rn"),
-        "export const package = { name: 'nosigpatch' version: '0.1.0' bins: { nosigpatch: 'bin/nosigpatch' } }\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  echo '#!/usr/bin/env sh' | save ($ctx.package_dir | path join 'bin' 'nosigpatch')\n}\n",
+        "export const package = { name: 'nosigpatch' version: '0.1.0' }\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  echo '#!/usr/bin/env sh' | save ($ctx.package_dir | path join 'bin' 'nosigpatch')\n}\n",
     )
     .unwrap();
 
@@ -631,7 +635,7 @@ fn signed_addendum_allows_graceful_key_rotation() {
     .unwrap();
     fs::write(
         runes.join("gracepatch.rn"),
-        "export const package = { name: 'gracepatch' version: '0.1.0' bins: { gracepatch: 'bin/gracepatch' } }\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  echo '#!/usr/bin/env sh' | save ($ctx.package_dir | path join 'bin' 'gracepatch')\n}\n",
+        "export const package = { name: 'gracepatch' version: '0.1.0' }\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  echo '#!/usr/bin/env sh' | save ($ctx.package_dir | path join 'bin' 'gracepatch')\n}\n",
     )
     .unwrap();
 
@@ -1047,7 +1051,7 @@ fn stale_prebuilt_is_rebuilt_from_source() {
     // The source rune produces a bin that announces it was built from source.
     fs::write(
         runes.join("stalepkg.rn"),
-        "export const package = {\n  name: 'stalepkg'\n  version: '0.1.0'\n  bins: { stalepkg: 'bin/stalepkg' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'built from source\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'stalepkg')\n}\n",
+        "export const package = {\n  name: 'stalepkg'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'built from source\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'stalepkg')\n}\n",
     )
     .unwrap();
 
@@ -1242,12 +1246,12 @@ fn build_dependency_bins_are_on_build_path() {
     .unwrap();
     fs::write(
         runes.join("stampdep.rn"),
-        "export const package = {\n  name: 'stampdep'\n  version: '0.1.0'\n  bins: { stamp: 'bin/stamp' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'from build dependency\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'stamp')\n}\n",
+        "export const package = {\n  name: 'stampdep'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'from build dependency\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'stamp')\n}\n",
     )
     .unwrap();
     fs::write(
         runes.join("usespath.rn"),
-        "export const package = {\n  name: 'usespath'\n  version: '0.1.0'\n  deps: { build: { default: ['stampdep'] }, runtime: [] }\n  bins: { usespath: 'bin/usespath' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  let stamped = (stamp | str trim)\n  $\"#!/usr/bin/env sh\\nprintf '($stamped)\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'usespath')\n}\n",
+        "export const package = {\n  name: 'usespath'\n  version: '0.1.0'\n  deps: { build: { default: ['stampdep'] }, runtime: [] }\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  let stamped = (stamp | str trim)\n  $\"#!/usr/bin/env sh\\nprintf '($stamped)\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'usespath')\n}\n",
     )
     .unwrap();
 
@@ -1280,12 +1284,12 @@ fn build_dependency_bins_take_precedence_over_host_tools() {
     .unwrap();
     fs::write(
         runes.join("managedmake.rn"),
-        "export const package = {\n  name: 'managedmake'\n  version: '0.1.0'\n  bins: { make: 'bin/make' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'managed make\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'make')\n}\n",
+        "export const package = {\n  name: 'managedmake'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'managed make\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'make')\n}\n",
     )
     .unwrap();
     fs::write(
         runes.join("usesmake.rn"),
-        "export const package = {\n  name: 'usesmake'\n  version: '0.1.0'\n  deps: { build: { default: ['managedmake'] }, runtime: [] }\n  bins: { usesmake: 'bin/usesmake' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  let made = (make | str trim)\n  $\"#!/usr/bin/env sh\\nprintf '($made)\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'usesmake')\n}\n",
+        "export const package = {\n  name: 'usesmake'\n  version: '0.1.0'\n  deps: { build: { default: ['managedmake'] }, runtime: [] }\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  let made = (make | str trim)\n  $\"#!/usr/bin/env sh\\nprintf '($made)\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'usesmake')\n}\n",
     )
     .unwrap();
 
@@ -1387,7 +1391,7 @@ fn source_archive_is_extracted_into_build_context(
     fs::write(
         &rune,
         format!(
-            "export const package = {{\n  name: 'extractor'\n  version: '0.1.0'\n  sources: {{ main: {{ url: '{archive_name}', sha256: '{source_hash}' }} }}\n  bins: {{ extractor: 'bin/extractor' }}\n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  let message = (open --raw ($ctx.sources.main.dir | path join 'payload' 'message.txt') | str trim)\n  $\"#!/usr/bin/env sh\\nprintf '($message)\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'extractor')\n}}\n"
+            "export const package = {{\n  name: 'extractor'\n  version: '0.1.0'\n  sources: {{ main: {{ url: '{archive_name}', sha256: '{source_hash}' }} }}\n  bins: {{default: {{ extractor: 'bin/extractor' }}}}\n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  let message = (open --raw ($ctx.sources.main.dir | path join 'payload' 'message.txt') | str trim)\n  $\"#!/usr/bin/env sh\\nprintf '($message)\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'extractor')\n}}\n"
         ),
     )
     .unwrap();
@@ -1481,7 +1485,7 @@ printf '%s\n' "$prefix" > configured-prefix.txt
     let minimake_archive = dist.join(&minimake_archive_name);
     let mut builder = open_archive(&minimake_archive);
     let minimake_metadata = format!(
-        "{{format: 1, name: \"minimake\", version: \"0.1.0\", target: \"{}\", store_path: \"{}\", bins: {{make: \"bin/make\"}}}}\n",
+        "{{format: 1, name: \"minimake\", version: \"0.1.0\", target: \"{}\", store_path: \"{}\", bins: {{default: {{make: \"bin/make\"}}}}}}\n",
         target_triple(),
         fake_store_basename("minimake", "0.1.0")
     );
@@ -1511,7 +1515,7 @@ printf '%s\n' "$prefix" > configured-prefix.txt
     fs::write(
         runes.join("realpkg.rn"),
         format!(
-            "export const package = {{\n  name: 'realpkg'\n  version: '1.0.0'\n  sources: {{ main: {{ url: 'realpkg-1.0.0.tar.zst', sha256: '{source_hash}' }} }}\n  deps: {{ build: {{ default: ['minimake'] }}, runtime: [] }}\n  bins: {{ realpkg: 'realpkg' }}\n}}\n\nexport def build [ctx] {{\n  let source_dir = ($ctx.sources.main.dir | path join 'realpkg-1.0.0')\n  let build_dir = ($ctx.package_dir | path join 'build')\n  let staged_prefix = ($ctx.package_dir | path join ($ctx.prefix | str replace -r '^/' ''))\n  mkdir $build_dir\n  mkdir $staged_prefix\n  let result = (sh -c $\"cd '($build_dir)' && SOURCE_DIR='($source_dir)' '($source_dir)/configure' --prefix='($ctx.prefix)' && make && make install DESTDIR='($ctx.package_dir)'\" | complete)\n  if $result.exit_code != 0 {{\n    error make {{ msg: $result.stderr }}\n  }}\n}}\n"
+            "export const package = {{\n  name: 'realpkg'\n  version: '1.0.0'\n  sources: {{ main: {{ url: 'realpkg-1.0.0.tar.zst', sha256: '{source_hash}' }} }}\n  deps: {{ build: {{ default: ['minimake'] }}, runtime: [] }}\n  bins: {{default: {{ realpkg: 'realpkg' }}}}\n}}\n\nexport def build [ctx] {{\n  let source_dir = ($ctx.sources.main.dir | path join 'realpkg-1.0.0')\n  let build_dir = ($ctx.package_dir | path join 'build')\n  let staged_prefix = ($ctx.package_dir | path join ($ctx.prefix | str replace -r '^/' ''))\n  mkdir $build_dir\n  mkdir $staged_prefix\n  let result = (sh -c $\"cd '($build_dir)' && SOURCE_DIR='($source_dir)' '($source_dir)/configure' --prefix='($ctx.prefix)' && make && make install DESTDIR='($ctx.package_dir)'\" | complete)\n  if $result.exit_code != 0 {{\n    error make {{ msg: $result.stderr }}\n  }}\n}}\n"
         ),
     )
     .unwrap();
@@ -1577,7 +1581,7 @@ fn source_build_failure_surfaces_diagnostic_and_output_tail() {
     // trailing external being swallowed because the result was never drained / exit-checked.
     fs::write(
         runes.join("brokenpkg.rn"),
-        "export const package = {\n  name: 'brokenpkg'\n  version: '1.0.0'\n  sources: {}\n  deps: { build: {}, runtime: [] }\n  bins: { brokenpkg: 'brokenpkg' }\n}\n\nexport def build [ctx] {\n  sh -c \"echo 'configure: error: no acceptable C compiler found in $PATH' >&2; exit 1\"\n}\n",
+        "export const package = {\n  name: 'brokenpkg'\n  version: '1.0.0'\n  sources: {}\n  deps: { build: {}, runtime: [] }\n \n}\n\nexport def build [ctx] {\n  sh -c \"echo 'configure: error: no acceptable C compiler found in $PATH' >&2; exit 1\"\n}\n",
     )
     .unwrap();
 
@@ -1721,7 +1725,7 @@ fn install_rejects_archive_with_wrong_store_path() {
 
     let mut builder = open_archive(&archive);
     let metadata = format!(
-        "{{format: 1, name: \"wrongpath\", version: \"1.0.0\", target: \"{}\", store_path: \"/wrong/store/path\", bins: {{wrongpath: \"bin/wrongpath\"}}}}\n",
+        "{{format: 1, name: \"wrongpath\", version: \"1.0.0\", target: \"{}\", store_path: \"/wrong/store/path\", bins: {{default: {{wrongpath: \"bin/wrongpath\"}}}}}}\n",
         target_triple()
     );
     append_file(
@@ -1938,7 +1942,7 @@ fn build_fetches_and_verifies_sources() {
 
     let rune = src.join("srctool.rn");
     let rune_src = format!(
-        "export const package = {{\n  name: 'srctool'\n  version: '0.1.0'\n  sources: {{ main: {{ url: 'payload.txt', sha256: '{payload_hash}' }} }}\n  bins: {{ srctool: 'bin/srctool' }}\n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  cp $ctx.sources.main.path ($ctx.package_dir | path join 'bin' 'srctool')\n}}\n"
+        "export const package = {{\n  name: 'srctool'\n  version: '0.1.0'\n  sources: {{ main: {{ url: 'payload.txt', sha256: '{payload_hash}' }} }}\n  bins: {{default: {{ srctool: 'bin/srctool' }}}}\n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  cp $ctx.sources.main.path ($ctx.package_dir | path join 'bin' 'srctool')\n}}\n"
     );
     fs::write(&rune, rune_src).unwrap();
 
@@ -1960,7 +1964,7 @@ fn build_fetches_and_verifies_sources() {
 
     // A wrong checksum is a hard failure before the build runs.
     let bad_rune = src.join("badsrc.rn");
-    let bad_src = "export const package = {\n  name: 'badsrc'\n  version: '0.1.0'\n  sources: { main: { url: 'payload.txt', sha256: 'sha256:0000000000000000000000000000000000000000000000000000000000000000' } }\n  bins: { badsrc: 'bin/badsrc' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  cp $ctx.sources.main.path ($ctx.package_dir | path join 'bin' 'badsrc')\n}\n";
+    let bad_src = "export const package = {\n  name: 'badsrc'\n  version: '0.1.0'\n  sources: { main: { url: 'payload.txt', sha256: 'sha256:0000000000000000000000000000000000000000000000000000000000000000' } }\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  cp $ctx.sources.main.path ($ctx.package_dir | path join 'bin' 'badsrc')\n}\n";
     fs::write(&bad_rune, bad_src).unwrap();
     let bad = run(
         root,
@@ -2007,7 +2011,7 @@ fn addendum_patches_source_metadata_before_install() {
     fs::write(
         runes.join("patched.rn"),
         format!(
-            "export const package = {{\n  name: 'patched'\n  version: '0.1.0'\n  summary: 'original summary'\n  sources: {{ main: {{ url: 'old.txt', sha256: '{old_hash}' }} }}\n  bins: {{ patched: 'bin/patched' }}\n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  cp $ctx.sources.main.path ($ctx.package_dir | path join 'bin' 'patched')\n}}\n"
+            "export const package = {{\n  name: 'patched'\n  version: '0.1.0'\n  summary: 'original summary'\n  sources: {{ main: {{ url: 'old.txt', sha256: '{old_hash}' }} }}\n  bins: {{default: {{ patched: 'bin/patched' }}}}\n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  cp $ctx.sources.main.path ($ctx.package_dir | path join 'bin' 'patched')\n}}\n"
         ),
     )
     .unwrap();
@@ -2086,12 +2090,12 @@ fn direct_source_install_preserves_runtime_deps() {
 
     fs::write(
         runes.join("dep.rn"),
-        "export const package = {\n  name: 'dep'\n  version: '0.1.0'\n  bins: { dep: 'bin/dep' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'dep\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'dep')\n}\n",
+        "export const package = {\n  name: 'dep'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'dep\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'dep')\n}\n",
     )
     .unwrap();
     fs::write(
         runes.join("app.rn"),
-        "export const package = {\n  name: 'app'\n  version: '0.1.0'\n  deps: { runtime: ['dep'], build: {} }\n  bins: { app: 'bin/app' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'app\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'app')\n}\n",
+        "export const package = {\n  name: 'app'\n  version: '0.1.0'\n  deps: { runtime: ['dep'], build: {} }\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'app\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'app')\n}\n",
     )
     .unwrap();
 
@@ -2122,7 +2126,7 @@ fn locked_source_install_rejects_rebuilt_hash_drift() {
     let rune = src.join("locksrc.rn");
     fs::write(
         &rune,
-        "export const package = {\n  name: 'locksrc'\n  version: '0.1.0'\n  bins: { locksrc: 'bin/locksrc' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'v1\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'locksrc')\n}\n",
+        "export const package = {\n  name: 'locksrc'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'v1\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'locksrc')\n}\n",
     )
     .unwrap();
 
@@ -2137,7 +2141,7 @@ fn locked_source_install_rejects_rebuilt_hash_drift() {
 
     fs::write(
         &rune,
-        "export const package = {\n  name: 'locksrc'\n  version: '0.1.0'\n  bins: { locksrc: 'bin/locksrc' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'v2\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'locksrc')\n}\n",
+        "export const package = {\n  name: 'locksrc'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'v2\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'locksrc')\n}\n",
     )
     .unwrap();
 
@@ -2177,7 +2181,7 @@ fn install_resolves_binary_from_index() {
     .unwrap();
     fs::write(
         runes.join("binpkg.rn"),
-        "export const package = {\n  name: 'binpkg'\n  version: '0.1.0'\n  bins: { binpkg: 'bin/binpkg' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'from source\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'binpkg')\n}\n",
+        "export const package = {\n  name: 'binpkg'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'from source\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'binpkg')\n}\n",
     )
     .unwrap();
 
@@ -2327,12 +2331,12 @@ fn install_pulls_in_runtime_dependencies() {
     .unwrap();
     fs::write(
         runes.join("app.rn"),
-        "export const package = {\n  name: 'app'\n  version: '0.1.0'\n  deps: { runtime: ['lib'] }\n  bins: { app: 'bin/app' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'app\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'app')\n}\n",
+        "export const package = {\n  name: 'app'\n  version: '0.1.0'\n  deps: { runtime: ['lib'] }\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'app\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'app')\n}\n",
     )
     .unwrap();
     fs::write(
         runes.join("lib.rn"),
-        "export const package = {\n  name: 'lib'\n  version: '0.1.0'\n  bins: { lib: 'bin/lib' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'lib\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'lib')\n}\n",
+        "export const package = {\n  name: 'lib'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'lib\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'lib')\n}\n",
     )
     .unwrap();
 
@@ -2499,12 +2503,12 @@ fn source_install_keeps_pulled_build_dependency_after_success() {
     .unwrap();
     fs::write(
         runes.join("stampdep.rn"),
-        "export const package = {\n  name: 'stampdep'\n  version: '0.1.0'\n  bins: { stamp: 'bin/stamp' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'from build dependency\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'stamp')\n}\n",
+        "export const package = {\n  name: 'stampdep'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'from build dependency\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'stamp')\n}\n",
     )
     .unwrap();
     fs::write(
         runes.join("usespath.rn"),
-        "export const package = {\n  name: 'usespath'\n  version: '0.1.0'\n  deps: { build: { default: ['stampdep'] }, runtime: [] }\n  bins: { usespath: 'bin/usespath' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  let stamped = (stamp | str trim)\n  $\"#!/usr/bin/env sh\\nprintf '($stamped)\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'usespath')\n}\n",
+        "export const package = {\n  name: 'usespath'\n  version: '0.1.0'\n  deps: { build: { default: ['stampdep'] }, runtime: [] }\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  let stamped = (stamp | str trim)\n  $\"#!/usr/bin/env sh\\nprintf '($stamped)\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'usespath')\n}\n",
     )
     .unwrap();
 
@@ -2590,12 +2594,12 @@ fn source_install_keeps_user_installed_build_dependency() {
     .unwrap();
     fs::write(
         runes.join("stampdep.rn"),
-        "export const package = {\n  name: 'stampdep'\n  version: '0.1.0'\n  bins: { stamp: 'bin/stamp' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'from build dependency\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'stamp')\n}\n",
+        "export const package = {\n  name: 'stampdep'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'from build dependency\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'stamp')\n}\n",
     )
     .unwrap();
     fs::write(
         runes.join("usespath.rn"),
-        "export const package = {\n  name: 'usespath'\n  version: '0.1.0'\n  deps: { build: { default: ['stampdep'] }, runtime: [] }\n  bins: { usespath: 'bin/usespath' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  let stamped = (stamp | str trim)\n  $\"#!/usr/bin/env sh\\nprintf '($stamped)\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'usespath')\n}\n",
+        "export const package = {\n  name: 'usespath'\n  version: '0.1.0'\n  deps: { build: { default: ['stampdep'] }, runtime: [] }\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  let stamped = (stamp | str trim)\n  $\"#!/usr/bin/env sh\\nprintf '($stamped)\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'usespath')\n}\n",
     )
     .unwrap();
 
@@ -2653,7 +2657,7 @@ fn remove_autoremoves_orphaned_runtime_dependencies() {
         // Embed deps in the archive's package.nuon, not just the index entry: the install state
         // record reads from the archive, and the autoremove cascade reads from that state.
         let package_nuon = format!(
-            "{{format: 1, name: \"{pkg}\", version: \"0.1.0\", target: \"{triple}\", store_path: \"{}\", bins: {{{pkg}: \"bin/{pkg}\"}}, deps: {{ runtime: {deps} }}}}\n",
+            "{{format: 1, name: \"{pkg}\", version: \"0.1.0\", target: \"{triple}\", store_path: \"{}\", bins: {{default: {{{pkg}: \"bin/{pkg}\"}}}}, deps: {{ runtime: {deps} }}}}\n",
             fake_store_basename_with_hash(pkg, "0.1.0", &format!("cafef00dcafef00d-{pkg}"))
         );
         let archive_path = dist.join(&name);
@@ -3708,13 +3712,13 @@ fn tome_build_all_skips_non_matching_targets() {
 
     fs::write(
         tome_dir.join("runes").join("macosonly.rn"),
-        "export const package = {\n  name: 'macosonly'\n  version: '0.1.0'\n  targets: ['macos-aarch64-darwin']\n  sources: {}\n  deps: { build: {} runtime: [] }\n  bins: { macosonly: 'bin/macosonly' }\n}\n\nexport def build [ctx] {\n  let bin_dir = ($ctx.package_dir | path join 'bin')\n  mkdir $bin_dir\n  \"#!/usr/bin/env sh\\nprintf 'macosonly\\n'\" | save ($bin_dir | path join 'macosonly')\n}\n",
+        "export const package = {\n  name: 'macosonly'\n  version: '0.1.0'\n  targets: ['macos-aarch64-darwin']\n  sources: {}\n  deps: { build: {} runtime: [] }\n \n}\n\nexport def build [ctx] {\n  let bin_dir = ($ctx.package_dir | path join 'bin')\n  mkdir $bin_dir\n  \"#!/usr/bin/env sh\\nprintf 'macosonly\\n'\" | save ($bin_dir | path join 'macosonly')\n}\n",
     )
     .unwrap();
 
     fs::write(
         tome_dir.join("runes").join("linuxonly.rn"),
-        "export const package = {\n  name: 'linuxonly'\n  version: '0.1.0'\n  targets: ['linux-x86_64-musl']\n  sources: {}\n  deps: { build: {} runtime: [] }\n  bins: { linuxonly: 'bin/linuxonly' }\n}\n\nexport def build [ctx] {\n  let bin_dir = ($ctx.package_dir | path join 'bin')\n  mkdir $bin_dir\n  \"#!/usr/bin/env sh\\nprintf 'linuxonly\\n'\" | save ($bin_dir | path join 'linuxonly')\n}\n",
+        "export const package = {\n  name: 'linuxonly'\n  version: '0.1.0'\n  targets: ['linux-x86_64-musl']\n  sources: {}\n  deps: { build: {} runtime: [] }\n \n}\n\nexport def build [ctx] {\n  let bin_dir = ($ctx.package_dir | path join 'bin')\n  mkdir $bin_dir\n  \"#!/usr/bin/env sh\\nprintf 'linuxonly\\n'\" | save ($bin_dir | path join 'linuxonly')\n}\n",
     )
     .unwrap();
 
@@ -3966,7 +3970,7 @@ fn source_build_preserves_internal_symlink() {
     let rune = src.join("aliased.rn");
     fs::write(
         &rune,
-        "export const package = {\n  name: 'aliased'\n  version: '0.1.0'\n  sources: {}\n  bins: { real: 'bin/real', alias: 'bin/alias' }\n}\n\nexport def build [ctx] {\n  let bin = ($ctx.package_dir | path join 'bin')\n  mkdir $bin\n  \"#!/usr/bin/env sh\\nprintf 'real tool\\n'\\n\" | save ($bin | path join 'real')\n  ^ln -s real ($bin | path join 'alias')\n}\n",
+        "export const package = {\n  name: 'aliased'\n  version: '0.1.0'\n  sources: {}\n \n}\n\nexport def build [ctx] {\n  let bin = ($ctx.package_dir | path join 'bin')\n  mkdir $bin\n  \"#!/usr/bin/env sh\\nprintf 'real tool\\n'\\n\" | save ($bin | path join 'real')\n  ^ln -s real ($bin | path join 'alias')\n}\n",
     )
     .unwrap();
 
@@ -4049,7 +4053,7 @@ fn reject_bad_rune_metadata() {
     let bad_name = src.path().join("badname.rn");
     fs::write(
         &bad_name,
-        "export const package = {\n  name: '../bad'\n  version: '0.1.0'\n  bins: {}\n}\n",
+        "export const package = {\n  name: '../bad'\n  version: '0.1.0'\n  bins: { default: {} }\n}\n",
     )
     .unwrap();
     let bad_name_result = run(
@@ -4072,7 +4076,7 @@ fn reject_bad_rune_metadata() {
     let bad_bin_path = src.path().join("badbinpath.rn");
     fs::write(
         &bad_bin_path,
-        "export const package = {\n  name: 'badbinpath'\n  version: '0.1.0'\n  bins: { tool: '../escape' }\n}\n",
+        "export const package = {\n  name: 'badbinpath'\n  version: '0.1.0'\n  bins: { default: { tool: '../escape' } }\n}\n",
     )
     .unwrap();
     let bad_bin_path_result = run(
@@ -4102,7 +4106,7 @@ fn reject_bad_archive_metadata() {
     let notarget = make_package_archive(
         out,
         "notarget",
-        "{format: 1, name: \"notarget\", version: \"0.1.0\", bins: {notarget: \"bin/notarget\"}}\n",
+        "{format: 1, name: \"notarget\", version: \"0.1.0\", bins: {default: {notarget: \"bin/notarget\"}}}\n",
     );
     assert_failure_contains(
         &run(root, &["install", notarget.to_str().unwrap()]),
@@ -4113,7 +4117,7 @@ fn reject_bad_archive_metadata() {
     let wrong_target = make_package_archive(
         out,
         "wrongtarget",
-        "{format: 1, name: \"wrongtarget\", version: \"0.1.0\", target: \"wrong-target\", bins: {wrongtarget: \"bin/wrongtarget\"}}\n",
+        "{format: 1, name: \"wrongtarget\", version: \"0.1.0\", target: \"wrong-target\", bins: {default: {wrongtarget: \"bin/wrongtarget\"}}}\n",
     );
     assert_failure_contains(
         &run(root, &["install", wrong_target.to_str().unwrap()]),
@@ -4125,7 +4129,7 @@ fn reject_bad_archive_metadata() {
         out,
         "badbinpath",
         &format!(
-            "{{format: 1, name: \"badbinpath\", version: \"0.1.0\", target: \"{triple}\", bins: {{badbinpath: \"../bin/badbinpath\"}}}}\n"
+            "{{format: 1, name: \"badbinpath\", version: \"0.1.0\", target: \"{triple}\", bins: {{default: {{badbinpath: \"../bin/badbinpath\"}}}}}}\n"
         ),
     );
     assert_failure_contains(
@@ -4138,7 +4142,7 @@ fn reject_bad_archive_metadata() {
         out,
         "badversiontype",
         &format!(
-            "{{format: 1, name: \"badversiontype\", version: 1, target: \"{triple}\", bins: {{badversiontype: \"bin/badversiontype\"}}}}\n"
+            "{{format: 1, name: \"badversiontype\", version: 1, target: \"{triple}\", bins: {{default: {{badversiontype: \"bin/badversiontype\"}}}}}}\n"
         ),
     );
     assert_failure_contains(
@@ -4162,23 +4166,6 @@ fn reject_bad_archive_metadata() {
 }
 
 #[test]
-fn core_runes_parse_correctly() {
-    let root = TempDir::new().unwrap();
-    let root = root.path();
-
-    let runes_dir = Path::new("tome-core/runes");
-    let entries = fs::read_dir(runes_dir).unwrap();
-    for entry in entries {
-        let entry = entry.unwrap();
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("rn") {
-            let out = run(root, &["store-hash", path.to_str().unwrap()]);
-            assert_success(&out, &format!("parse core rune {}", path.display()));
-        }
-    }
-}
-
-#[test]
 fn platform_conditional_build_deps_only_set_matching_prefix() {
     let root = TempDir::new().unwrap();
     let root = root.path();
@@ -4197,7 +4184,7 @@ fn platform_conditional_build_deps_only_set_matching_prefix() {
 
     fs::write(
         runes.join("matchdep.rn"),
-        "export const package = {\n  name: 'matchdep'\n  version: '0.1.0'\n  bins: { matchdep: 'bin/matchdep' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'matchdep\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'matchdep')\n}\n",
+        "export const package = {\n  name: 'matchdep'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'matchdep\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'matchdep')\n}\n",
     )
     .unwrap();
 
@@ -4208,14 +4195,14 @@ fn platform_conditional_build_deps_only_set_matching_prefix() {
     };
     fs::write(
         runes.join("skipdep.rn"),
-        "export const package = {\n  name: 'skipdep'\n  version: '0.1.0'\n  bins: { skipdep: 'bin/skipdep' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'skipdep\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'skipdep')\n}\n",
+        "export const package = {\n  name: 'skipdep'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'skipdep\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'skipdep')\n}\n",
     )
     .unwrap();
 
     fs::write(
         runes.join("consumer.rn"),
         format!(
-            "export const package = {{\n  name: 'consumer'\n  version: '0.1.0'\n  deps: {{ build: {{ default: ['matchdep', 'skipdep[{}]'] }}, runtime: [] }}\n  bins: {{ consumer: 'bin/consumer' }}\n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  sh -c $\"env > '($ctx.package_dir | path join 'env.txt')'\"\n  \"#!/usr/bin/env sh\\nprintf 'consumer\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'consumer')\n}}\n",
+            "export const package = {{\n  name: 'consumer'\n  version: '0.1.0'\n  deps: {{ build: {{ default: ['matchdep', 'skipdep[{}]'] }}, runtime: [] }}\n  bins: {{default: {{ consumer: 'bin/consumer' }}}}\n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  sh -c $\"env > '($ctx.package_dir | path join 'env.txt')'\"\n  \"#!/usr/bin/env sh\\nprintf 'consumer\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'consumer')\n}}\n",
             other_os
         ),
     )
@@ -4265,13 +4252,13 @@ fn make_fake_tome() -> TempDir {
 
     fs::write(
         runes.join("hello.rn"),
-        "export const package = {\n  name: 'hello'\n  version: '9.9.9'\n  bins: { hello: 'bin/hello' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'hello from configured tome\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'hello')\n}\n",
+        "export const package = {\n  name: 'hello'\n  version: '9.9.9'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'hello from configured tome\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'hello')\n}\n",
     )
     .unwrap();
 
     fs::write(
         runes.join("tomehello.rn"),
-        "export const package = {\n  name: 'tomehello'\n  version: '0.1.0'\n  bins: { tomehello: 'bin/tomehello' }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'hello from tome\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'tomehello')\n}\n",
+        "export const package = {\n  name: 'tomehello'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'hello from tome\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'tomehello')\n}\n",
     )
     .unwrap();
 
@@ -4533,7 +4520,7 @@ fn make_prebuilt(
     }
     let mut builder = open_archive(path);
     let package_nuon = format!(
-        "{{format: 1, name: \"{name}\", version: \"{version}\", target: \"{triple}\", store_path: \"{store_hash}-{name}-{version}\", bins: {{{name}: \"bin/{name}\"}}}}\n"
+        "{{format: 1, name: \"{name}\", version: \"{version}\", target: \"{triple}\", store_path: \"{store_hash}-{name}-{version}\", bins: {{default: {{{name}: \"bin/{name}\"}}}}}}\n"
     );
     append_file(
         &mut builder,
@@ -4597,7 +4584,7 @@ fn make_versioned_archive_with_hash(
     }
     let mut builder = open_archive(path);
     let package_nuon = format!(
-        "{{format: 1, name: \"{name}\", version: \"{version}\", target: \"{triple}\", store_path: \"{}\", bins: {{{name}: \"bin/{name}\"}}}}\n",
+        "{{format: 1, name: \"{name}\", version: \"{version}\", target: \"{triple}\", store_path: \"{}\", bins: {{default: {{{name}: \"bin/{name}\"}}}}}}\n",
         fake_store_basename_with_hash(name, version, store_hash)
     );
     append_file(
@@ -4715,7 +4702,7 @@ fn make_symlink_archive(out: &Path) -> PathBuf {
     let archive = out.join(format!("badlink-0.1.0-{}.tar.zst", target_triple()));
     let mut builder = open_archive(&archive);
     let package_nuon = format!(
-        "{{format: 1, name: \"badlink\", version: \"0.1.0\", target: \"{}\", bins: {{badlink: \"bin/badlink\"}}}}\n",
+        "{{format: 1, name: \"badlink\", version: \"0.1.0\", target: \"{}\", bins: {{default: {{badlink: \"bin/badlink\"}}}}}}\n",
         target_triple()
     );
     append_file(
@@ -4747,7 +4734,7 @@ fn make_nested_symlink_archive(out: &Path) -> PathBuf {
     let archive = out.join(format!("nested-0.1.0-{}.tar.zst", target_triple()));
     let mut builder = open_archive(&archive);
     let package_nuon = format!(
-        "{{format: 1, name: \"nested\", version: \"0.1.0\", target: \"{}\", bins: {{}}}}\n",
+        "{{format: 1, name: \"nested\", version: \"0.1.0\", target: \"{}\", bins: {{default: {{}}}}}}\n",
         target_triple()
     );
     append_file(
@@ -4806,7 +4793,7 @@ fn make_hard_link_archive(out: &Path) -> PathBuf {
     let archive = out.join(format!("hardlink-0.1.0-{}.tar.zst", target_triple()));
     let mut builder = open_archive(&archive);
     let package_nuon = format!(
-        "{{format: 1, name: \"hardlink\", version: \"0.1.0\", target: \"{}\", bins: {{hardlink: \"bin/hardlink\"}}}}\n",
+        "{{format: 1, name: \"hardlink\", version: \"0.1.0\", target: \"{}\", bins: {{default: {{hardlink: \"bin/hardlink\"}}}}}}\n",
         target_triple()
     );
     append_file(
@@ -4838,7 +4825,7 @@ fn make_safe_symlink_archive(out: &Path) -> PathBuf {
     let archive = out.join(format!("safelink-0.1.0-{}.tar.zst", target_triple()));
     let mut builder = open_archive(&archive);
     let package_nuon = format!(
-        "{{format: 1, name: \"safelink\", version: \"0.1.0\", target: \"{}\", store_path: \"{}\", bins: {{safelink: \"bin/real\", alias: \"bin/alias\"}}}}\n",
+        "{{format: 1, name: \"safelink\", version: \"0.1.0\", target: \"{}\", store_path: \"{}\", bins: {{default: {{safelink: \"bin/real\", alias: \"bin/alias\"}}}}}}\n",
         target_triple(),
         fake_store_basename("safelink", "0.1.0")
     );
@@ -4877,7 +4864,7 @@ fn make_unsafe_symlink_archive(out: &Path) -> PathBuf {
     let archive = out.join(format!("unsafelink-0.1.0-{}.tar.zst", target_triple()));
     let mut builder = open_archive(&archive);
     let package_nuon = format!(
-        "{{format: 1, name: \"unsafelink\", version: \"0.1.0\", target: \"{}\", bins: {{unsafelink: \"bin/unsafelink\"}}}}\n",
+        "{{format: 1, name: \"unsafelink\", version: \"0.1.0\", target: \"{}\", bins: {{default: {{unsafelink: \"bin/unsafelink\"}}}}}}\n",
         target_triple()
     );
     append_file(

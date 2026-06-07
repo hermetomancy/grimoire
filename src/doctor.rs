@@ -13,6 +13,8 @@ const CORE_USERLAND_TOOLS_LINUX: &[&str] = &[
     "compiler-rt",
     "llvm",
     "clang",
+    "cmake",
+    "python3",
     "make",
     "toybox",
     "toolchain-wrappers",
@@ -22,6 +24,8 @@ const CORE_USERLAND_TOOLS_NON_LINUX: &[&str] = &[
     "llvm",
     "clang",
     "compiler-rt",
+    "cmake",
+    "python3",
     "make",
     "toybox",
     "toolchain-wrappers",
@@ -140,6 +144,9 @@ fn check_tomes() -> Result<usize> {
 
 fn check_packages() -> Result<usize> {
     let states = install::installed_states()?;
+    let active_packages = profile::current_generation_packages()?;
+    let active_set: std::collections::BTreeSet<String> =
+        active_packages.unwrap_or_default().into_iter().collect();
     println!("installed packages: {}", states.len());
 
     let bin_dir = profile::current_profile_link()?.join("bin");
@@ -155,6 +162,12 @@ fn check_packages() -> Result<usize> {
                 state.version,
                 package_dir.display()
             );
+        }
+
+        // Only expect profile links for packages in the active generation;
+        // store-only installs (e.g. from `tome build --all`) are not linked.
+        if !active_set.contains(&state.name) {
+            continue;
         }
 
         for bin in state.bins.keys() {
