@@ -140,9 +140,17 @@ pub fn promote_cache<T>(
     let result = match record_fn() {
         Ok(result) => result,
         Err(err) => {
-            let _ = fs::remove_dir_all(cache_path);
             if had_previous {
-                let _ = fs::rename(&backup, cache_path);
+                if cache_path.exists() {
+                    let trash = cache_path.with_extension("grimoire-trash");
+                    let _ = fs::rename(cache_path, &trash);
+                    let _ = fs::rename(&backup, cache_path);
+                    let _ = fs::remove_dir_all(&trash);
+                } else {
+                    let _ = fs::rename(&backup, cache_path);
+                }
+            } else {
+                let _ = fs::remove_dir_all(cache_path);
             }
             return Err(err);
         }
