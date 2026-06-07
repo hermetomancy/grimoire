@@ -30,6 +30,7 @@ mod setup;
 mod signing;
 mod solve;
 mod store;
+mod sync_common;
 mod tome;
 mod toolchain;
 
@@ -184,7 +185,6 @@ fn format_timestamp(ts: u64) -> String {
     let mm = rem / 60;
     let ss = rem % 60;
 
-    // 1970-01-01 is day 0.
     let mut year = 1970u64;
     loop {
         let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);

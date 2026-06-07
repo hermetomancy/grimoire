@@ -1025,7 +1025,7 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 
     while let Some(p) = pat.next() {
         if p == '*' {
-            // Collapse consecutive stars.
+            // Consecutive stars are semantically identical to a single star in glob patterns.
             while pat.peek() == Some(&'*') {
                 pat.next();
             }
@@ -1225,15 +1225,7 @@ fn parse_dependency(value: &Value, label: &str) -> Result<Dependency> {
         Value::Record { val, .. } => {
             let name = required_field_string(val, label, "name")?;
             validate_package_name(&name)?;
-            let req = match val.get("version") {
-                Some(Value::Nothing { .. }) | None => VersionReq::STAR,
-                Some(value) => {
-                    let raw = expect_string(value, &format!("{label} field `version`"))?;
-                    VersionReq::parse(&raw).with_context(|| {
-                        format!("dependency `{name}` version requirement `{raw}` is invalid")
-                    })?
-                }
-            };
+            let req = parse_version_requirement(val.get("version"), label, &name)?;
             let platform = optional_string(val, "platform")?;
             Ok(Dependency {
                 name,
@@ -1244,6 +1236,18 @@ fn parse_dependency(value: &Value, label: &str) -> Result<Dependency> {
         _ => bail!(
             "{label} entries must be a name string, bracket string, or a {{ name, version }} record"
         ),
+    }
+}
+
+fn parse_version_requirement(value: Option<&Value>, label: &str, name: &str) -> Result<VersionReq> {
+    match value {
+        Some(Value::Nothing { .. }) | None => Ok(VersionReq::STAR),
+        Some(value) => {
+            let raw = expect_string(value, &format!("{label} field `version`"))?;
+            VersionReq::parse(&raw).with_context(|| {
+                format!("dependency `{name}` version requirement `{raw}` is invalid")
+            })
+        }
     }
 }
 

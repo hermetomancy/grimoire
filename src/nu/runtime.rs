@@ -99,10 +99,12 @@ impl Default for BuildEnv {
 impl RuneRuntime for EmbeddedNuRuntime {
     fn package_metadata(&self, rune: &Path) -> Result<PackageMetadata> {
         PackageMetadata::from_value(exported_const(rune, "package")?, false)
+            .with_context(|| format!("parse package metadata from {}", rune.display()))
     }
 
     fn tome_manifest(&self, tome: &Path) -> Result<TomeManifest> {
         TomeManifest::from_value(exported_const(tome, "tome")?)
+            .with_context(|| format!("parse tome manifest from {}", tome.display()))
     }
 
     fn build(
@@ -492,10 +494,31 @@ fn posix_ambient_dirs() -> Vec<PathBuf> {
     vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")]
 }
 
+/// Common host directories where build tools such as CMake and Python are installed.
+/// Included in managed builds so bootstrap can find non-POSIX host dependencies
+/// that are not yet provided by the core toolchain.
+fn host_tool_dirs() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("/opt/homebrew/bin"), // macOS Homebrew (Apple Silicon)
+        PathBuf::from("/usr/local/bin"),    // macOS Homebrew (Intel), general Unix
+        PathBuf::from("/home/linuxbrew/.linuxbrew/bin"), // Linuxbrew
+    ]
+}
+
 fn build_path_entries(env: &BuildEnv, host_tool_dir: Option<&Path>) -> Vec<PathBuf> {
     let mut entries = env.path_dirs.clone();
     if let Some(dir) = host_tool_dir {
         entries.push(dir.to_path_buf());
+    }
+    // Non-POSIX build tools installed on the host (e.g. CMake, Python).
+    // These sit below Grimoire-managed deps so hermeticity is preserved,
+    // but are available so core packages can bootstrap before they self-provide.
+    if !env.inherit_host_path {
+        for dir in host_tool_dirs() {
+            if dir.is_dir() && !entries.contains(&dir) {
+                entries.push(dir);
+            }
+        }
     }
     // POSIX ambient utilities are always available in managed builds:
     // sed, grep, awk, find, mkdir, cp, chmod, expr, test, etc.
@@ -575,7 +598,7 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn probe_export_const_parse() {
+    fn probe_export_const_parse() -> Result<()> {
         let mut engine_state = nu_cmd_lang::create_default_context();
         engine_state.add_env_var("PWD".to_string(), nu_protocol::Value::test_string("."));
         let mut working_set = StateWorkingSet::new(&engine_state);
@@ -594,17 +617,18 @@ mod tests {
         assert_eq!(block.pipelines.len(), 1);
         let var_id = working_set
             .find_variable(b"package")
-            .expect("package variable");
-        let value = working_set.get_constant(var_id).expect("package const");
+            .ok_or_else(|| anyhow!("package variable not found"))?;
+        let value = working_set
+            .get_constant(var_id)
+            .map_err(|err| anyhow!("package const: {err}"))?;
         eprintln!("{value:#?}");
+        Ok(())
     }
 
     #[test]
-    fn reads_package_metadata_from_rune() {
+    fn reads_package_metadata_from_rune() -> Result<()> {
         let runtime = EmbeddedNuRuntime;
-        let metadata = runtime
-            .package_metadata(Path::new("tome-example/runes/hello.rn"))
-            .expect("package metadata");
+        let metadata = runtime.package_metadata(Path::new("tome-example/runes/hello.rn"))?;
 
         assert_eq!(metadata.name, "hello");
         assert_eq!(metadata.version, "0.1.0");
@@ -612,61 +636,56 @@ mod tests {
             metadata.bins.get("hello").map(String::as_str),
             Some("bin/hello")
         );
+        Ok(())
     }
 
     #[test]
-    fn parses_linux_headers_rune() {
+    fn parses_linux_headers_rune() -> Result<()> {
         let runtime = EmbeddedNuRuntime;
-        let metadata = runtime
-            .package_metadata(Path::new("tome-core/runes/linux-headers.rn"))
-            .expect("package metadata");
+        let metadata = runtime.package_metadata(Path::new("tome-core/runes/linux-headers.rn"))?;
         assert_eq!(metadata.name, "linux-headers");
         assert_eq!(metadata.version, "6.12");
         assert!(metadata.deps.build.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn parses_musl_rune() {
+    fn parses_musl_rune() -> Result<()> {
         let runtime = EmbeddedNuRuntime;
-        let metadata = runtime
-            .package_metadata(Path::new("tome-core/runes/musl.rn"))
-            .expect("package metadata");
+        let metadata = runtime.package_metadata(Path::new("tome-core/runes/musl.rn"))?;
         assert_eq!(metadata.name, "musl");
         assert_eq!(metadata.version, "1.2.5");
         let build_deps = metadata.deps.build_for("linux-x86_64-musl");
         assert!(build_deps.iter().any(|d| d.name == "linux-headers"));
+        Ok(())
     }
 
     #[test]
-    fn parses_llvm_rune() {
+    fn parses_llvm_rune() -> Result<()> {
         let runtime = EmbeddedNuRuntime;
-        let metadata = runtime
-            .package_metadata(Path::new("tome-core/runes/llvm.rn"))
-            .expect("package metadata");
+        let metadata = runtime.package_metadata(Path::new("tome-core/runes/llvm.rn"))?;
         assert_eq!(metadata.name, "llvm");
         assert_eq!(metadata.version, "19.1.0");
         assert!(metadata.bins.contains_key("lld"));
         assert!(metadata.bins.contains_key("llvm-ar"));
+        Ok(())
     }
 
     #[test]
-    fn parses_compiler_rt_rune() {
+    fn parses_compiler_rt_rune() -> Result<()> {
         let runtime = EmbeddedNuRuntime;
-        let metadata = runtime
-            .package_metadata(Path::new("tome-core/runes/compiler-rt.rn"))
-            .expect("package metadata");
+        let metadata = runtime.package_metadata(Path::new("tome-core/runes/compiler-rt.rn"))?;
         assert_eq!(metadata.name, "compiler-rt");
         assert_eq!(metadata.version, "19.1.0");
         let build_deps = metadata.deps.build_for("linux-x86_64-musl");
         assert!(build_deps.iter().any(|d| d.name == "llvm"));
+        Ok(())
     }
 
     #[test]
-    fn parses_clang_rune() {
+    fn parses_clang_rune() -> Result<()> {
         let runtime = EmbeddedNuRuntime;
-        let metadata = runtime
-            .package_metadata(Path::new("tome-core/runes/clang.rn"))
-            .expect("package metadata");
+        let metadata = runtime.package_metadata(Path::new("tome-core/runes/clang.rn"))?;
         assert_eq!(metadata.name, "clang");
         assert_eq!(metadata.version, "19.1.0");
         assert!(metadata.bins.contains_key("clang"));
@@ -674,5 +693,6 @@ mod tests {
         let build_deps = metadata.deps.build_for("linux-x86_64-musl");
         assert!(build_deps.iter().any(|d| d.name == "llvm"));
         assert!(build_deps.iter().any(|d| d.name == "compiler-rt"));
+        Ok(())
     }
 }
