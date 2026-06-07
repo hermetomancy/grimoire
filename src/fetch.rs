@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::{
     collections::BTreeMap,
     fs::{self, File},
-    io,
+    io::{Read, Write},
     path::{Path, PathBuf},
     thread,
     time::Duration,
@@ -177,9 +177,40 @@ fn http_error(url: &str, err: ureq::Error) -> anyhow::Error {
 fn download_into(url: &str, base_dir: &Path, destination: &Path) -> Result<()> {
     if url.starts_with("http://") || url.starts_with("https://") {
         let response = http_get(&http_agent(), url).map_err(|err| http_error(url, *err))?;
+        let total: Option<u64> = response
+            .header("Content-Length")
+            .and_then(|v| v.parse().ok());
         let mut reader = response.into_reader();
         let mut file = File::create(destination)?;
-        io::copy(&mut reader, &mut file)?;
+
+        const CHUNK: usize = 64 * 1024;
+        const REPORT_INTERVAL: u64 = 1024 * 1024; // update spinner every 1 MiB
+        let mut buf = vec![0u8; CHUNK];
+        let mut downloaded: u64 = 0;
+        let mut since_report: u64 = 0;
+
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n])?;
+            downloaded += n as u64;
+            since_report += n as u64;
+
+            if since_report >= REPORT_INTERVAL {
+                since_report = 0;
+                let progress = match total {
+                    Some(t) => format!(
+                        "{} / {} downloaded",
+                        format_bytes(downloaded),
+                        format_bytes(t)
+                    ),
+                    None => format!("{} downloaded", format_bytes(downloaded)),
+                };
+                status(&format!("fetching ({url}) — {progress}"));
+            }
+        }
         return Ok(());
     }
 
@@ -190,6 +221,20 @@ fn download_into(url: &str, base_dir: &Path, destination: &Path) -> Result<()> {
     fs::copy(&local, destination)
         .with_context(|| format!("copy local source {}", local.display()))?;
     Ok(())
+}
+
+fn format_bytes(n: u64) -> String {
+    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
+    if n == 0 {
+        return "0 B".to_string();
+    }
+    let exp = (n as f64).log(1024.0).min(UNITS.len() as f64 - 1.0) as usize;
+    let value = n as f64 / 1024f64.powi(exp as i32);
+    if exp == 0 {
+        format!("{n} {}", UNITS[0])
+    } else {
+        format!("{value:.1} {}", UNITS[exp])
+    }
 }
 
 fn local_source_path(url: &str, base_dir: &Path) -> PathBuf {
