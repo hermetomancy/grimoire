@@ -128,6 +128,11 @@ fn compute_build_env_id() -> Option<String> {
         }
     }
 
+    // On macOS the system SDK version affects headers, libraries, and binary output.
+    if let Some(sdk_ver) = macos_sdk_version() {
+        parts.push(format!("sdk:{sdk_ver}"));
+    }
+
     parts.sort();
     Some(parts.join(","))
 }
@@ -138,6 +143,28 @@ fn is_binary_affecting_tool(name: &str) -> bool {
         name,
         "ld" | "ld.bfd" | "ld.gold" | "lld" | "as" | "install_name_tool" | "lipo"
     )
+}
+
+/// Returns the macOS system SDK version (e.g. "15.2") when running on macOS with
+/// `xcrun` available. This affects headers, libraries, and binary output, so it is
+/// part of the build-environment identity.
+fn macos_sdk_version() -> Option<String> {
+    if env::consts::OS != "macos" {
+        return None;
+    }
+    let output = std::process::Command::new("xcrun")
+        .args(["--show-sdk-version"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let ver = stdout.lines().next()?.trim();
+    if ver.is_empty() {
+        return None;
+    }
+    Some(ver.to_string())
 }
 
 /// Runs `tool --version` (or `tool -version` for macOS tools) and returns the first line of stdout,
