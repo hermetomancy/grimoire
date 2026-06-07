@@ -64,42 +64,42 @@ fn compiled_hash(
 ) -> String {
     let mut hasher = Sha256::new();
 
-    hasher.update(b"grimoire-store-v3\n");
+    hasher.update(b"grimoire-store-v4\n");
     hasher.update(name.as_bytes());
-    hasher.update(b"\n");
+    hasher.update(b"\0");
     hasher.update(version.as_bytes());
-    hasher.update(b"\n");
+    hasher.update(b"\0");
 
     hash_sources(&mut hasher, sources);
 
-    hasher.update(b"rune\n");
+    hasher.update(b"rune\0");
     hasher.update(rune_hash.as_bytes());
-    hasher.update(b"\n");
+    hasher.update(b"\0");
 
-    hasher.update(b"target\n");
+    hasher.update(b"target\0");
     hasher.update(target.as_bytes());
-    hasher.update(b"\n");
+    hasher.update(b"\0");
 
-    hasher.update(b"build_env\n");
+    hasher.update(b"build_env\0");
     hasher.update(build_env.as_bytes());
-    hasher.update(b"\n");
+    hasher.update(b"\0");
 
-    hasher.update(b"build_flags\n");
+    hasher.update(b"build_flags\0");
     for (key, value) in build_flags.iter() {
         hasher.update(key.as_bytes());
         hasher.update(b"=");
         hasher.update(value.as_bytes());
-        hasher.update(b"\n");
+        hasher.update(b"\0");
     }
 
     // Dependencies fold in by content address (sorted for determinism), so the whole closure is
     // captured transitively without depending on resolved version strings.
-    hasher.update(b"deps\n");
+    hasher.update(b"deps\0");
     let mut deps: Vec<&str> = dep_store_hashes.iter().map(String::as_str).collect();
     deps.sort_unstable();
     for dep in deps {
         hasher.update(dep.as_bytes());
-        hasher.update(b"\n");
+        hasher.update(b"\0");
     }
 
     truncate(hasher)
@@ -115,27 +115,27 @@ fn fixed_output_hash(
     target: &str,
 ) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"grimoire-fixed-output-v1\n");
+    hasher.update(b"grimoire-fixed-output-v2\0");
     hasher.update(name.as_bytes());
-    hasher.update(b"\n");
+    hasher.update(b"\0");
     hasher.update(version.as_bytes());
-    hasher.update(b"\n");
-    hasher.update(b"target\n");
+    hasher.update(b"\0");
+    hasher.update(b"target\0");
     hasher.update(target.as_bytes());
-    hasher.update(b"\n");
+    hasher.update(b"\0");
     hash_sources(&mut hasher, sources);
     truncate(hasher)
 }
 
 fn hash_sources(hasher: &mut Sha256, sources: &BTreeMap<String, Source>) {
-    hasher.update(b"sources\n");
+    hasher.update(b"sources\0");
     for (source_name, source) in sources.iter() {
         hasher.update(source_name.as_bytes());
-        hasher.update(b"\n");
+        hasher.update(b"\0");
         hasher.update(source.url.as_bytes());
-        hasher.update(b"\n");
+        hasher.update(b"\0");
         hasher.update(source.sha256.as_bytes());
-        hasher.update(b"\n");
+        hasher.update(b"\0");
     }
 }
 
@@ -180,6 +180,8 @@ mod tests {
             )]),
             deps: Deps::default(),
             build_flags: BTreeMap::new(),
+            provides: Vec::new(),
+            libs: Vec::new(),
         }
     }
 

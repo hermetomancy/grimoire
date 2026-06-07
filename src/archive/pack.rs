@@ -189,7 +189,8 @@ fn append_file<W: std::io::Write>(
 }
 
 fn file_mode(metadata: &fs::Metadata) -> u32 {
-    metadata.permissions().mode() & 0o777
+    let mode = metadata.permissions().mode();
+    if mode & 0o111 != 0 { 0o755 } else { 0o644 }
 }
 
 fn append_bytes<W: std::io::Write>(
