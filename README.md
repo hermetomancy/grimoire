@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.svg" alt="Grimoire" width="128" height="128">
+  <img src="logo.png" alt="Grimoire" width="128" height="128">
 </p>
 
 <h1 align="center">Grimoire</h1>
