@@ -30,13 +30,13 @@ use crate::{
     },
     paths,
     progress::{report, status},
-    signing,
+    signing, sync_common,
 };
 
 pub fn add(args: TomeAddArgs) -> Result<()> {
     validate_tome_url(&args.git_url)?;
     validate_tome_ref(&args.ref_name)?;
-    validate_local_tome_source(&args.git_url)?;
+    sync_common::validate_local_source(&args.git_url, "tome.rn")?;
 
     // The tome names itself: read the `name` from its manifest rather than asking the user
     // to repeat it on the command line. Remote sources are cloned to a temp dir to read it.
@@ -44,7 +44,7 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
     validate_tome_name(&name)?;
     validate_local_tome_if_available(&name, &args.git_url)?;
 
-    let state_dir = tome_state_dir()?;
+    let state_dir = sync_common::state_dir("tomes")?;
     let state_path = state_dir.join(format!("{name}.nuon"));
     if state_path.exists() {
         bail!("tome `{name}` already exists");
@@ -53,12 +53,12 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
     fs::create_dir_all(&state_dir)?;
     let state = TomeState {
         name: name.clone(),
-        url: resolve_tome_source_url(&args.git_url)?,
+        url: sync_common::resolve_source_url(&args.git_url, "tome.rn")?,
         ref_name: args.ref_name,
         checked_ref: None,
         checked_commit: None,
         tome: None,
-        signer_pubkeys: Vec::new(),
+        signer_pubkeys: args.signer,
     };
     nuon_io::write_nuon(&state_path, &state.to_value())?;
     report(&format!("added tome {name}"));
@@ -180,38 +180,23 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
     };
 
     let mut catalog = if index_path.exists() {
-        PackageIndex::from_value(nuon_io::read_nuon(&index_path)?)?
+        PackageIndex::from_value(nuon_io::read_nuon(&index_path)?)
+            .with_context(|| format!("parse package index {}", index_path.display()))?
     } else {
         PackageIndex {
             entries: std::collections::BTreeMap::new(),
         }
     };
 
-    // Build each rune, upserting its entry as we go, then write the index once so a multi-rune
-    // build records every package atomically rather than rewriting the file per rune.
-    // In `--all` mode, each built package is also installed store-only so subsequent runes can
-    // depend on it as a build dependency without requiring a pre-installed userland.
-    for name in &rune_names {
-        let (store_hash, entry, archive) = build_rune_into(
-            root,
-            name,
-            &dist_dir,
-            args.bootstrap,
-            args.target.as_deref(),
-        )?;
-        report(&format!(
-            "built {} {} ({}) into {}",
-            entry.name,
-            entry.version,
-            entry.target,
-            archive.display()
-        ));
-        if args.all {
-            install::install_store_only(&archive, None, None)
-                .with_context(|| format!("store-only install of {}", entry.name))?;
-        }
-        catalog.upsert(store_hash, entry);
-    }
+    build_runes(
+        root,
+        &dist_dir,
+        &rune_names,
+        &mut catalog,
+        args.all,
+        args.bootstrap,
+        args.target.as_deref(),
+    )?;
     nuon_io::write_nuon(&index_path, &catalog.to_value())?;
 
     report(&format!("registered in {}", index_path.display()));
@@ -219,6 +204,34 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
         "publish: upload the contents of {} to the location in packages.repo",
         dist_dir.display()
     ));
+    Ok(())
+}
+
+fn build_runes(
+    root: &Path,
+    dist_dir: &Path,
+    rune_names: &[String],
+    catalog: &mut PackageIndex,
+    all: bool,
+    bootstrap: bool,
+    target: Option<&str>,
+) -> Result<()> {
+    for name in rune_names {
+        let (store_hash, entry, archive) =
+            build_rune_into(root, name, dist_dir, bootstrap, target)?;
+        report(&format!(
+            "built {} {} ({}) into {}",
+            entry.name,
+            entry.version,
+            entry.target,
+            archive.display()
+        ));
+        if all {
+            install::install_store_only(&archive, None, None)
+                .with_context(|| format!("store-only install of {}", entry.name))?;
+        }
+        catalog.upsert(store_hash, entry);
+    }
     Ok(())
 }
 
@@ -305,7 +318,7 @@ fn read_archive_index_entry(path: &Path) -> Result<(String, IndexEntry)> {
     let mut metadata = None;
     let mut rune_bytes = None;
 
-    for entry in archive.entries()? {
+    for entry in archive.entries().context("read archive entries")? {
         let mut entry = entry?;
         let path_str = entry.path()?.to_string_lossy().to_string();
         let normalized = path_str.strip_prefix("./").unwrap_or(&path_str);
@@ -444,7 +457,9 @@ fn rune_names_ordered(root: &Path) -> Result<Vec<String>> {
         ordered.push(name.clone());
         if let Some(deps) = adj.get(&name) {
             for dep in deps {
-                let count = in_degree.get_mut(dep).expect("in_degree entry");
+                let Some(count) = in_degree.get_mut(dep) else {
+                    bail!("missing in_degree entry for dependency `{dep}` in topological sort");
+                };
                 *count -= 1;
                 if *count == 0 {
                     queue.push(dep.clone());
@@ -534,7 +549,7 @@ fn escape_nu_string(value: &str) -> String {
 /// its manifest.
 fn read_source_tome_name(url: &str, ref_name: &str) -> Result<String> {
     let runtime = EmbeddedNuRuntime;
-    if is_local_tome_source(url) {
+    if sync_common::is_local_source(url, "tome.rn") {
         let manifest_path = Path::new(url).join("tome.rn");
         return Ok(runtime
             .tome_manifest(&manifest_path)
@@ -594,7 +609,7 @@ pub fn update_all_configured() -> Result<()> {
 pub fn remove(args: TomeRemoveArgs) -> Result<()> {
     validate_tome_name(&args.name)?;
 
-    let state_path = tome_state_dir()?.join(format!("{}.nuon", args.name));
+    let state_path = sync_common::state_dir("tomes")?.join(format!("{}.nuon", args.name));
     if !state_path.exists() {
         bail!("tome `{}` is not configured", args.name);
     }
@@ -604,34 +619,20 @@ pub fn remove(args: TomeRemoveArgs) -> Result<()> {
     Ok(())
 }
 
-fn tome_state_dir() -> Result<std::path::PathBuf> {
-    Ok(paths::install_root()?.join("state").join("tomes"))
-}
-
 pub fn load_tomes() -> Result<Vec<TomeState>> {
-    let state_dir = tome_state_dir()?;
-    if !state_dir.exists() {
-        return Ok(Vec::new());
-    }
-
+    let state_dir = sync_common::state_dir("tomes")?;
     let mut states = Vec::new();
-    for entry in fs::read_dir(&state_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("nuon") {
-            continue;
-        }
+    for path in sync_common::list_state_files(&state_dir)? {
         states.push(
             TomeState::from_value(nuon_io::read_nuon(&path)?)
                 .with_context(|| format!("read tome state {}", path.display()))?,
         );
     }
-    states.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(states)
 }
 
 pub fn load_tome(name: &str) -> Result<TomeState> {
-    let state_path = tome_state_dir()?.join(format!("{name}.nuon"));
+    let state_path = sync_common::state_dir("tomes")?.join(format!("{name}.nuon"));
     if !state_path.exists() {
         bail!("tome `{name}` is not configured");
     }
@@ -640,7 +641,7 @@ pub fn load_tome(name: &str) -> Result<TomeState> {
 }
 
 pub fn ensure_tome_cache(tome: &TomeState) -> Result<PathBuf> {
-    let cache_path = tome_cache_path(&tome.name)?;
+    let cache_path = sync_common::cache_path("tomes", &tome.name)?;
     // Re-sync when the cache is missing *or* invalid: a sync that failed partway (e.g. after a
     // misconfigured URL) can leave a directory with no root `tome.rn`, which would otherwise be
     // trusted forever and fail every later read. Treating that as "not cached" lets it self-heal.
@@ -657,7 +658,7 @@ pub fn find_tome_for_path(path: &std::path::Path) -> Result<Option<TomeState>> {
         .canonicalize()
         .with_context(|| format!("canonicalize {}", path.display()))?;
     for tome in load_tomes()? {
-        let cache = tome_cache_path(&tome.name)?;
+        let cache = sync_common::cache_path("tomes", &tome.name)?;
         if canonical.starts_with(&cache) {
             return Ok(Some(tome));
         }
@@ -727,26 +728,28 @@ fn short_commit(commit: Option<&str>) -> String {
 }
 
 fn sync_tome_cache(tome: &TomeState) -> Result<TomeSyncReport> {
-    let cache_dir = tome_cache_dir()?;
-    let cache_path = tome_cache_path(&tome.name)?;
+    let cache_dir = sync_common::cache_dir("tomes")?;
+    let cache_path = sync_common::cache_path("tomes", &tome.name)?;
     fs::create_dir_all(&cache_dir)?;
     let temp = tempfile::Builder::new()
         .prefix("grimoire-tome-")
         .tempdir_in(&cache_dir)?;
     let staged = temp.path().join("cache");
 
-    if is_local_tome_source(&tome.url) {
-        let source = PathBuf::from(&tome.url)
-            .canonicalize()
-            .with_context(|| format!("resolve tome source {}", tome.url))?;
-        status(&format!("copying local tome ({})", tome.name));
-        copy_dir_all(&source, &staged)?;
-    } else {
-        sync_remote_tome_cache(tome, &staged)?;
+    if !sync_common::copy_local_source(&tome.name, &tome.url, &staged, "tome.rn")? {
+        status(&format!("cloning tome ({})", tome.name));
+        status(&format!(
+            "checking out tome ({}) ref ({})",
+            tome.name, tome.ref_name
+        ));
+        git::clone(&tome.url, &tome.ref_name, &staged)
+            .with_context(|| format!("could not sync tome `{}`", tome.name))?;
     }
 
     validate_staged_tome_cache(tome, &staged)?;
-    let to_commit = promote_tome_cache(tome, &staged, &cache_path)?;
+    let to_commit = sync_common::promote_cache(&staged, &cache_path, || {
+        record_tome_sync_state(tome, &cache_path)
+    })?;
     Ok(TomeSyncReport {
         name: tome.name.clone(),
         ref_name: tome.ref_name.clone(),
@@ -755,38 +758,8 @@ fn sync_tome_cache(tome: &TomeState) -> Result<TomeSyncReport> {
     })
 }
 
-fn is_local_tome_source(url: &str) -> bool {
-    let path = Path::new(url);
-    path.is_dir() && path.join("tome.rn").exists()
-}
-
-/// Normalizes the URL stored for a tome. A local tome source is canonicalized to an absolute
-/// path so later syncs — which run from whatever directory the user invokes a command in —
-/// resolve to the same directory `add` read the manifest from, rather than re-interpreting a
-/// relative path like `.` against the new working directory. Remote URLs pass through unchanged.
-fn resolve_tome_source_url(url: &str) -> Result<String> {
-    if !is_local_tome_source(url) {
-        return Ok(url.to_owned());
-    }
-    let absolute = Path::new(url)
-        .canonicalize()
-        .with_context(|| format!("resolve local tome source {url}"))?;
-    Ok(absolute.to_string_lossy().into_owned())
-}
-
-fn validate_local_tome_source(url: &str) -> Result<()> {
-    let path = Path::new(url);
-    if path.exists() && path.is_dir() && !path.join("tome.rn").exists() {
-        bail!(
-            "local tome source is missing root tome.rn: {}",
-            path.display()
-        );
-    }
-    Ok(())
-}
-
 fn validate_local_tome_if_available(name: &str, url: &str) -> Result<()> {
-    if !is_local_tome_source(url) {
+    if !sync_common::is_local_source(url, "tome.rn") {
         return Ok(());
     }
 
@@ -822,13 +795,19 @@ fn record_tome_sync_state(tome: &TomeState, cache_path: &Path) -> Result<Option<
     let mut state = load_tome(&tome.name).unwrap_or_else(|_| tome.clone());
     // Trust-on-first-use: capture (or re-confirm) the signing key from this sync before the new
     // state is written, so the pin and the cached manifest always move together.
-    let signer_pubkeys = capture_signer(tome, cache_path, &manifest, &state.signer_pubkeys)?;
+    let signer_pubkeys = sync_common::capture_signer(
+        "tome",
+        &tome.name,
+        &manifest_path,
+        &manifest.signers,
+        &state.signer_pubkeys,
+    )?;
     state.checked_ref = Some(tome.ref_name.clone());
     state.checked_commit = commit.clone();
     state.tome = Some(manifest);
     state.signer_pubkeys = signer_pubkeys;
 
-    let state_path = tome_state_dir()?.join(format!("{}.nuon", tome.name));
+    let state_path = sync_common::state_dir("tomes")?.join(format!("{}.nuon", tome.name));
     nuon_io::write_nuon(&state_path, &state.to_value())?;
     Ok(commit)
 }
@@ -895,77 +874,6 @@ fn parse_resolved_index(
     }
 }
 
-/// Trust-on-first-use capture for per-package signing. Run when a tome is synced (add/update).
-/// Given the keys pinned so far (`existing`) and the manifest just synced, returns the set of
-/// keys to record going forward:
-///
-/// - first sync of a tome that advertises signers → pin them (TOFU);
-/// - a later sync of an already-pinned tome → require the advertised set matches the pinned set
-///   exactly (key rotation needs a deliberate re-add);
-/// - an unsigned tome → stays unpinned.
-fn capture_signer(
-    tome: &TomeState,
-    cache: &Path,
-    manifest: &TomeManifest,
-    existing: &[String],
-) -> Result<Vec<String>> {
-    let advertised = manifest.signers.clone();
-
-    if existing.is_empty() && advertised.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    if !existing.is_empty() && advertised.is_empty() {
-        bail!(
-            "tome `{}` previously advertised signers but no longer does; refusing. \
-             Remove and re-add the tome to trust an unsigned manifest.",
-            tome.name
-        );
-    }
-
-    if existing.is_empty() && !advertised.is_empty() {
-        let manifest_path = cache.join("tome.rn");
-        if let Err(err) = signing::verify_detached(&manifest_path, &advertised) {
-            bail!(
-                "tome `{}` manifest signature does not verify: {err}",
-                tome.name
-            );
-        }
-        report(&format!(
-            "pinned {} signer(s) for tome `{}` (trust on first use)",
-            advertised.len(),
-            tome.name
-        ));
-        return Ok(advertised);
-    }
-
-    // Both have signers: require exact match (same set, same order doesn't matter).
-    let sets_match =
-        existing.len() == advertised.len() && existing.iter().all(|k| advertised.contains(k));
-    if !sets_match {
-        // Graceful key rotation: accept the new signers if the manifest is signed by the
-        // currently pinned keys. This lets a tome owner rotate keys without requiring every
-        // user to manually remove and re-add the tome.
-        let manifest_path = cache.join("tome.rn");
-        if signing::verify_detached(&manifest_path, existing).is_ok() {
-            report(&format!(
-                "tome `{}` rotated signing keys ({} -> {})",
-                tome.name,
-                existing.len(),
-                advertised.len()
-            ));
-            return Ok(advertised);
-        }
-        bail!(
-            "tome `{}` now advertises a different set of signing keys than the one pinned on \
-             first use; refusing. Remove and re-add the tome to trust the new keys.",
-            tome.name
-        );
-    }
-
-    Ok(existing.to_vec())
-}
-
 /// Resolves the local directory that holds a tome's package index and (relative) archives — the
 /// publish directory an author built and the host serves. An absolute path is used directly; a
 /// relative path resolves against the tome cache.
@@ -982,16 +890,6 @@ fn is_http_repo(repo: &str) -> bool {
     repo.starts_with("http://") || repo.starts_with("https://")
 }
 
-fn sync_remote_tome_cache(tome: &TomeState, cache_path: &Path) -> Result<()> {
-    status(&format!("cloning tome ({})", tome.name));
-    status(&format!(
-        "checking out tome ({}) ref ({})",
-        tome.name, tome.ref_name
-    ));
-    git::clone(&tome.url, &tome.ref_name, cache_path)
-        .with_context(|| format!("could not sync tome `{}`", tome.name))
-}
-
 fn validate_staged_tome_cache(tome: &TomeState, cache_path: &Path) -> Result<()> {
     let runtime = EmbeddedNuRuntime;
     let manifest_path = cache_path.join("tome.rn");
@@ -1003,56 +901,6 @@ fn validate_staged_tome_cache(tome: &TomeState, cache_path: &Path) -> Result<()>
     }
     let manifest = runtime.tome_manifest(&manifest_path)?;
     validate_tome_cache(tome, cache_path, &manifest, &runtime)
-}
-
-fn promote_tome_cache(
-    tome: &TomeState,
-    staged: &Path,
-    cache_path: &Path,
-) -> Result<Option<String>> {
-    let backup = tome_cache_backup_path(cache_path)?;
-    let had_previous = cache_path.exists();
-    if backup.exists() {
-        fs::remove_dir_all(&backup)
-            .with_context(|| format!("remove stale tome cache backup {}", backup.display()))?;
-    }
-    if had_previous {
-        fs::rename(cache_path, &backup)
-            .with_context(|| format!("back up tome cache {}", cache_path.display()))?;
-    }
-
-    if let Err(err) = fs::rename(staged, cache_path)
-        .with_context(|| format!("promote tome cache {}", cache_path.display()))
-    {
-        if had_previous {
-            let _ = fs::rename(&backup, cache_path);
-        }
-        return Err(err);
-    }
-
-    let commit = match record_tome_sync_state(tome, cache_path) {
-        Ok(commit) => commit,
-        Err(err) => {
-            let _ = fs::remove_dir_all(cache_path);
-            if had_previous {
-                let _ = fs::rename(&backup, cache_path);
-            }
-            return Err(err);
-        }
-    };
-
-    if had_previous {
-        let _ = fs::remove_dir_all(&backup);
-    }
-    Ok(commit)
-}
-
-fn tome_cache_backup_path(cache_path: &Path) -> Result<PathBuf> {
-    let name = cache_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("tome cache path should have a name")?;
-    Ok(cache_path.with_file_name(format!("{name}.grimoire-old")))
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
@@ -1073,6 +921,14 @@ fn sha256_file(path: &Path) -> Result<String> {
 }
 
 fn verify_runes_manifest(cache: &Path, pubkeys: &[String]) -> Result<()> {
+    let runes = read_runes_manifest(cache, pubkeys)?;
+    let runes_dir = cache.join("runes");
+    verify_rune_hashes(&runes, &runes_dir)?;
+    check_for_extra_runes(&runes, &runes_dir)?;
+    Ok(())
+}
+
+fn read_runes_manifest(cache: &Path, pubkeys: &[String]) -> Result<nu_protocol::Record> {
     let manifest_path = cache.join("runes-manifest.nuon");
     if !manifest_path.exists() {
         bail!("runes-manifest.nuon is missing");
@@ -1089,13 +945,14 @@ fn verify_runes_manifest(cache: &Path, pubkeys: &[String]) -> Result<()> {
         bail!("unsupported runes manifest format {format}; expected 1");
     }
 
-    let runes = match record.get("runes") {
-        Some(nu_protocol::Value::Record { val, .. }) => val,
+    match record.get("runes") {
+        Some(nu_protocol::Value::Record { val, .. }) => Ok(val.clone().into_owned()),
         Some(_) => bail!("runes manifest field `runes` must be a record"),
         None => bail!("runes manifest is missing required field `runes`"),
-    };
+    }
+}
 
-    let runes_dir = cache.join("runes");
+fn verify_rune_hashes(runes: &nu_protocol::Record, runes_dir: &Path) -> Result<()> {
     for (name, hash_value) in runes.iter() {
         let expected = match hash_value {
             nu_protocol::Value::String { val, .. } => val.as_str(),
@@ -1114,25 +971,26 @@ fn verify_runes_manifest(cache: &Path, pubkeys: &[String]) -> Result<()> {
             );
         }
     }
+    Ok(())
+}
 
-    for entry in fs::read_dir(&runes_dir)
+fn check_for_extra_runes(runes: &nu_protocol::Record, runes_dir: &Path) -> Result<()> {
+    for entry in fs::read_dir(runes_dir)
         .with_context(|| format!("read runes directory {}", runes_dir.display()))?
     {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("rn") {
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .with_context(|| format!("rune path has invalid file name: {}", path.display()))?;
-            if runes.get(name).is_none() {
-                bail!(
-                    "extra rune file `{name}` found in runes/ but not listed in runes-manifest.nuon"
-                );
-            }
+        if path.extension().and_then(|e| e.to_str()) != Some("rn") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .with_context(|| format!("rune path has invalid file name: {}", path.display()))?;
+        if runes.get(name).is_none() {
+            bail!("extra rune file `{name}` found in runes/ but not listed in runes-manifest.nuon");
         }
     }
-
     Ok(())
 }
 
@@ -1225,20 +1083,6 @@ fn validate_tome_packages(packages: &TomePackages) -> Result<()> {
     }
     validate_relative_package_path(&packages.index, "tome packages.index")?;
     Ok(())
-}
-
-fn copy_dir_all(source: &Path, destination: &Path) -> Result<()> {
-    crate::fs_util::copy_dir_all(source, destination, "tome")
-}
-
-fn tome_cache_dir() -> Result<PathBuf> {
-    Ok(paths::install_root()?.join("cache").join("tomes"))
-}
-
-/// Location of a tome's cached repository. Does not sync; callers that need the cache
-/// populated should use [`ensure_tome_cache`].
-pub fn tome_cache_path(name: &str) -> Result<PathBuf> {
-    Ok(tome_cache_dir()?.join(name))
 }
 
 #[cfg(test)]
