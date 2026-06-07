@@ -63,6 +63,19 @@ pub fn generation_dir(id: u64) -> Result<PathBuf> {
     Ok(profiles_dir()?.join(format!("gen-{id}")))
 }
 
+/// Returns the list of package names in the currently active generation, if one exists.
+pub fn current_generation_packages() -> Result<Option<Vec<String>>> {
+    let Some(id) = current_generation_id()? else {
+        return Ok(None);
+    };
+    let gen_dir = generation_dir(id)?;
+    if !gen_dir.exists() {
+        return Ok(None);
+    }
+    let metadata = read_generation_metadata(&gen_dir)?;
+    Ok(Some(metadata.packages))
+}
+
 /// Returns the ID of the currently active generation, if one exists.
 pub fn current_generation_id() -> Result<Option<u64>> {
     let link = current_profile_link()?;
@@ -256,7 +269,10 @@ pub fn gc(keep: usize) -> Result<()> {
     }
 
     let current = current_generation_id()?;
-    let to_retain: BTreeSet<u64> = generations.iter().take(keep).map(|g| g.id).collect();
+    let mut to_retain: BTreeSet<u64> = generations.iter().take(keep).map(|g| g.id).collect();
+    if let Some(current_id) = current {
+        to_retain.insert(current_id);
+    }
 
     let freed_generations = delete_old_generations(&generations, &to_retain, current)?;
     prune_registry()?;
@@ -433,6 +449,15 @@ fn unix_now() -> u64 {
 
 fn link_package_into_generation(state: &PackageState, gen_dir: &Path) -> Result<()> {
     let store_path = PathBuf::from(&state.store_path);
+    let store_root = paths::store_root()?;
+    if !store_path.starts_with(&store_root) {
+        bail!(
+            "package `{}` store path `{}` is outside the store root `{}`; refusing to link",
+            state.name,
+            store_path.display(),
+            store_root.display()
+        );
+    }
 
     // Link declared bins into the generation's bin/ directory.
     // The bin name in the profile is the key from `state.bins`; the source path is the value.
