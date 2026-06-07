@@ -162,7 +162,7 @@ fn terminal_width() -> usize {
 }
 
 fn truncate_line(line: &str, width: usize, reserved_columns: usize) -> String {
-    let clean = line.replace(['\r', '\n', '\t'], " ");
+    let clean = line.replace(['\r', '\n', '\t'], " ").replace('\x1b', " ");
     let max = width.saturating_sub(reserved_columns);
     if clean.chars().count() <= max {
         return clean;
@@ -282,6 +282,7 @@ fn set_spinner_message(message: &str) {
     if !std::io::stderr().is_terminal() {
         return;
     }
+    clear_live_build_log();
     let Ok(mut guard) = SPINNER.lock() else {
         return;
     };

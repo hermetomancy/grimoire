@@ -5,8 +5,6 @@
 //! paths portable across users and machines.
 
 use anyhow::{Context, Result, bail};
-#[cfg(target_os = "macos")]
-use std::io::Write;
 use std::{env, fs, path::Path};
 
 use crate::paths;
@@ -98,7 +96,10 @@ fn setup_macos() -> Result<()> {
         String::new()
     };
 
-    if content.lines().map(str::trim).any(|line| line == marker) {
+    if content
+        .lines()
+        .any(|line| line.split_whitespace().next() == Some(marker))
+    {
         bail!(
             "'{marker}' is already registered in {} but {} does not exist yet. \
              Reboot your Mac, then rerun `grm setup` if needed.",
@@ -107,21 +108,16 @@ fn setup_macos() -> Result<()> {
         );
     }
 
-    let mut file = fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(synthetic)
-        .with_context(|| {
-            format!(
-                "open {} for writing (try running with sudo)",
-                synthetic.display()
-            )
-        })?;
-
-    if !content.is_empty() && !content.ends_with('\n') {
-        file.write_all(b"\n")?;
+    let mut new_content = content.clone();
+    if !new_content.is_empty() && !new_content.ends_with('\n') {
+        new_content.push('\n');
     }
-    file.write_all(b"grm\n")?;
+    new_content.push_str("grm\n");
+
+    let temp = synthetic.with_extension("grimoire-tmp");
+    fs::write(&temp, new_content).with_context(|| format!("write temporary {}", temp.display()))?;
+    fs::rename(&temp, synthetic)
+        .with_context(|| format!("atomically update {}", synthetic.display()))?;
 
     println!("Added '{marker}' to {}.", synthetic.display());
     println!(
