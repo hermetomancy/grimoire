@@ -193,6 +193,7 @@ pub fn build_package_with_env(
     status(&format!("resolving rune ({package})"));
     let rune = resolve_rune(package)?;
 
+    status(&format!("reading metadata ({package})"));
     let runtime = EmbeddedNuRuntime;
     let mut metadata = runtime
         .package_metadata(&rune)
@@ -200,6 +201,7 @@ pub fn build_package_with_env(
     addendum::patched_package_metadata(&mut metadata, tome_name_for_rune(&rune)?.as_deref(), &rune)
         .with_context(|| format!("apply addendums to {}", rune.display()))?;
 
+    status(&format!("fetching sources ({package})"));
     let rune_dir = rune.parent().unwrap_or_else(|| Path::new("."));
     let sources = fetch::fetch_sources(&metadata.sources, rune_dir, &paths::source_cache_dir()?)
         .with_context(|| format!("fetch sources for {}", rune.display()))?;
@@ -216,6 +218,7 @@ pub fn build_package_with_env(
     };
     std::fs::create_dir_all(&work_dir)?;
     std::fs::create_dir_all(&package_dir)?;
+    status(&format!("preparing sources ({package})"));
     let sources = prepare_sources(sources, &work_dir)?;
 
     status(&format!(
