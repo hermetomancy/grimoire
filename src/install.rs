@@ -515,12 +515,7 @@ impl Installer {
         if self.pins.is_some() {
             return match (step.substitutes.first(), &step.rune) {
                 (Some(sub), _) => self.install_substitute(sub),
-                (None, Some(rune)) => {
-                    let hash = step.store_hash.as_deref().with_context(|| {
-                        format!("cannot compute store hash for `{}`", step.name)
-                    })?;
-                    self.build_and_install(rune, hash)
-                }
+                (None, Some(rune)) => self.build_and_install(rune, require_store_hash(step)?),
                 (None, None) => bail!("no pinned artifact available for `{}`", step.name),
             };
         }
@@ -539,11 +534,7 @@ impl Installer {
                         step.name, step.version
                     ));
                 }
-                let hash = step
-                    .store_hash
-                    .as_deref()
-                    .with_context(|| format!("cannot compute store hash for `{}`", step.name))?;
-                self.build_and_install(rune, hash)
+                self.build_and_install(rune, require_store_hash(step)?)
             }
             None => bail!(
                 "no installable prebuilt or source for `{}` {}",
@@ -649,6 +640,12 @@ impl Installer {
         self.installed_now.push(installed.name.clone());
         self.installed.insert(installed.name, installed.version);
     }
+}
+
+fn require_store_hash(step: &PlanStep) -> Result<&str> {
+    step.store_hash
+        .as_deref()
+        .with_context(|| format!("cannot compute store hash for `{}`", step.name))
 }
 
 pub fn list() -> Result<()> {

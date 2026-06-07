@@ -132,44 +132,57 @@ pub fn upgrade(args: UpgradeArgs) -> Result<()> {
         }
     }
 
-    // Compare the installed version against the newest a tome offers and only reinstall when a
-    // strictly newer release exists, so an up-to-date package is left untouched.
-    let mut to_upgrade: Vec<(String, Version, Version)> = Vec::new();
-    for name in targets {
-        let Some(current) = installed.get(&name) else {
-            bail!("package `{name}` is not installed");
-        };
-        if !explicit && held.get(&name).copied().unwrap_or(false) {
-            progress::report(&format!(
-                "{name} is held; skipping (use `grm unhold {name}` to allow)"
-            ));
-            continue;
-        }
-        match solve::newest_available(&name)? {
-            Some(newest) if newest > *current => {
-                if !args.dry_run {
-                    progress::status(&format!("upgrading {name} {current} -> {newest}"));
-                }
-                to_upgrade.push((name, current.clone(), newest));
-            }
-            _ => progress::report(&format!("{name} is up to date ({current})")),
-        }
-    }
+    let to_upgrade = collect_upgrades(&targets, &installed, &held, explicit, args.dry_run)?;
 
     if to_upgrade.is_empty() {
         return Ok(());
     }
 
     if args.dry_run {
-        println!("plan:");
-        for (name, current, newest) in &to_upgrade {
-            println!("  ~ {name} {current} -> {newest}");
-        }
+        print_upgrade_plan(&to_upgrade);
         return Ok(());
     }
 
     let names: Vec<String> = to_upgrade.into_iter().map(|(name, _, _)| name).collect();
     install::upgrade_packages(&names)
+}
+
+fn collect_upgrades(
+    targets: &[String],
+    installed: &BTreeMap<String, Version>,
+    held: &BTreeMap<String, bool>,
+    explicit: bool,
+    dry_run: bool,
+) -> Result<Vec<(String, Version, Version)>> {
+    let mut to_upgrade: Vec<(String, Version, Version)> = Vec::new();
+    for name in targets {
+        let Some(current) = installed.get(name) else {
+            bail!("package `{name}` is not installed");
+        };
+        if !explicit && held.get(name).copied().unwrap_or(false) {
+            progress::report(&format!(
+                "{name} is held; skipping (use `grm unhold {name}` to allow)"
+            ));
+            continue;
+        }
+        match solve::newest_available(name)? {
+            Some(newest) if newest > *current => {
+                if !dry_run {
+                    progress::status(&format!("upgrading {name} {current} -> {newest}"));
+                }
+                to_upgrade.push((name.clone(), current.clone(), newest));
+            }
+            _ => progress::report(&format!("{name} is up to date ({current})")),
+        }
+    }
+    Ok(to_upgrade)
+}
+
+fn print_upgrade_plan(to_upgrade: &[(String, Version, Version)]) {
+    println!("plan:");
+    for (name, current, newest) in to_upgrade {
+        println!("  ~ {name} {current} -> {newest}");
+    }
 }
 
 fn tome_packages() -> Result<Vec<TomePackage>> {

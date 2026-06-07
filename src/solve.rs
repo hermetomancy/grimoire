@@ -48,18 +48,25 @@ impl CapabilityIndex {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
-                for bin_name in metadata.bins.keys() {
-                    if *bin_name == metadata.name {
-                        continue;
-                    }
-                    let providers = map.entry(bin_name.clone()).or_default();
-                    if !providers.contains(&metadata.name) {
-                        providers.push(metadata.name.clone());
-                    }
-                }
+                Self::record_capabilities(&metadata, &mut map);
             }
         }
         Ok(Self { map })
+    }
+
+    fn record_capabilities(
+        metadata: &crate::model::PackageMetadata,
+        map: &mut HashMap<String, Vec<String>>,
+    ) {
+        for bin_name in metadata.bins.keys() {
+            if *bin_name == metadata.name {
+                continue;
+            }
+            let providers = map.entry(bin_name.clone()).or_default();
+            if !providers.contains(&metadata.name) {
+                providers.push(metadata.name.clone());
+            }
+        }
     }
 
     fn providers(&self, capability: &str) -> Vec<String> {
@@ -222,6 +229,9 @@ struct Candidate {
     rune: Option<PathBuf>,
     substitutes: Vec<Substitute>,
 }
+
+/// Prebuilt substitutes grouped by version, paired with the runtime deps the index entry declares.
+type VersionCandidates = BTreeMap<Version, (Vec<Dependency>, Vec<Substitute>)>;
 
 /// How a chosen package is realized: the source rune and/or the prebuilt substitutes available for
 /// the selected version. `None` route means an already-installed version is reused (no step).
@@ -432,60 +442,8 @@ fn pin_candidates(name: &str, candidates: Vec<Candidate>, pins: &Pins) -> Result
 /// defines it (when present); the rune is authoritative for that version's runtime dependencies. No
 /// downloads happen — this reads index metadata and the rune.
 fn gather_candidates(name: &str, target: &str) -> Result<Vec<Candidate>> {
-    // Prebuilt substitutes grouped by version, paired with the runtime deps the index entry
-    // declares (used only as a fallback when no rune defines the version).
-    let mut by_version: BTreeMap<Version, (Vec<Dependency>, Vec<Substitute>)> = BTreeMap::new();
-    for tome in tome::load_tomes()? {
-        let Some((root, index)) = tome::package_index(&tome)? else {
-            continue;
-        };
-        for (store_hash, entry) in index.candidates(name, target) {
-            let version = parse_version_relaxed(&entry.version)
-                .with_context(|| format!("index version `{}` for `{name}`", entry.version))?;
-            let filtered_runtime: Vec<Dependency> = entry
-                .runtime_deps
-                .iter()
-                .filter(|d| d.matches_platform(target))
-                .cloned()
-                .collect();
-            let slot = by_version
-                .entry(version)
-                .or_insert_with(|| (filtered_runtime.clone(), Vec::new()));
-            // Ensure the slot uses the filtered runtime deps even on first insertion.
-            slot.0 = filtered_runtime;
-            slot.1.push(Substitute {
-                root: root.clone(),
-                store_hash: store_hash.to_string(),
-                entry: entry.clone(),
-                tome_name: tome.name.clone(),
-            });
-        }
-    }
-
-    // The source rune, when one exists, defines its version authoritatively.
-    let rune = match build::find_rune(name)? {
-        Some(rune) => {
-            let mut metadata = EmbeddedNuRuntime
-                .package_metadata(&rune)
-                .with_context(|| format!("read rune metadata {}", rune.display()))?;
-            addendum::patched_package_metadata(
-                &mut metadata,
-                build::tome_name_for_rune(&rune)?.as_deref(),
-                &rune,
-            )
-            .with_context(|| format!("apply addendums to {}", rune.display()))?;
-            let version = parse_version_relaxed(&metadata.version)
-                .with_context(|| format!("rune version `{}` for `{name}`", metadata.version))?;
-            let runtime: Vec<Dependency> = metadata
-                .deps
-                .runtime
-                .into_iter()
-                .filter(|d| d.matches_platform(target))
-                .collect();
-            Some((version, runtime, rune))
-        }
-        None => None,
-    };
+    let by_version = gather_index_candidates(name, target)?;
+    let rune = gather_rune_candidate(name, target)?;
 
     let mut versions: BTreeSet<Version> = by_version.keys().cloned().collect();
     if let Some((version, _, _)) = &rune {
@@ -522,6 +480,64 @@ fn gather_candidates(name: &str, target: &str) -> Result<Vec<Candidate>> {
 
     candidates.sort_by(|a, b| b.version.cmp(&a.version));
     Ok(candidates)
+}
+
+fn gather_index_candidates(name: &str, target: &str) -> Result<VersionCandidates> {
+    let mut by_version: VersionCandidates = BTreeMap::new();
+    for tome in tome::load_tomes()? {
+        let Some((root, index)) = tome::package_index(&tome)? else {
+            continue;
+        };
+        for (store_hash, entry) in index.candidates(name, target) {
+            let version = parse_version_relaxed(&entry.version)
+                .with_context(|| format!("index version `{}` for `{name}`", entry.version))?;
+            let filtered_runtime: Vec<Dependency> = entry
+                .runtime_deps
+                .iter()
+                .filter(|d| d.matches_platform(target))
+                .cloned()
+                .collect();
+            let slot = by_version
+                .entry(version)
+                .or_insert_with(|| (filtered_runtime.clone(), Vec::new()));
+            // Ensure the slot uses the filtered runtime deps even on first insertion.
+            slot.0 = filtered_runtime;
+            slot.1.push(Substitute {
+                root: root.clone(),
+                store_hash: store_hash.to_string(),
+                entry: entry.clone(),
+                tome_name: tome.name.clone(),
+            });
+        }
+    }
+    Ok(by_version)
+}
+
+fn gather_rune_candidate(
+    name: &str,
+    target: &str,
+) -> Result<Option<(Version, Vec<Dependency>, PathBuf)>> {
+    let Some(rune) = build::find_rune(name)? else {
+        return Ok(None);
+    };
+    let mut metadata = EmbeddedNuRuntime
+        .package_metadata(&rune)
+        .with_context(|| format!("read rune metadata {}", rune.display()))?;
+    addendum::patched_package_metadata(
+        &mut metadata,
+        build::tome_name_for_rune(&rune)?.as_deref(),
+        &rune,
+    )
+    .with_context(|| format!("apply addendums to {}", rune.display()))?;
+    let version = parse_version_relaxed(&metadata.version)
+        .with_context(|| format!("rune version `{}` for `{name}`", metadata.version))?;
+    let runtime: Vec<Dependency> = metadata
+        .deps
+        .runtime
+        .into_iter()
+        .filter(|d| d.matches_platform(target))
+        .collect();
+    Ok(Some((version, runtime, rune)))
 }
 
 /// The newest version of `name` installable from any configured tome (binary or source), or

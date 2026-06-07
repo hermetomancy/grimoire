@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 
-use crate::{install, lock, paths, profile, tome, toolchain};
+use crate::{install, lock, paths, profile, sync_common, tome, toolchain};
 
 const CORE_USERLAND_TOOLS_LINUX: &[&str] = &[
     "linux-headers",
@@ -120,7 +120,7 @@ fn check_tomes() -> Result<usize> {
 
     let mut problems = 0;
     for state in &tomes {
-        let cache = tome::tome_cache_path(&state.name)?;
+        let cache = sync_common::cache_path("tomes", &state.name)?;
         if !cache.exists() {
             problems += 1;
             eprintln!(
