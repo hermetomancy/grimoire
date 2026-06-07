@@ -301,6 +301,9 @@ pub struct TomeBuildArgs {
     /// without building any packages.
     #[arg(long, conflicts_with_all = ["package", "all"])]
     pub index: bool,
+    /// Rebuild runes even if they already exist in the index.
+    #[arg(long, conflicts_with = "index")]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]

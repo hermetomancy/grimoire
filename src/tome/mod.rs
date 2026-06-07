@@ -189,13 +189,16 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
     };
 
     build_runes(
-        root,
-        &dist_dir,
+        &BuildRunesConfig {
+            root,
+            dist_dir: &dist_dir,
+            all: args.all,
+            bootstrap: args.bootstrap,
+            target: args.target.as_deref(),
+            force: args.force,
+        },
         &rune_names,
         &mut catalog,
-        args.all,
-        args.bootstrap,
-        args.target.as_deref(),
     )?;
     nuon_io::write_nuon(&index_path, &catalog.to_value())?;
 
@@ -207,18 +210,43 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
     Ok(())
 }
 
-fn build_runes(
-    root: &Path,
-    dist_dir: &Path,
-    rune_names: &[String],
-    catalog: &mut PackageIndex,
+struct BuildRunesConfig<'a> {
+    root: &'a Path,
+    dist_dir: &'a Path,
     all: bool,
     bootstrap: bool,
-    target: Option<&str>,
+    target: Option<&'a str>,
+    force: bool,
+}
+
+fn build_runes(
+    config: &BuildRunesConfig<'_>,
+    rune_names: &[String],
+    catalog: &mut PackageIndex,
 ) -> Result<()> {
     for name in rune_names {
-        let (store_hash, entry, archive) =
-            build_rune_into(root, name, dist_dir, bootstrap, target)?;
+        if !config.force {
+            if let Some(existing) = catalog.entries.values().find(|e| e.name == *name) {
+                let archive_path = config.dist_dir.join(format!(
+                    "{}-{}-{}.tar.zst",
+                    existing.name, existing.version, existing.target
+                ));
+                if archive_path.exists() {
+                    status(&format!(
+                        "skipping {} {} (already built; pass --force to rebuild)",
+                        existing.name, existing.version
+                    ));
+                    continue;
+                }
+            }
+        }
+        let (store_hash, entry, archive) = build_rune_into(
+            config.root,
+            name,
+            config.dist_dir,
+            config.bootstrap,
+            config.target,
+        )?;
         report(&format!(
             "built {} {} ({}) into {}",
             entry.name,
@@ -226,7 +254,7 @@ fn build_runes(
             entry.target,
             archive.display()
         ));
-        if all {
+        if config.all {
             install::install_store_only(&archive, None, None)
                 .with_context(|| format!("store-only install of {}", entry.name))?;
         }
