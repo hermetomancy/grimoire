@@ -18,13 +18,14 @@ use std::{
 
 use crate::{
     addendum, archive, build, closure,
-    model::{Dependency, IndexEntry, parse_version_relaxed},
+    model::{Dependency, IndexEntry, PackageIndex, parse_version_relaxed},
     nu::runtime::{EmbeddedNuRuntime, RuneRuntime},
     paths, tome, toolchain,
 };
 
-/// Maps capability names (e.g. "awk", "sh") to the package names that provide them
-/// via their `bins` map. Built once per resolve by scanning all runes.
+/// Maps capability names (e.g. "awk", "sh") to the package names that provide them.
+/// Built once per resolve by reading tome indexes first, then falling back to runes
+/// for packages not yet indexed.
 #[derive(Clone)]
 struct CapabilityIndex {
     map: HashMap<String, Vec<String>>,
@@ -33,8 +34,34 @@ struct CapabilityIndex {
 impl CapabilityIndex {
     fn build() -> Result<Self> {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
-        for tome in tome::load_tomes()? {
-            let cache = tome::ensure_tome_cache(&tome)?;
+        let target = paths::target_triple();
+        let tomes = tome::load_tomes()?;
+
+        // 1. Read capabilities from published tome indexes (authoritative).
+        for tome in &tomes {
+            let cache = tome::ensure_tome_cache(tome)?;
+            let index_path = cache.join("dist").join("index.nuon");
+            if !index_path.exists() {
+                continue;
+            }
+            let index = match crate::nu::nuon_io::read_nuon(&index_path) {
+                Ok(v) => match PackageIndex::from_value(v) {
+                    Ok(idx) => idx,
+                    Err(_) => continue,
+                },
+                Err(_) => continue,
+            };
+            for (_, entry) in index.entries {
+                if entry.target != target {
+                    continue;
+                }
+                Self::record_provides(&entry.name, &entry.provides, &mut map);
+            }
+        }
+
+        // 2. Fall back to runes for packages not in any index.
+        for tome in &tomes {
+            let cache = tome::ensure_tome_cache(tome)?;
             let runes_dir = cache.join("runes");
             if !runes_dir.exists() {
                 continue;
@@ -48,17 +75,32 @@ impl CapabilityIndex {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
-                Self::record_capabilities(&metadata, &mut map);
+                // Only record from rune if this package wasn't already recorded from an index.
+                Self::record_capabilities_from_rune(&metadata, &target, &mut map);
             }
         }
         Ok(Self { map })
     }
 
-    fn record_capabilities(
-        metadata: &crate::model::PackageMetadata,
+    fn record_provides(
+        package_name: &str,
+        provides: &[String],
         map: &mut HashMap<String, Vec<String>>,
     ) {
-        for bin_name in metadata.bins.keys() {
+        for name in provides {
+            let providers = map.entry(name.clone()).or_default();
+            if !providers.contains(&package_name.to_owned()) {
+                providers.push(package_name.to_owned());
+            }
+        }
+    }
+
+    fn record_capabilities_from_rune(
+        metadata: &crate::model::PackageMetadata,
+        target: &str,
+        map: &mut HashMap<String, Vec<String>>,
+    ) {
+        for bin_name in metadata.bins_for(target).keys() {
             if *bin_name == metadata.name {
                 continue;
             }
@@ -125,6 +167,14 @@ impl Plan {
         let target = paths::target_triple();
         let build_env = toolchain::build_env_id().unwrap_or_default();
         let mut computed: BTreeMap<String, String> = BTreeMap::new();
+
+        // Pre-populate with already-installed packages so reused dependencies
+        // do not cause "missing computed hash" errors.
+        if let Ok(states) = crate::install::installed_states() {
+            for state in states {
+                computed.insert(state.name.clone(), state.store_hash.clone());
+            }
+        }
 
         for step in &mut self.steps {
             let hash = if let Some(rune) = &step.rune {

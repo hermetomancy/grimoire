@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
 use std::{
     collections::BTreeMap,
-    fs::File,
+    fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
 };
@@ -34,6 +34,8 @@ const CORE_PACKAGES: &[&str] = &[
     "compiler-rt",
     "llvm",
     "clang",
+    "cmake",
+    "python3",
     "make",
     "toybox",
     "toolchain-wrappers",
@@ -103,6 +105,11 @@ pub fn build_env_for_target(
     if is_musl_target(target) {
         env.extend(musl_static_env_vars());
     }
+    if target.starts_with("macos-") {
+        if let Some(sdk) = toolchain::macos_sdk_path() {
+            env.push(("SDKROOT".to_string(), sdk));
+        }
+    }
 
     if core_compiler_boundary_available()? {
         Ok(BuildEnv::managed(all_path_dirs, Vec::new(), env))
@@ -115,10 +122,21 @@ pub fn build_env_for_target(
     }
 }
 
-/// The result of a source build: the archive path and the computed store hash.
+/// The result of a source build: the archive path, store hash, and discovered capabilities.
 pub struct BuildResult {
     pub archive: PathBuf,
     pub store_hash: String,
+    /// Bins discovered in the package directory (from bin/, sbin/, libexec/).
+    pub discovered_bins: BTreeMap<String, String>,
+    /// Library base names discovered in the package directory (from lib/, lib64/).
+    pub libs: Vec<String>,
+}
+
+fn build_log_path(name: &str, version: &str, target: &str, store_hash: &str) -> Option<PathBuf> {
+    let dir = paths::build_log_dir().ok()?;
+    fs::create_dir_all(&dir).ok()?;
+    let filename = format!("{}-{}-{}-{}.log", name, version, target, store_hash);
+    Some(dir.join(filename))
 }
 
 pub fn build(args: BuildArgs) -> Result<()> {
@@ -201,7 +219,7 @@ pub fn build_package_with_env(
     addendum::patched_package_metadata(&mut metadata, tome_name_for_rune(&rune)?.as_deref(), &rune)
         .with_context(|| format!("apply addendums to {}", rune.display()))?;
 
-    status(&format!("fetching sources ({package})"));
+    status(&format!("checking sources ({package})"));
     let rune_dir = rune.parent().unwrap_or_else(|| Path::new("."));
     let sources = fetch::fetch_sources(&metadata.sources, rune_dir, &paths::source_cache_dir()?)
         .with_context(|| format!("fetch sources for {}", rune.display()))?;
@@ -211,10 +229,12 @@ pub fn build_package_with_env(
     let temp = tempfile::tempdir()?;
     let work_dir = temp.path().join("work");
     let package_dir = temp.path().join("package");
+    let log_file = build_log_path(&metadata.name, &metadata.version, &target, store_hash);
     let dirs = BuildDirs {
         package_dir: package_dir.clone(),
         final_prefix: final_prefix.clone(),
         work_dir: work_dir.clone(),
+        log_file,
     };
     std::fs::create_dir_all(&work_dir)?;
     std::fs::create_dir_all(&package_dir)?;
@@ -226,12 +246,44 @@ pub fn build_package_with_env(
         rune.display(),
         store_hash
     ));
-    let build_result = runtime
+    let manifest = runtime
         .build(&rune, &dirs, &sources, &metadata.build_flags, env)
         .with_context(|| format!("build rune {}", rune.display()));
     std::env::set_current_dir(&original_cwd)
         .with_context(|| format!("restore working directory {}", original_cwd.display()))?;
-    build_result?;
+    if let Some(manifest) = manifest? {
+        metadata.merge_build_manifest(&manifest);
+    }
+
+    // Autotools-style `make install DESTDIR=...` nests the payload under the prefix path
+    // inside package_dir. The packing logic strips this prefix; discovery must look there too.
+    let payload_dir = {
+        let relative: PathBuf = final_prefix
+            .components()
+            .filter_map(|c| match c {
+                std::path::Component::Normal(p) => Some(p),
+                _ => None,
+            })
+            .collect();
+        let destdir_payload = package_dir.join(&relative);
+        if destdir_payload.exists() {
+            destdir_payload
+        } else {
+            package_dir.clone()
+        }
+    };
+
+    fix_bin_permissions(&payload_dir)?;
+    let discovered = discover_bins(&payload_dir);
+    let libs = discover_libs(&payload_dir);
+    // Discovery overrides static bins for the default target key.
+    if !discovered.is_empty() {
+        metadata
+            .bins
+            .insert("default".to_string(), discovered.clone());
+    }
+    metadata.provides = discovered.keys().cloned().collect();
+    metadata.libs = libs.clone();
 
     let archive = pack::pack_built_rune(
         &rune,
@@ -246,7 +298,128 @@ pub fn build_package_with_env(
     Ok(BuildResult {
         archive,
         store_hash: store_hash.to_string(),
+        discovered_bins: discovered,
+        libs,
     })
+}
+
+/// Scan a built package directory for executable files in standard directories.
+/// Returns a map of command name → relative path (e.g. "hello" → "bin/hello").
+fn discover_bins(package_dir: &Path) -> BTreeMap<String, String> {
+    let mut bins = BTreeMap::new();
+    for subdir in ["bin", "sbin", "libexec"] {
+        let dir = package_dir.join(subdir);
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            let is_exec = {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    meta.permissions().mode() & 0o111 != 0
+                }
+                #[cfg(not(unix))]
+                {
+                    true
+                }
+            };
+            if !is_exec {
+                continue;
+            }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                bins.insert(name.to_owned(), format!("{subdir}/{name}"));
+            }
+        }
+    }
+    bins
+}
+
+/// Scan a built package directory for library files in standard directories.
+/// Returns a sorted list of library base names (e.g. "foo" for libfoo.so).
+fn discover_libs(package_dir: &Path) -> Vec<String> {
+    let mut libs = Vec::new();
+    for subdir in ["lib", "lib64"] {
+        let dir = package_dir.join(subdir);
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Some(base) = name.strip_prefix("lib") else {
+                continue;
+            };
+            let base = if let Some(stripped) = base.strip_suffix(".a") {
+                stripped
+            } else if let Some(stripped) = base.strip_suffix(".dylib") {
+                stripped
+            } else if let Some(idx) = base.find(".so") {
+                &base[..idx]
+            } else {
+                continue;
+            };
+            if !base.is_empty() {
+                libs.push(base.to_owned());
+            }
+        }
+    }
+    libs.sort();
+    libs.dedup();
+    libs
+}
+
+/// Ensure every file in `bin/`, `sbin/`, and `libexec/` is executable.
+/// Build scripts that use Nushell's `save` command create files without the
+/// executable bit; this fixes them before packing so auto-discovery finds them.
+fn fix_bin_permissions(package_dir: &Path) -> Result<()> {
+    for subdir in ["bin", "sbin", "libexec"] {
+        let dir = package_dir.join(subdir);
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = entry
+                    .metadata()
+                    .with_context(|| format!("read metadata for {}", path.display()))?
+                    .permissions();
+                if perms.mode() & 0o111 == 0 {
+                    perms.set_mode(perms.mode() | 0o755);
+                    std::fs::set_permissions(&path, perms)
+                        .with_context(|| format!("chmod +x {}", path.display()))?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn tome_name_for_rune(rune: &Path) -> Result<Option<String>> {
@@ -453,5 +626,40 @@ mod tests {
         assert_eq!(get("LD"), Some("ld"));
         assert_eq!(get("CFLAGS"), Some("-static"));
         assert_eq!(get("LDFLAGS"), Some("-static"));
+    }
+
+    #[test]
+    fn discover_libs_handles_various_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let lib_dir = temp.path().join("lib");
+        fs::create_dir(&lib_dir).unwrap();
+
+        // Standard names
+        File::create(lib_dir.join("libfoo.so")).unwrap();
+        File::create(lib_dir.join("libfoo.so.1")).unwrap();
+        File::create(lib_dir.join("libfoo.so.1.2.3")).unwrap();
+        File::create(lib_dir.join("libbar.a")).unwrap();
+        File::create(lib_dir.join("libbaz.dylib")).unwrap();
+
+        // Version-in-base-name (must NOT be mangled)
+        File::create(lib_dir.join("libfoo-1.2.so")).unwrap();
+
+        let libs = discover_libs(temp.path());
+        assert!(
+            libs.contains(&"foo".to_string()),
+            "foo should be discovered"
+        );
+        assert!(
+            libs.contains(&"bar".to_string()),
+            "bar should be discovered"
+        );
+        assert!(
+            libs.contains(&"baz".to_string()),
+            "baz should be discovered"
+        );
+        assert!(
+            libs.contains(&"foo-1.2".to_string()),
+            "foo-1.2 should preserve version in base name"
+        );
     }
 }

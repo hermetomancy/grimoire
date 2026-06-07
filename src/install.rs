@@ -6,10 +6,10 @@
 //! renames, rolling back the active profile and state on failure (AGENTS.md §4). `--locked` constrains
 //! resolution to the lockfile's recorded versions and hashes for a reproducible reinstall.
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use semver::Version;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
@@ -206,7 +206,7 @@ pub(crate) fn install_store_only(
         "validating archive paths ({})",
         archive_path.display()
     ));
-    validate_archive_paths(archive_path)?;
+    archive::validate_archive_paths(archive_path)?;
 
     status("reading package metadata");
     let metadata = inspect_archive(archive_path)?;
@@ -231,7 +231,7 @@ pub(crate) fn install_store_only(
     extract_archive(archive_path, &staging_dir)?;
 
     status("validating extracted files");
-    validate_bins(&metadata, &staging_dir)?;
+    validate_bins(&metadata, &paths::target_triple(), &staging_dir)?;
 
     // Everything from here mutates shared install state. Stage each step against a
     // transaction so that a failure restores the previously installed version.
@@ -245,6 +245,7 @@ pub(crate) fn install_store_only(
         &mut tx,
         &root,
         &metadata,
+        &paths::target_triple(),
         &archive_hash,
         &store_hash,
         &package_dir.to_string_lossy(),
@@ -281,14 +282,23 @@ pub(crate) fn install_store_only(
 /// Missing deps are resolved through the solver and installed from substitutes or built from source.
 /// Already-installed packages are reused.
 pub(crate) fn ensure_build_deps_installed(deps: &[Dependency]) -> Result<()> {
+    let mut building = HashSet::new();
+    ensure_build_deps_installed_inner(deps, &mut building)
+}
+
+fn ensure_build_deps_installed_inner(
+    deps: &[Dependency],
+    building: &mut HashSet<String>,
+) -> Result<()> {
     if deps.is_empty() {
         return Ok(());
     }
 
     let mut installed = installed_versions()?;
+    let states = installed_states().unwrap_or_default();
     let missing: Vec<Dependency> = deps
         .iter()
-        .filter(|dep| find_dep_state(&installed_states().unwrap_or_default(), &dep.name).is_none())
+        .filter(|dep| find_dep_state(&states, &dep.name).is_none())
         .cloned()
         .collect();
 
@@ -303,6 +313,9 @@ pub(crate) fn ensure_build_deps_installed(deps: &[Dependency]) -> Result<()> {
     for step in plan.steps {
         if installed.contains_key(&step.name) {
             continue;
+        }
+        if !building.insert(step.name.clone()) {
+            bail!("build dependency cycle detected involving `{}`", step.name);
         }
 
         let result = if let Some(sub) = step.substitutes.first() {
@@ -331,7 +344,7 @@ pub(crate) fn ensure_build_deps_installed(deps: &[Dependency]) -> Result<()> {
             )
             .with_context(|| format!("apply addendums to {}", rune.display()))?;
             let build_deps = metadata.deps.build_for(&paths::target_triple());
-            ensure_build_deps_installed(&build_deps)
+            ensure_build_deps_installed_inner(&build_deps, building)
                 .with_context(|| format!("install build dependencies for `{}`", step.name))?;
             let env = build::build_env_for_target(
                 build_dep_bin_dirs(&build_deps)?,
@@ -356,6 +369,7 @@ pub(crate) fn ensure_build_deps_installed(deps: &[Dependency]) -> Result<()> {
         let installed_archive = result
             .with_context(|| format!("store-only install `{}` {}", step.name, step.version))?;
         installed.insert(installed_archive.name, installed_archive.version);
+        building.remove(&step.name);
     }
 
     Ok(())
@@ -784,6 +798,11 @@ pub(crate) fn find_dep_state<'a>(
         .iter()
         .find(|state| state.name == name)
         .or_else(|| states.iter().find(|state| state.bins.contains_key(name)))
+        .or_else(|| {
+            states
+                .iter()
+                .find(|state| state.provides.contains(&name.to_owned()))
+        })
 }
 
 pub(crate) fn build_dep_bin_dirs(deps: &[Dependency]) -> Result<Vec<PathBuf>> {
@@ -807,14 +826,16 @@ pub(crate) fn build_dep_bin_dirs(deps: &[Dependency]) -> Result<Vec<PathBuf>> {
     Ok(dirs)
 }
 
-/// Computes additional environment variables (PKG_CONFIG_PATH, CPATH, LIBRARY_PATH, and
-/// `<DEP>_PREFIX` for each build dep) from the installed build dependencies so that compilers
-/// and pkg-config can find headers and libraries.
+/// Computes additional environment variables from installed build dependencies so build systems
+/// can discover only declared dependency prefixes. The runtime sandbox clears host discovery
+/// variables first; these values are the managed search roots layered back in.
 pub(crate) fn build_dep_env_vars(deps: &[Dependency]) -> Result<Vec<(String, String)>> {
     let states = installed_states()?;
+    let mut prefixes = Vec::new();
     let mut pkg_config_paths = Vec::new();
     let mut cpaths = Vec::new();
     let mut library_paths = Vec::new();
+    let mut aclocal_paths = Vec::new();
     let mut prefix_vars = Vec::new();
 
     for dep in deps {
@@ -822,9 +843,16 @@ pub(crate) fn build_dep_env_vars(deps: &[Dependency]) -> Result<Vec<(String, Str
             continue;
         };
         let store = PathBuf::from(&state.store_path);
+        if !prefixes.contains(&store) {
+            prefixes.push(store.clone());
+        }
         let pkgconfig = store.join("lib/pkgconfig");
         if pkgconfig.is_dir() && !pkg_config_paths.contains(&pkgconfig) {
             pkg_config_paths.push(pkgconfig);
+        }
+        let share_pkgconfig = store.join("share/pkgconfig");
+        if share_pkgconfig.is_dir() && !pkg_config_paths.contains(&share_pkgconfig) {
+            pkg_config_paths.push(share_pkgconfig);
         }
         let include = store.join("include");
         if include.is_dir() && !cpaths.contains(&include) {
@@ -834,37 +862,42 @@ pub(crate) fn build_dep_env_vars(deps: &[Dependency]) -> Result<Vec<(String, Str
         if lib.is_dir() && !library_paths.contains(&lib) {
             library_paths.push(lib);
         }
+        let aclocal = store.join("share/aclocal");
+        if aclocal.is_dir() && !aclocal_paths.contains(&aclocal) {
+            aclocal_paths.push(aclocal);
+        }
         let env_name = format!("{}_PREFIX", dep.name.to_ascii_uppercase().replace('-', "_"));
         prefix_vars.push((env_name, state.store_path.clone()));
     }
 
     let mut env = Vec::new();
+    if !prefixes.is_empty() {
+        env.push(("CMAKE_PREFIX_PATH".to_string(), join_paths_lossy(&prefixes)));
+    }
     if !pkg_config_paths.is_empty() {
-        env.push((
-            "PKG_CONFIG_PATH".to_string(),
-            std::env::join_paths(&pkg_config_paths)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-        ));
+        let pkg_config_path = join_paths_lossy(&pkg_config_paths);
+        env.push(("PKG_CONFIG_PATH".to_string(), pkg_config_path.clone()));
+        env.push(("PKG_CONFIG_LIBDIR".to_string(), pkg_config_path));
     }
     if !cpaths.is_empty() {
-        env.push((
-            "CPATH".to_string(),
-            std::env::join_paths(&cpaths)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-        ));
+        env.push(("CPATH".to_string(), join_paths_lossy(&cpaths)));
     }
     if !library_paths.is_empty() {
-        env.push((
-            "LIBRARY_PATH".to_string(),
-            std::env::join_paths(&library_paths)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-        ));
+        let library_path = join_paths_lossy(&library_paths);
+        env.push(("LIBRARY_PATH".to_string(), library_path.clone()));
+        env.push(("CMAKE_LIBRARY_PATH".to_string(), library_path));
+    }
+    if !aclocal_paths.is_empty() {
+        env.push(("ACLOCAL_PATH".to_string(), join_paths_lossy(&aclocal_paths)));
     }
     env.extend(prefix_vars);
     Ok(env)
+}
+
+fn join_paths_lossy(paths: &[PathBuf]) -> String {
+    std::env::join_paths(paths)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 pub fn remove(args: PackageArg) -> Result<()> {
@@ -910,7 +943,16 @@ fn remove_one(name: &str) -> Result<PackageState> {
 
     // Move the package dir aside rather than deleting outright, so a later failure can restore
     // it; the backup is dropped only once the whole removal commits.
+    let store_root = paths::store_root()?;
     let package_dir = PathBuf::from(&state.store_path);
+    if !package_dir.starts_with(&store_root) {
+        bail!(
+            "package `{}` store path `{}` is outside the store root `{}`; refusing to remove",
+            state.name,
+            package_dir.display(),
+            store_root.display()
+        );
+    }
     let backup = backup_path(&package_dir)?;
     let had_package = package_dir.exists();
     if had_package {
@@ -956,12 +998,19 @@ fn autoremove_orphans(initial: Vec<String>) -> Result<()> {
             continue;
         }
         let states = installed_states()?;
-        if !states.iter().any(|state| state.name == name) {
+        let Some(name_state) = states.iter().find(|s| s.name == name) else {
             continue;
-        }
-        let still_needed = states
-            .iter()
-            .any(|other| other.name != name && other.runtime_deps.iter().any(|dep| dep == &name));
+        };
+        let still_needed = states.iter().any(|other| {
+            if other.name == name {
+                return false;
+            }
+            other.runtime_deps.iter().any(|dep| {
+                dep == &name
+                    || name_state.bins.contains_key(dep)
+                    || name_state.provides.iter().any(|p| p == dep)
+            })
+        });
         if still_needed {
             continue;
         }
@@ -1042,79 +1091,44 @@ fn resolve_store_dir(
 /// be nested *under* a symlink (which would let extraction write through the link). Hard links
 /// are still rejected outright. With these guarantees the subsequent `unpack` into a fresh
 /// staging directory cannot be lured outside the destination.
-fn validate_archive_paths(path: &Path) -> Result<()> {
-    let file = File::open(path)?;
-    let decoder = zstd::stream::read::Decoder::new(file)?;
-    let mut archive = tar::Archive::new(decoder);
-    let mut bad = Vec::new();
-    let mut members: Vec<PathBuf> = Vec::new();
-    let mut symlinks: BTreeSet<PathBuf> = BTreeSet::new();
-
-    for entry in archive.entries()? {
-        let entry = entry?;
-        let member_path = entry.path()?.into_owned();
-        let member = member_path.display().to_string();
-        if !archive::validate_archive_member_path(&member_path) {
-            bad.push(member);
-            continue;
-        }
-
-        let entry_type = entry.header().entry_type();
-        if entry_type.is_hard_link() {
-            bail!("archive contains a hard link, which is not accepted yet: {member}");
-        }
-        if entry_type.is_symlink() {
-            let target = entry
-                .link_name()?
-                .ok_or_else(|| anyhow!("archive symlink `{member}` is missing a target"))?;
-            if !archive::validate_symlink_target(&member_path, &target) {
-                bail!(
-                    "archive symlink `{member}` has a target that escapes the package: {}",
-                    target.display()
-                );
-            }
-            symlinks.insert(member_path.clone());
-        }
-        members.push(member_path);
-    }
-
-    if !bad.is_empty() {
-        bail!("archive contains unsafe paths: {}", bad.join(", "));
-    }
-
-    // A member nested under a symlink would be extracted *through* that link; reject it so the
-    // validated targets are the only paths `unpack` can ever follow.
-    if !symlinks.is_empty() {
-        for member in &members {
-            if let Some(ancestor) = member
-                .ancestors()
-                .skip(1)
-                .find(|ancestor| symlinks.contains(*ancestor))
-            {
-                bail!(
-                    "archive member `{}` is nested under symlink `{}`",
-                    member.display(),
-                    ancestor.display()
-                );
-            }
-        }
-    }
-
-    Ok(())
-}
-
 fn extract_archive(path: &Path, destination: &Path) -> Result<()> {
     let file = File::open(path)?;
     let decoder = zstd::stream::read::Decoder::new(file)?;
     let mut archive = tar::Archive::new(decoder);
     archive.unpack(destination)?;
+    sanitize_permissions(destination)
+        .with_context(|| format!("sanitize permissions in {}", destination.display()))?;
     Ok(())
 }
 
-fn validate_bins(metadata: &PackageMetadata, package_dir: &Path) -> Result<()> {
-    for (name, path) in &metadata.bins {
-        validate_relative_package_path(path, &format!("bin `{name}`"))?;
-        let bin_path = package_dir.join(path);
+/// Strips setuid, setgid, and sticky bits from every regular file under `dir`.
+fn sanitize_permissions(dir: &Path) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.is_file() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = metadata.permissions();
+                let mode = perms.mode();
+                if mode & 0o7000 != 0 {
+                    perms.set_mode(mode & !0o7000);
+                    fs::set_permissions(&path, perms)?;
+                }
+            }
+        } else if metadata.is_dir() {
+            sanitize_permissions(&path)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_bins(metadata: &PackageMetadata, target: &str, package_dir: &Path) -> Result<()> {
+    for (name, path) in metadata.bins_for(target) {
+        validate_relative_package_path(&path, &format!("bin `{name}`"))?;
+        let bin_path = package_dir.join(&path);
         if !bin_path.exists() {
             bail!("declared bin `{name}` points to missing file `{path}`");
         }
@@ -1176,6 +1190,7 @@ fn write_state(
     tx: &mut Transaction,
     root: &Path,
     metadata: &PackageMetadata,
+    target: &str,
     archive_hash: &str,
     store_hash: &str,
     store_path: &str,
@@ -1202,7 +1217,7 @@ fn write_state(
         archive_hash: archive_hash.to_owned(),
         store_hash: store_hash.to_owned(),
         store_path: store_path.to_owned(),
-        bins: metadata.bins.clone(),
+        bins: metadata.bins_for(target),
         runtime_deps: metadata
             .deps
             .runtime
@@ -1222,6 +1237,8 @@ fn write_state(
             .map(|(name, source)| (name.clone(), source.sha256.clone()))
             .collect(),
         held: previous_held,
+        provides: metadata.provides.clone(),
+        libs: metadata.libs.clone(),
     };
 
     // Capture the prior state so a later failure can restore it.

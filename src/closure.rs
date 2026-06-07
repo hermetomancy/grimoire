@@ -120,11 +120,15 @@ impl Walker {
         }
         let metadata = self.metadata(rune)?;
         self.stack.push(name.to_string());
-        let mut dep_hashes = Vec::with_capacity(metadata.deps.runtime.len());
-        for dep in &metadata.deps.runtime {
-            dep_hashes.push(self.of_name(&dep.name)?);
-        }
+        let dep_hashes_result: Result<Vec<String>> = (|| {
+            let mut dep_hashes = Vec::with_capacity(metadata.deps.runtime.len());
+            for dep in &metadata.deps.runtime {
+                dep_hashes.push(self.of_name(&dep.name)?);
+            }
+            Ok(dep_hashes)
+        })();
         self.stack.pop();
+        let dep_hashes = dep_hashes_result?;
 
         let rune_bytes =
             std::fs::read(rune).with_context(|| format!("read rune {}", rune.display()))?;

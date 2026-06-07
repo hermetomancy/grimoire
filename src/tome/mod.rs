@@ -17,6 +17,7 @@ use std::{
 pub(crate) mod git;
 
 use crate::{
+    archive,
     cli::{TomeAddArgs, TomeBuildArgs, TomeInitArgs, TomeRemoveArgs, TomeRuneArgs, TomeUpdateArgs},
     install,
     model::{
@@ -192,6 +193,7 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
         &BuildRunesConfig {
             root,
             dist_dir: &dist_dir,
+            index_path: &index_path,
             all: args.all,
             bootstrap: args.bootstrap,
             target: args.target.as_deref(),
@@ -200,7 +202,6 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
         &rune_names,
         &mut catalog,
     )?;
-    nuon_io::write_nuon(&index_path, &catalog.to_value())?;
 
     report(&format!("registered in {}", index_path.display()));
     report(&format!(
@@ -213,6 +214,7 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
 struct BuildRunesConfig<'a> {
     root: &'a Path,
     dist_dir: &'a Path,
+    index_path: &'a Path,
     all: bool,
     bootstrap: bool,
     target: Option<&'a str>,
@@ -259,6 +261,8 @@ fn build_runes(
                 .with_context(|| format!("store-only install of {}", entry.name))?;
         }
         catalog.upsert(store_hash, entry);
+        nuon_io::write_nuon(config.index_path, &catalog.to_value())
+            .with_context(|| format!("update index {}", config.index_path.display()))?;
     }
     Ok(())
 }
@@ -302,6 +306,8 @@ fn build_rune_into(
         archive: archive_file.to_owned(),
         archive_hash,
         runtime_deps: metadata.deps.runtime.clone(),
+        provides: result.discovered_bins.keys().cloned().collect(),
+        libs: result.libs.clone(),
     };
     Ok((result.store_hash, entry, result.archive))
 }
@@ -338,6 +344,9 @@ fn rebuild_index(dist_dir: &Path) -> Result<PackageIndex> {
 
 /// Reads an existing archive and produces the `(store_hash, IndexEntry)` that would describe it.
 fn read_archive_index_entry(path: &Path) -> Result<(String, IndexEntry)> {
+    archive::validate_archive_paths(path)
+        .with_context(|| format!("validate archive {}", path.display()))?;
+
     let file = fs::File::open(path).with_context(|| format!("open archive {}", path.display()))?;
     let decoder = zstd::stream::read::Decoder::new(file)
         .with_context(|| format!("decode archive {}", path.display()))?;
@@ -402,6 +411,8 @@ fn read_archive_index_entry(path: &Path) -> Result<(String, IndexEntry)> {
             archive: archive_name,
             archive_hash,
             runtime_deps: metadata.deps.runtime,
+            provides: metadata.provides,
+            libs: metadata.libs,
         },
     ))
 }
@@ -535,8 +546,6 @@ fn rune_template(name: &str, version: &str) -> String {
   name: "{NAME}"
   version: "{VERSION}"
   summary: "TODO: one-line summary of {NAME}"
-  targets: ["linux-x86_64-gnu" "linux-x86_64-musl" "linux-aarch64-gnu" "linux-aarch64-musl" "macos-x86_64-darwin" "macos-aarch64-darwin" "freebsd-x86_64-unknown" "freebsd-aarch64-unknown"]
-
   # Declare sources here; each is fetched and checksum-verified before `build` runs.
   # sources: {
   #   main: {
@@ -550,8 +559,6 @@ fn rune_template(name: &str, version: &str) -> String {
     build: {}
     runtime: []
   }
-
-  bins: { {NAME}: "bin/{NAME}" }
 }
 
 export def build [ctx] {
@@ -687,6 +694,13 @@ pub fn find_tome_for_path(path: &std::path::Path) -> Result<Option<TomeState>> {
         .with_context(|| format!("canonicalize {}", path.display()))?;
     for tome in load_tomes()? {
         let cache = sync_common::cache_path("tomes", &tome.name)?;
+        let cache = if cache.exists() {
+            cache
+                .canonicalize()
+                .with_context(|| format!("canonicalize tome cache {}", cache.display()))?
+        } else {
+            cache
+        };
         if canonical.starts_with(&cache) {
             return Ok(Some(tome));
         }
