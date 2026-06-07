@@ -150,18 +150,19 @@ fn mutates_install_root(command: &Command) -> bool {
         | Command::Switch(_)
         | Command::CollectGarbage(_)
         | Command::DeleteGeneration(_) => true,
-        Command::Tome { command } => matches!(
-            command,
-            TomeCommand::Add(_) | TomeCommand::Update(_) | TomeCommand::Remove(_)
-        ),
+        Command::Tome { command } => match command {
+            TomeCommand::Add(_) | TomeCommand::Update(_) | TomeCommand::Remove(_) => true,
+            TomeCommand::Build(args) => args.all,
+            _ => false,
+        },
         Command::Addendum { command } => matches!(
             command,
             cli::AddendumCommand::Add(_)
                 | cli::AddendumCommand::Update(_)
                 | cli::AddendumCommand::Remove(_)
         ),
-        Command::Build(_)
-        | Command::List
+        Command::Build(_) => true,
+        Command::List
         | Command::Doctor
         | Command::Search(_)
         | Command::Info(_)
@@ -186,6 +187,12 @@ fn format_timestamp(ts: u64) -> String {
     let ss = rem % 60;
 
     let mut year = 1970u64;
+    // A 400-year Gregorian cycle has exactly 146097 days. Process in large
+    // chunks so that timestamps near u64::MAX do not loop billions of times.
+    const DAYS_IN_400_YEARS: u64 = 146097;
+    let cycles = days / DAYS_IN_400_YEARS;
+    year += cycles * 400;
+    days -= cycles * DAYS_IN_400_YEARS;
     loop {
         let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
         let year_days = if is_leap { 366 } else { 365 };

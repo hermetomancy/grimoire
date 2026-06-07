@@ -10,6 +10,7 @@
 use anyhow::{Context, Result, bail};
 use fs4::fs_std::FileExt;
 use std::fs::{self, File, OpenOptions};
+use std::io::{Seek, Write};
 
 use crate::paths;
 
@@ -29,7 +30,7 @@ pub fn acquire() -> Result<InstallRootGuard> {
     let root = paths::install_root()?;
     fs::create_dir_all(&root).with_context(|| format!("create install root {}", root.display()))?;
     let path = root.join(LOCK_FILE_NAME);
-    let file = OpenOptions::new()
+    let mut file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
@@ -57,7 +58,13 @@ pub fn acquire() -> Result<InstallRootGuard> {
 
     // Stamp our identity into the file so a contending process can name us in its error.
     // Best-effort: we already hold the lock, so a write failure is not fatal.
-    let _ = fs::write(&path, format!("pid {}", std::process::id()));
+    // Write through the already-opened fd to avoid a symlink TOCTOU race.
+    let _ = (|| {
+        file.rewind().ok()?;
+        file.set_len(0).ok()?;
+        file.write_all(format!("pid {}", std::process::id()).as_bytes())
+            .ok()
+    })();
 
     Ok(InstallRootGuard { _file: file })
 }
