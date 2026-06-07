@@ -142,6 +142,67 @@ supported target. Current status:
 Add `cmake` and `python3` to `core` so no non-POSIX host tools are required
 for bootstrap. Removes the need for `host_tool_dirs()`.
 
+### 6. Security and correctness audit fixes (post-subagent review)
+
+Items identified during the comprehensive subagent audit that remain unfixed.
+
+#### High impact
+
+- **Archive TOCTOU (validation → extraction race)**  
+  `src/install.rs:209,231` and `src/build.rs:486-494` — `validate_archive_paths` opens the archive, then `extract_archive` opens it again. A local attacker with cache write access can swap the file between the two opens. Fix: stream validation and extraction in a single pass, or copy to a private temp file before extracting.
+
+- **Source archive TOCTOU + missing nested-under-symlink check**  
+  `src/build.rs:486-494` and `src/build.rs:509-531` — Same double-open race for source archives. Additionally, `validate_tar_entries` does not check whether a later member is nested under an earlier symlink (the binary validator does; the source validator does not).
+
+- **`setup_linux` / `setup_macos` chown TOCTOU**  
+  `src/setup.rs:35-68` and `src/setup.rs:75-90` — Between `path.exists()` and `chown_path(path)`, an attacker can replace `/grm` with a symlink. `std::os::unix::fs::chown` follows symlinks; there's no `lchown` in std.
+
+- **`is_writable` follows symlinks**  
+  `src/setup.rs:137-145` — The probe file is created via the symlink target, allowing arbitrary file creation as a side effect of the writability check.
+
+- **`closure.rs::store_hash_for_rune_with_deps` skips signature verification**  
+  `src/closure.rs:45-82` — The solver calls this directly on resolved runes. If signature verification is required by the tome, this codepath bypasses it.
+
+- **`tome/mod.rs::build_runes` target-blind skip logic**  
+  `src/tome/mod.rs:230-243` — When checking if a rune was already built, it looks for *any* existing catalog entry with the same name. If the catalog contains entries for multiple targets, it may skip the current target because a different-target archive exists.
+
+#### Medium impact
+
+- **Profile generation hard links fail across filesystems**  
+  `src/profile.rs:473-475` / `src/profile.rs:589` — `clone_or_hard_link` tries CoW clone, then hard link. If `/grm/store` and `/grm/profiles` are on separate mounts, both fail and `create_generation` bails with no fallback to file copy.
+
+- **`archive/pack.rs::append_file` loads entire files into memory**  
+  `src/archive/pack.rs:178-181` — `read_to_end` buffers the whole file. Large debug info or static libraries could cause OOM during `grm tome build`.
+
+- **Progress spinner thread leak on panic**  
+  `src/progress.rs:178-193` — The spinner thread is not a daemon. If the main thread panics, the process hangs indefinitely because the spinner thread keeps the process alive.
+
+- **`CapabilityIndex` only harvests capabilities from `bins`, not `provides`**  
+  `src/solve.rs:97-111` — Index entries can declare non-binary capabilities via `provides`, but source runes cannot because `record_capabilities_from_rune` only looks at `bins_for(target)`.
+
+#### Low impact
+
+- **`archive/pack.rs::append_dir` hardcodes `0o755`**  
+  Directory permissions from the build are lost.
+
+- **`archive/pack.rs::relative_destdir_prefix` silently strips `..`**  
+  `RootDir`, `Prefix`, and `ParentDir` components are all dropped silently.
+
+- **`find_dep_state` allocates `String` for `provides` lookup**  
+  Minor allocation on every orphan check.
+
+- **`rune_names_ordered` only sorts initial seed nodes**  
+  Nodes that become ready later are appended in insertion order.
+
+- **`fetch.rs` creates a new HTTP agent per request**  
+  Wastes TCP/TLS handshakes.
+
+- **`install_store_only` reads the archive 3 times**  
+  Hash verification, path validation, metadata inspection, and extraction each open the archive independently.
+
+- **`doctor.rs` missing health checks**  
+  Doesn't detect broken `profiles/current` symlink, whitespace in install root, stale `.grimoire-old` backups, corrupt state files, or duplicate bin collisions.
+
 ## Deletion criteria
 
 When all items in **Remaining** are complete and reflected in the design doc,
