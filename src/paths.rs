@@ -112,6 +112,9 @@ pub fn fixed_store_setup_instructions() -> Option<String> {
          \tsudo mkdir /grm\n",
         parent.display()
     ));
+
+    #[cfg(target_os = "freebsd")]
+    return None;
 }
 
 pub fn store_path(hash: &str, name: &str, version: &str) -> Result<PathBuf> {
@@ -142,20 +145,20 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn override_takes_precedence_over_home() {
+    fn override_takes_precedence_over_home() -> Result<()> {
         let root = resolve_install_root(
             Some(OsString::from("/tmp/custom-root")),
             Some(PathBuf::from("/home/user")),
-        )
-        .expect("override resolves");
+        )?;
         assert_eq!(root, Path::new("/tmp/custom-root"));
+        Ok(())
     }
 
     #[test]
-    fn defaults_to_dot_grimoire_under_home() {
-        let root =
-            resolve_install_root(None, Some(PathBuf::from("/home/user"))).expect("home resolves");
+    fn defaults_to_dot_grimoire_under_home() -> Result<()> {
+        let root = resolve_install_root(None, Some(PathBuf::from("/home/user")))?;
         assert_eq!(root, Path::new("/home/user/.grimoire"));
+        Ok(())
     }
 
     #[test]

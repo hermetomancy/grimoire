@@ -2,17 +2,18 @@
 //! state — package state, indexes, the lockfile — is NUON, parsed to and serialized from
 //! `nu_protocol::Value` here so the data layer stays declarative and inert (AGENTS.md §3).
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use nu_protocol::{Value, engine::EngineState};
 use std::{fs, io::Write, path::Path};
 
 pub fn read_nuon(path: &Path) -> Result<Value> {
-    let input = fs::read_to_string(path)?;
+    let input =
+        fs::read_to_string(path).with_context(|| format!("read NUON from {}", path.display()))?;
     parse_nuon(&input)
 }
 
 pub fn parse_nuon(input: &str) -> Result<Value> {
-    nuon::from_nuon(input, None).map_err(|err| anyhow!(err.to_string()))
+    nuon::from_nuon(input, None).map_err(|err| anyhow!("parse NUON: {err}"))
 }
 
 /// Writes NUON state atomically: the contents are written to a temporary file in the
@@ -41,7 +42,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_grimoire_package_metadata() {
+    fn parses_grimoire_package_metadata() -> Result<()> {
         let value = parse_nuon(
             r#"{
                 format: 1
@@ -50,8 +51,7 @@ mod tests {
                 target: macos-aarch64-darwin
                 bins: { hello: "bin/hello" }
             }"#,
-        )
-        .expect("valid package NUON");
+        )?;
 
         let Value::Record { val, .. } = value else {
             panic!("expected record");
@@ -62,5 +62,6 @@ mod tests {
             Some("hello")
         );
         assert!(matches!(val.get("bins"), Some(Value::Record { .. })));
+        Ok(())
     }
 }

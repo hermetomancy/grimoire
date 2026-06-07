@@ -24,11 +24,11 @@ pub fn setup() -> Result<()> {
     #[cfg(target_os = "macos")]
     return setup_macos();
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     return setup_linux();
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn setup_linux() -> Result<()> {
     let path = Path::new("/grm");
 
