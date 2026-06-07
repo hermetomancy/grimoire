@@ -18,9 +18,8 @@ use crate::{
         validate_tome_url,
     },
     nu::nuon_io,
-    paths,
     progress::{report, status},
-    signing, tome,
+    signing, sync_common, tome,
 };
 
 const MANIFEST: &str = "addendum.nuon";
@@ -28,13 +27,13 @@ const MANIFEST: &str = "addendum.nuon";
 pub fn add(args: TomeAddArgs) -> Result<()> {
     validate_tome_url(&args.git_url)?;
     validate_tome_ref(&args.ref_name)?;
-    validate_local_addendum_source(&args.git_url)?;
+    sync_common::validate_local_source(&args.git_url, MANIFEST)?;
 
     let name = read_source_addendum_name(&args.git_url, &args.ref_name)?;
     validate_tome_name(&name)?;
     validate_local_addendum_if_available(&name, &args.git_url)?;
 
-    let state_dir = addendum_state_dir()?;
+    let state_dir = sync_common::state_dir("addendums")?;
     let state_path = state_dir.join(format!("{name}.nuon"));
     if state_path.exists() {
         bail!("addendum `{name}` already exists");
@@ -43,12 +42,12 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
     fs::create_dir_all(&state_dir)?;
     let state = AddendumState {
         name: name.clone(),
-        url: resolve_addendum_source_url(&args.git_url)?,
+        url: sync_common::resolve_source_url(&args.git_url, MANIFEST)?,
         ref_name: args.ref_name,
         checked_ref: None,
         checked_commit: None,
         addendum: None,
-        signer_pubkeys: Vec::new(),
+        signer_pubkeys: args.signer,
     };
     nuon_io::write_nuon(&state_path, &state.to_value())?;
     report(&format!("added addendum {name}"));
@@ -57,12 +56,12 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
 
 pub fn remove(args: TomeRemoveArgs) -> Result<()> {
     validate_tome_name(&args.name)?;
-    let state_path = addendum_state_dir()?.join(format!("{}.nuon", args.name));
+    let state_path = sync_common::state_dir("addendums")?.join(format!("{}.nuon", args.name));
     if !state_path.exists() {
         bail!("addendum `{}` is not configured", args.name);
     }
     fs::remove_file(state_path)?;
-    let cache_path = addendum_cache_path(&args.name)?;
+    let cache_path = sync_common::cache_path("addendums", &args.name)?;
     if cache_path.exists() {
         fs::remove_dir_all(cache_path)?;
     }
@@ -164,29 +163,19 @@ pub fn patched_package_metadata(
 }
 
 pub fn load_addendums() -> Result<Vec<AddendumState>> {
-    let state_dir = addendum_state_dir()?;
-    if !state_dir.exists() {
-        return Ok(Vec::new());
-    }
-
+    let state_dir = sync_common::state_dir("addendums")?;
     let mut states = Vec::new();
-    for entry in fs::read_dir(&state_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("nuon") {
-            continue;
-        }
+    for path in sync_common::list_state_files(&state_dir)? {
         states.push(
             AddendumState::from_value(nuon_io::read_nuon(&path)?)
                 .with_context(|| format!("read addendum state {}", path.display()))?,
         );
     }
-    states.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(states)
 }
 
 fn ensure_addendum_cache(state: &AddendumState) -> Result<PathBuf> {
-    let cache_path = addendum_cache_path(&state.name)?;
+    let cache_path = sync_common::cache_path("addendums", &state.name)?;
     if !cache_path.join(MANIFEST).exists() {
         sync_addendum_cache(state)?;
     }
@@ -194,26 +183,27 @@ fn ensure_addendum_cache(state: &AddendumState) -> Result<PathBuf> {
 }
 
 pub(crate) fn sync_addendum_cache(state: &AddendumState) -> Result<()> {
-    let cache_dir = addendum_cache_dir()?;
-    let cache_path = addendum_cache_path(&state.name)?;
+    let cache_dir = sync_common::cache_dir("addendums")?;
+    let cache_path = sync_common::cache_path("addendums", &state.name)?;
     fs::create_dir_all(&cache_dir)?;
     let temp = tempfile::Builder::new()
         .prefix("grimoire-addendum-")
         .tempdir_in(&cache_dir)?;
     let staged = temp.path().join("cache");
 
-    if is_local_addendum_source(&state.url) {
-        let source = PathBuf::from(&state.url)
-            .canonicalize()
-            .with_context(|| format!("resolve addendum source {}", state.url))?;
-        status(&format!("copying local addendum ({})", state.name));
-        copy_dir_all(&source, &staged)?;
-    } else {
-        tome::git::clone(&state.url, &state.ref_name, &staged)?;
+    if !sync_common::copy_local_source(&state.name, &state.url, &staged, MANIFEST)? {
+        status(&format!(
+            "cloning addendum ({}) ref ({})",
+            state.name, state.ref_name
+        ));
+        tome::git::clone(&state.url, &state.ref_name, &staged)
+            .with_context(|| format!("could not sync addendum `{}`", state.name))?;
     }
 
     validate_staged_addendum_cache(state, &staged)?;
-    promote_addendum_cache(state, &staged, &cache_path)
+    sync_common::promote_cache(&staged, &cache_path, || {
+        record_addendum_sync_state(state, &cache_path)
+    })
 }
 
 fn validate_staged_addendum_cache(state: &AddendumState, cache_path: &Path) -> Result<()> {
@@ -232,105 +222,24 @@ fn validate_addendum_cache(state: &AddendumState, manifest: &AddendumManifest) -
     Ok(())
 }
 
-fn promote_addendum_cache(state: &AddendumState, staged: &Path, cache_path: &Path) -> Result<()> {
-    let backup = if cache_path.exists() {
-        let backup = addendum_cache_backup_path(cache_path)?;
-        remove_path_if_exists(&backup)?;
-        fs::rename(cache_path, &backup)?;
-        Some(backup)
-    } else {
-        None
-    };
-
-    if let Err(err) = fs::rename(staged, cache_path) {
-        if let Some(backup) = &backup {
-            let _ = fs::rename(backup, cache_path);
-        }
-        return Err(err)
-            .with_context(|| format!("promote addendum cache {}", cache_path.display()));
-    }
-
-    if let Some(backup) = backup {
-        let _ = fs::remove_dir_all(backup);
-    }
-    record_addendum_sync_state(state, cache_path)
-}
-
 fn record_addendum_sync_state(state: &AddendumState, cache_path: &Path) -> Result<()> {
     let manifest = read_manifest(cache_path)?;
     validate_addendum_cache(state, &manifest)?;
     let commit = tome::git::head_commit(cache_path)?;
     let mut state = load_addendum(&state.name).unwrap_or_else(|_| state.clone());
-    let signer_pubkeys =
-        capture_addendum_signer(&state, cache_path, &manifest, &state.signer_pubkeys)?;
+    let signer_pubkeys = sync_common::capture_signer(
+        "addendum",
+        &state.name,
+        &cache_path.join(MANIFEST),
+        &manifest.signers,
+        &state.signer_pubkeys,
+    )?;
     state.checked_ref = Some(state.ref_name.clone());
     state.checked_commit = commit;
     state.addendum = Some(manifest);
     state.signer_pubkeys = signer_pubkeys;
-    let state_path = addendum_state_dir()?.join(format!("{}.nuon", state.name));
+    let state_path = sync_common::state_dir("addendums")?.join(format!("{}.nuon", state.name));
     nuon_io::write_nuon(&state_path, &state.to_value())
-}
-
-/// Trust-on-first-use for addendum signing keys. Mirrors `tome::capture_signer` — the first sync
-/// pins whatever `signers` the manifest advertises after verifying a detached signature; later
-/// syncs must present the exact same set, or a signature from the currently pinned keys to rotate.
-fn capture_addendum_signer(
-    state: &AddendumState,
-    cache: &Path,
-    manifest: &AddendumManifest,
-    existing: &[String],
-) -> Result<Vec<String>> {
-    let advertised = manifest.signers.clone();
-
-    if existing.is_empty() && advertised.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    if !existing.is_empty() && advertised.is_empty() {
-        bail!(
-            "addendum `{}` previously advertised signers but no longer does; refusing. \
-             Remove and re-add the addendum to trust an unsigned manifest.",
-            state.name
-        );
-    }
-
-    if existing.is_empty() && !advertised.is_empty() {
-        let manifest_path = cache.join(MANIFEST);
-        if let Err(err) = signing::verify_detached(&manifest_path, &advertised) {
-            bail!(
-                "addendum `{}` manifest signature does not verify: {err}",
-                state.name
-            );
-        }
-        report(&format!(
-            "pinned {} signer(s) for addendum `{}` (trust on first use)",
-            advertised.len(),
-            state.name
-        ));
-        return Ok(advertised);
-    }
-
-    let sets_match =
-        existing.len() == advertised.len() && existing.iter().all(|k| advertised.contains(k));
-    if !sets_match {
-        let manifest_path = cache.join(MANIFEST);
-        if signing::verify_detached(&manifest_path, existing).is_ok() {
-            report(&format!(
-                "addendum `{}` rotated signing keys ({} -> {})",
-                state.name,
-                existing.len(),
-                advertised.len()
-            ));
-            return Ok(advertised);
-        }
-        bail!(
-            "addendum `{}` now advertises a different set of signing keys than the one pinned on \
-             first use; refusing. Remove and re-add the addendum to trust the new keys.",
-            state.name
-        );
-    }
-
-    Ok(existing.to_vec())
 }
 
 /// Verifies an addendum's detached signature (`addendum.nuon.minisig`) against the addendum's
@@ -346,7 +255,7 @@ pub fn verify_addendum(cache_path: &Path, state: &AddendumState) -> Result<()> {
 }
 
 fn load_addendum(name: &str) -> Result<AddendumState> {
-    let state_path = addendum_state_dir()?.join(format!("{name}.nuon"));
+    let state_path = sync_common::state_dir("addendums")?.join(format!("{name}.nuon"));
     if !state_path.exists() {
         bail!("addendum `{name}` is not configured");
     }
@@ -355,7 +264,7 @@ fn load_addendum(name: &str) -> Result<AddendumState> {
 }
 
 fn read_source_addendum_name(url: &str, ref_name: &str) -> Result<String> {
-    if is_local_addendum_source(url) {
+    if sync_common::is_local_source(url, MANIFEST) {
         return Ok(read_manifest(Path::new(url))?.name);
     }
 
@@ -374,34 +283,8 @@ fn read_manifest(root: &Path) -> Result<AddendumManifest> {
     )
 }
 
-fn is_local_addendum_source(url: &str) -> bool {
-    let path = Path::new(url);
-    path.is_dir() && path.join(MANIFEST).exists()
-}
-
-fn resolve_addendum_source_url(url: &str) -> Result<String> {
-    if !is_local_addendum_source(url) {
-        return Ok(url.to_owned());
-    }
-    let absolute = Path::new(url)
-        .canonicalize()
-        .with_context(|| format!("resolve local addendum source {url}"))?;
-    Ok(absolute.to_string_lossy().into_owned())
-}
-
-fn validate_local_addendum_source(url: &str) -> Result<()> {
-    let path = Path::new(url);
-    if path.exists() && path.is_dir() && !path.join(MANIFEST).exists() {
-        bail!(
-            "local addendum source is missing root {MANIFEST}: {}",
-            path.display()
-        );
-    }
-    Ok(())
-}
-
 fn validate_local_addendum_if_available(name: &str, url: &str) -> Result<()> {
-    if !is_local_addendum_source(url) {
+    if !sync_common::is_local_source(url, MANIFEST) {
         return Ok(());
     }
     let manifest = read_manifest(Path::new(url))?;
@@ -417,38 +300,4 @@ fn validate_local_addendum_if_available(name: &str, url: &str) -> Result<()> {
         },
         &manifest,
     )
-}
-
-fn copy_dir_all(source: &Path, destination: &Path) -> Result<()> {
-    crate::fs_util::copy_dir_all(source, destination, "addendum")
-}
-
-fn remove_path_if_exists(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path)?,
-        Ok(_) => fs::remove_file(path)?,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
-    }
-    Ok(())
-}
-
-fn addendum_state_dir() -> Result<PathBuf> {
-    Ok(paths::install_root()?.join("state").join("addendums"))
-}
-
-fn addendum_cache_dir() -> Result<PathBuf> {
-    Ok(paths::install_root()?.join("cache").join("addendums"))
-}
-
-fn addendum_cache_path(name: &str) -> Result<PathBuf> {
-    Ok(addendum_cache_dir()?.join(name))
-}
-
-fn addendum_cache_backup_path(cache_path: &Path) -> Result<PathBuf> {
-    let name = cache_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("addendum cache path should have a name")?;
-    Ok(cache_path.with_file_name(format!("{name}.grimoire-old")))
 }

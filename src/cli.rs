@@ -311,6 +311,10 @@ pub struct TomeAddArgs {
     /// Git ref (branch, tag, or commit) to track.
     #[arg(short = 'r', long = "ref", default_value = "main")]
     pub ref_name: String,
+    /// Pin a minisign public key (base64) for this tome, skipping trust-on-first-use.
+    /// May be given multiple times for multi-key setups.
+    #[arg(long = "signer", action = clap::ArgAction::Append)]
+    pub signer: Vec<String>,
 }
 
 #[derive(Debug, Args)]
