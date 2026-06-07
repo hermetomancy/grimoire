@@ -95,7 +95,7 @@ pub enum Command {
     /// any leftover transaction staging directories. Installed packages, profiles, state, tomes,
     /// addenda, and the lockfile are untouched; the next install will re-fetch what it needs.
     Clean,
-    /// Create the fixed Grimoire store directory (/grm on Unix, C:\grm on Windows).
+    /// Create the fixed Grimoire store directory (/grm on POSIX systems).
     /// On Linux this creates the directory and adjusts ownership. On macOS it registers
     /// the directory in /etc/synthetic.conf and prompts for a reboot.
     #[command(visible_alias = "st")]

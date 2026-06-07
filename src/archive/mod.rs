@@ -9,9 +9,10 @@ pub mod pack;
 use anyhow::{Result, bail};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeSet,
     fs::File,
     io::{BufReader, Read},
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
 
 /// Hard-fails unless `actual` matches `expected`. This is the single checkpoint for the
@@ -91,6 +92,70 @@ pub fn validate_symlink_target(link: &Path, target: &Path) -> bool {
         }
     }
     true
+}
+
+/// Validates every member path in a `.tar.zst` archive before extraction.
+/// Rejects traversal, absolute paths, Windows-style paths, hard links,
+/// escaping symlinks, and members nested under symlinks (AGENTS.md §5.2–§5.3).
+pub fn validate_archive_paths(path: &Path) -> Result<()> {
+    let file = File::open(path)?;
+    let decoder = zstd::stream::read::Decoder::new(file)?;
+    let mut archive = tar::Archive::new(decoder);
+    let mut bad = Vec::new();
+    let mut members: Vec<PathBuf> = Vec::new();
+    let mut symlinks: BTreeSet<PathBuf> = BTreeSet::new();
+
+    for entry in archive.entries()? {
+        let entry = entry?;
+        let member_path = entry.path()?.into_owned();
+        let member = member_path.display().to_string();
+        if !validate_archive_member_path(&member_path) {
+            bad.push(member);
+            continue;
+        }
+
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_hard_link() {
+            bail!("archive contains a hard link, which is not accepted yet: {member}");
+        }
+        if entry_type.is_symlink() {
+            let target = entry
+                .link_name()?
+                .ok_or_else(|| anyhow::anyhow!("archive symlink `{member}` is missing a target"))?;
+            if !validate_symlink_target(&member_path, &target) {
+                bail!(
+                    "archive symlink `{member}` has a target that escapes the package: {}",
+                    target.display()
+                );
+            }
+            symlinks.insert(member_path.clone());
+        }
+        members.push(member_path);
+    }
+
+    if !bad.is_empty() {
+        bail!("archive contains unsafe paths: {}", bad.join(", "));
+    }
+
+    // A member nested under a symlink would be extracted *through* that link; reject it so the
+    // validated targets are the only paths `unpack` can ever follow.
+    if !symlinks.is_empty() {
+        for member in &members {
+            if let Some(ancestor) = member
+                .ancestors()
+                .skip(1)
+                .find(|ancestor| symlinks.contains(*ancestor))
+            {
+                bail!(
+                    "archive member `{}` is nested under symlink `{}`",
+                    member.display(),
+                    ancestor.display()
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
