@@ -3695,6 +3695,109 @@ fn tome_build_all_builds_every_rune() {
 }
 
 #[test]
+fn tome_build_all_skips_non_matching_targets() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let workspace = TempDir::new().unwrap();
+    let tome_dir = workspace.path().join("targettome");
+    let tome_path = tome_dir.to_str().unwrap();
+
+    let init = run(root, &["tome", "init", "targettome", "--path", tome_path]);
+    assert_success(&init, "tome init");
+
+    fs::write(
+        tome_dir.join("runes").join("macosonly.rn"),
+        "export const package = {\n  name: 'macosonly'\n  version: '0.1.0'\n  targets: ['macos-aarch64-darwin']\n  sources: {}\n  deps: { build: {} runtime: [] }\n  bins: { macosonly: 'bin/macosonly' }\n}\n\nexport def build [ctx] {\n  let bin_dir = ($ctx.package_dir | path join 'bin')\n  mkdir $bin_dir\n  \"#!/usr/bin/env sh\\nprintf 'macosonly\\n'\" | save ($bin_dir | path join 'macosonly')\n}\n",
+    )
+    .unwrap();
+
+    fs::write(
+        tome_dir.join("runes").join("linuxonly.rn"),
+        "export const package = {\n  name: 'linuxonly'\n  version: '0.1.0'\n  targets: ['linux-x86_64-musl']\n  sources: {}\n  deps: { build: {} runtime: [] }\n  bins: { linuxonly: 'bin/linuxonly' }\n}\n\nexport def build [ctx] {\n  let bin_dir = ($ctx.package_dir | path join 'bin')\n  mkdir $bin_dir\n  \"#!/usr/bin/env sh\\nprintf 'linuxonly\\n'\" | save ($bin_dir | path join 'linuxonly')\n}\n",
+    )
+    .unwrap();
+
+    let build = run(root, &["tome", "build", "--all", "--path", tome_path]);
+    assert_success(&build, "tome build --all with target filtering");
+
+    let target = target_triple();
+    let dist = tome_dir.join("dist");
+
+    let current_is_macos = target.starts_with("macos-");
+    let current_is_linux = target.starts_with("linux-");
+
+    if current_is_macos {
+        assert!(
+            dist.join(format!("macosonly-0.1.0-{target}.tar.zst"))
+                .exists(),
+            "macosonly should be built on macos"
+        );
+        assert!(
+            !dist
+                .join(format!("linuxonly-0.1.0-{target}.tar.zst"))
+                .exists(),
+            "linuxonly should be skipped on macos"
+        );
+    } else if current_is_linux {
+        assert!(
+            dist.join(format!("linuxonly-0.1.0-{target}.tar.zst"))
+                .exists(),
+            "linuxonly should be built on linux"
+        );
+        assert!(
+            !dist
+                .join(format!("macosonly-0.1.0-{target}.tar.zst"))
+                .exists(),
+            "macosonly should be skipped on linux"
+        );
+    } else {
+        assert!(
+            !dist
+                .join(format!("macosonly-0.1.0-{target}.tar.zst"))
+                .exists(),
+            "macosonly should be skipped on non-macos"
+        );
+        assert!(
+            !dist
+                .join(format!("linuxonly-0.1.0-{target}.tar.zst"))
+                .exists(),
+            "linuxonly should be skipped on non-linux"
+        );
+    }
+
+    let index = fs::read_to_string(dist.join("index.nuon")).unwrap();
+    if current_is_macos {
+        assert!(
+            index.contains("macosonly"),
+            "index should contain macosonly"
+        );
+        assert!(
+            !index.contains("linuxonly"),
+            "index should not contain linuxonly"
+        );
+    } else if current_is_linux {
+        assert!(
+            index.contains("linuxonly"),
+            "index should contain linuxonly"
+        );
+        assert!(
+            !index.contains("macosonly"),
+            "index should not contain macosonly"
+        );
+    } else {
+        assert!(
+            !index.contains("macosonly"),
+            "index should not contain macosonly"
+        );
+        assert!(
+            !index.contains("linuxonly"),
+            "index should not contain linuxonly"
+        );
+    }
+}
+
+#[test]
 fn install_locked_reproduces_pinned_version() {
     let root = TempDir::new().unwrap();
     let root = root.path();
@@ -3802,6 +3905,17 @@ fn reject_bad_archive_path() {
 }
 
 #[test]
+fn reject_hard_link_archive() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let out = TempDir::new().unwrap();
+
+    let archive = make_hard_link_archive(out.path());
+    let install = run(root, &["install", archive.to_str().unwrap()]);
+    assert_failure_contains(&install, "hard link", "reject hard link archive");
+}
+
+#[test]
 fn reject_symlink_archive_with_escaping_target() {
     let root = TempDir::new().unwrap();
     let root = root.path();
@@ -3887,6 +4001,42 @@ fn source_build_preserves_internal_symlink() {
     let output = run_shim(root, "alias");
     assert_success(&output, "run alias shim");
     assert_eq!(stdout(&output).trim(), "real tool");
+}
+
+#[test]
+fn install_safe_symlink_archive() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let out = TempDir::new().unwrap();
+
+    let archive = make_safe_symlink_archive(out.path());
+    let install = run(root, &["install", archive.to_str().unwrap()]);
+    assert_success(&install, "install package with safe internal symlink");
+
+    let alias = installed_store_dir(root, "safelink")
+        .expect("safelink store dir")
+        .join("bin")
+        .join("alias");
+    let meta = fs::symlink_metadata(&alias).expect("alias exists");
+    assert!(
+        meta.file_type().is_symlink(),
+        "installed alias should remain a symlink"
+    );
+}
+
+#[test]
+fn reject_unsafe_symlink_archive() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let out = TempDir::new().unwrap();
+
+    let archive = make_unsafe_symlink_archive(out.path());
+    let install = run(root, &["install", archive.to_str().unwrap()]);
+    assert_failure_contains(
+        &install,
+        "escapes the package",
+        "reject unsafe symlink archive",
+    );
 }
 
 #[test]
@@ -4647,6 +4797,109 @@ fn make_bad_path_archive(out: &Path) -> PathBuf {
         .append(&header, &data[..])
         .expect("append raw entry");
 
+    finish_archive(builder);
+    archive
+}
+
+fn make_hard_link_archive(out: &Path) -> PathBuf {
+    fs::create_dir_all(out).unwrap();
+    let archive = out.join(format!("hardlink-0.1.0-{}.tar.zst", target_triple()));
+    let mut builder = open_archive(&archive);
+    let package_nuon = format!(
+        "{{format: 1, name: \"hardlink\", version: \"0.1.0\", target: \"{}\", bins: {{hardlink: \"bin/hardlink\"}}}}\n",
+        target_triple()
+    );
+    append_file(
+        &mut builder,
+        ".grimoire/package.nuon",
+        package_nuon.as_bytes(),
+        0o644,
+    );
+    append_file(
+        &mut builder,
+        ".grimoire/rune.rn",
+        b"export const package = {}\n",
+        0o644,
+    );
+
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Link);
+    header.set_size(0);
+    header.set_mode(0o644);
+    builder
+        .append_link(&mut header, "bin/hardlink", "bin/real")
+        .expect("append hard link");
+    finish_archive(builder);
+    archive
+}
+
+fn make_safe_symlink_archive(out: &Path) -> PathBuf {
+    fs::create_dir_all(out).unwrap();
+    let archive = out.join(format!("safelink-0.1.0-{}.tar.zst", target_triple()));
+    let mut builder = open_archive(&archive);
+    let package_nuon = format!(
+        "{{format: 1, name: \"safelink\", version: \"0.1.0\", target: \"{}\", store_path: \"{}\", bins: {{safelink: \"bin/real\", alias: \"bin/alias\"}}}}\n",
+        target_triple(),
+        fake_store_basename("safelink", "0.1.0")
+    );
+    append_file(
+        &mut builder,
+        ".grimoire/package.nuon",
+        package_nuon.as_bytes(),
+        0o644,
+    );
+    append_file(
+        &mut builder,
+        ".grimoire/rune.rn",
+        b"export const package = {}\n",
+        0o644,
+    );
+    append_file(
+        &mut builder,
+        "bin/real",
+        b"#!/usr/bin/env sh\nprintf 'real tool\n'",
+        0o755,
+    );
+
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Symlink);
+    header.set_size(0);
+    header.set_mode(0o777);
+    builder
+        .append_link(&mut header, "bin/alias", "real")
+        .expect("append safe symlink");
+    finish_archive(builder);
+    archive
+}
+
+fn make_unsafe_symlink_archive(out: &Path) -> PathBuf {
+    fs::create_dir_all(out).unwrap();
+    let archive = out.join(format!("unsafelink-0.1.0-{}.tar.zst", target_triple()));
+    let mut builder = open_archive(&archive);
+    let package_nuon = format!(
+        "{{format: 1, name: \"unsafelink\", version: \"0.1.0\", target: \"{}\", bins: {{unsafelink: \"bin/unsafelink\"}}}}\n",
+        target_triple()
+    );
+    append_file(
+        &mut builder,
+        ".grimoire/package.nuon",
+        package_nuon.as_bytes(),
+        0o644,
+    );
+    append_file(
+        &mut builder,
+        ".grimoire/rune.rn",
+        b"export const package = {}\n",
+        0o644,
+    );
+
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Symlink);
+    header.set_size(0);
+    header.set_mode(0o777);
+    builder
+        .append_link(&mut header, "bin/unsafelink", "../../etc/passwd")
+        .expect("append unsafe symlink");
     finish_archive(builder);
     archive
 }
