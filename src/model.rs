@@ -30,14 +30,22 @@ pub struct PackageMetadata {
     pub fixed_output: bool,
     #[serde(default)]
     pub summary: Option<String>,
+    /// Binaries this package provides, keyed by target pattern (`default`, OS name like `linux`,
+    /// or full triple like `linux-x86_64-musl`). Merged at resolution time: `default` → OS → exact.
     #[serde(default)]
-    pub bins: BTreeMap<String, String>,
+    pub bins: BTreeMap<String, BTreeMap<String, String>>,
     #[serde(default)]
     pub sources: BTreeMap<String, Source>,
     #[serde(default)]
     pub deps: Deps,
     #[serde(default)]
     pub build_flags: BTreeMap<String, String>,
+    /// Command names this package provides, discovered at build time.
+    #[serde(default)]
+    pub provides: Vec<String>,
+    /// Library base names (e.g. "foo" for libfoo.so) discovered at build time.
+    #[serde(default)]
+    pub libs: Vec<String>,
 }
 
 /// A declared source artifact for a source build. Every source must carry a checksum so
@@ -117,6 +125,13 @@ pub struct PackageState {
     /// `grm unhold`.
     #[serde(default)]
     pub held: bool,
+    /// Command names this package provides (discovered at build time). Used for capability
+    /// resolution when the solver reads from indexes or installed state.
+    #[serde(default)]
+    pub provides: Vec<String>,
+    /// Library base names (e.g. "foo" for libfoo.so) discovered at build time.
+    #[serde(default)]
+    pub libs: Vec<String>,
 }
 
 /// A binary package repository index (`index.nuon`): the set of pre-built archives a tome's
@@ -137,6 +152,13 @@ pub struct IndexEntry {
     pub archive_hash: String,
     #[serde(default)]
     pub runtime_deps: Vec<Dependency>,
+    /// Command names this package provides, discovered at build time and cached in the index
+    /// so consumers can resolve capabilities without reading the rune.
+    #[serde(default)]
+    pub provides: Vec<String>,
+    /// Library base names (e.g. "foo" for libfoo.so) discovered at build time.
+    #[serde(default)]
+    pub libs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,7 +224,7 @@ pub struct AddendumPatch {
     #[serde(default)]
     pub summary: Option<String>,
     #[serde(default)]
-    pub bins: Option<BTreeMap<String, String>>,
+    pub bins: Option<BTreeMap<String, BTreeMap<String, String>>>,
     #[serde(default)]
     pub sources: Option<BTreeMap<String, Source>>,
     #[serde(default)]
@@ -238,7 +260,8 @@ impl Deps {
     /// are kept so the resolver can intersect them.
     pub fn build_for(&self, target: &str) -> Vec<Dependency> {
         let mut deps: Vec<Dependency> = Vec::new();
-        for key in ["default", target] {
+        let os = target.split('-').next().unwrap_or("");
+        for key in ["default", os, target] {
             if let Some(entries) = self.build.get(key) {
                 for dep in entries {
                     if !dep.matches_platform(target) {
@@ -272,14 +295,9 @@ impl PackageMetadata {
         let fixed_output = optional_bool(&record, "fixed_output")?.unwrap_or(false);
         // A package with no executables (e.g. a library) is valid: `bins` defaults to empty.
         let bins = match record.get("bins") {
-            Some(value) => expect_string_map(value, "package field `bins`")?,
+            Some(value) => parse_target_conditional_bins(value, "package field `bins`")?,
             None => BTreeMap::new(),
         };
-
-        for (name, path) in &bins {
-            validate_bin_name(name)?;
-            validate_relative_package_path(path, &format!("bin `{name}`"))?;
-        }
 
         let sources = match record.get("sources") {
             Some(value) => parse_sources(value)?,
@@ -294,6 +312,8 @@ impl PackageMetadata {
             Some(value) => expect_string_map(value, "package field `build_flags`")?,
         };
         let targets = optional_string_list(&record, "targets")?;
+        let provides = optional_string_list(&record, "provides")?;
+        let libs = optional_string_list(&record, "libs")?;
 
         Ok(Self {
             name,
@@ -307,7 +327,26 @@ impl PackageMetadata {
             sources,
             deps,
             build_flags,
+            provides,
+            libs,
         })
+    }
+
+    /// Resolve the bin map for a concrete target: `default` → OS wildcard → exact triple,
+    /// with each level overriding the previous.
+    pub fn bins_for(&self, target: &str) -> BTreeMap<String, String> {
+        resolve_target_conditional(&self.bins, target)
+    }
+
+    /// Merge a build manifest into this metadata's `bins`. The manifest's entries override
+    /// existing entries for the same target key.
+    pub fn merge_build_manifest(&mut self, manifest: &BuildManifest) {
+        for (target_key, inner) in &manifest.bins {
+            self.bins
+                .entry(target_key.clone())
+                .or_default()
+                .extend(inner.clone());
+        }
     }
 
     pub fn archive_value(&self, target: &str, store_path: Option<&Path>) -> Value {
@@ -328,15 +367,20 @@ impl PackageMetadata {
             record.push("fixed_output", Value::bool(true, Span::unknown()));
         }
 
+        // Archives are target-specific, so write resolved bins under `default`.
         let mut bins = Record::new();
-        for (name, path) in &self.bins {
-            bins.push(name, Value::string(path, Span::unknown()));
+        let mut default = Record::new();
+        for (name, path) in self.bins_for(target) {
+            default.push(&name, Value::string(&path, Span::unknown()));
         }
+        bins.push("default", Value::record(default, Span::unknown()));
         record.push("bins", Value::record(bins, Span::unknown()));
 
         if let Some(summary) = &self.summary {
             record.push("summary", Value::string(summary, Span::unknown()));
         }
+        record.push("provides", string_list_value(&self.provides));
+        record.push("libs", string_list_value(&self.libs));
 
         let mut sources = Record::new();
         for (name, source) in &self.sources {
@@ -363,7 +407,12 @@ impl PackageMetadata {
             self.summary = Some(summary.clone());
         }
         if let Some(bins) = &patch.bins {
-            self.bins.extend(bins.clone());
+            for (target_key, inner) in bins {
+                self.bins
+                    .entry(target_key.clone())
+                    .or_default()
+                    .extend(inner.clone());
+            }
         }
         if let Some(sources) = &patch.sources {
             self.sources.extend(sources.clone());
@@ -375,6 +424,46 @@ impl PackageMetadata {
             self.build_flags.extend(build_flags.clone());
         }
     }
+}
+
+/// A manifest returned by a rune's `build` function describing what was actually produced.
+/// Grimoire merges this with the static `package.bins` declaration so the build is the
+/// ground truth for what gets validated and installed.
+#[derive(Debug, Clone, Default)]
+pub struct BuildManifest {
+    pub bins: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+impl BuildManifest {
+    pub fn from_value(value: Value) -> Result<Self> {
+        let record = expect_record(value, "build manifest")?;
+        let bins = match record.get("bins") {
+            Some(value) => parse_target_conditional_bins(value, "build manifest field `bins`")?,
+            None => BTreeMap::new(),
+        };
+        Ok(Self { bins })
+    }
+}
+
+/// Resolve a target-conditional map (`default` → OS → exact triple) for a concrete target.
+pub fn resolve_target_conditional(
+    map: &BTreeMap<String, BTreeMap<String, String>>,
+    target: &str,
+) -> BTreeMap<String, String> {
+    let mut result = BTreeMap::new();
+    if let Some(default) = map.get("default") {
+        result.extend(default.clone());
+    }
+    let os = target.split('-').next().unwrap_or("");
+    if !os.is_empty() && os != "default" {
+        if let Some(os_bins) = map.get(os) {
+            result.extend(os_bins.clone());
+        }
+    }
+    if let Some(target_bins) = map.get(target) {
+        result.extend(target_bins.clone());
+    }
+    result
 }
 
 impl Deps {
@@ -473,6 +562,9 @@ impl IndexEntry {
             None => Vec::new(),
         };
 
+        let provides = optional_string_list(val, "provides")?;
+        let libs = optional_string_list(val, "libs")?;
+
         Ok(Self {
             name,
             version,
@@ -480,6 +572,8 @@ impl IndexEntry {
             archive,
             archive_hash,
             runtime_deps,
+            provides,
+            libs,
         })
     }
 
@@ -494,6 +588,8 @@ impl IndexEntry {
             Value::string(&self.archive_hash, Span::unknown()),
         );
         record.push("runtime_deps", dependency_list_value(&self.runtime_deps));
+        record.push("provides", string_list_value(&self.provides));
+        record.push("libs", string_list_value(&self.libs));
         Value::record(record, Span::unknown())
     }
 }
@@ -519,6 +615,8 @@ impl PackageState {
             Some(value) => expect_string_map(value, "field `source_hashes`")?,
         };
         let held = optional_bool(&record, "held")?.unwrap_or(false);
+        let provides = optional_string_list(&record, "provides")?;
+        let libs = optional_string_list(&record, "libs")?;
 
         Ok(Self {
             name,
@@ -532,6 +630,8 @@ impl PackageState {
             build_deps,
             source_hashes,
             held,
+            provides,
+            libs,
         })
     }
 
@@ -567,6 +667,8 @@ impl PackageState {
         if self.held {
             record.push("held", Value::bool(true, Span::unknown()));
         }
+        record.push("provides", string_list_value(&self.provides));
+        record.push("libs", string_list_value(&self.libs));
         Value::record(record, Span::unknown())
     }
 }
@@ -793,14 +895,10 @@ impl AddendumPatch {
         let summary = optional_string(val, "summary")?;
         let bins = match val.get("bins") {
             Some(Value::Nothing { .. }) | None => None,
-            Some(value) => {
-                let bins = expect_string_map(value, "addendum patch field `bins`")?;
-                for (name, path) in &bins {
-                    validate_bin_name(name)?;
-                    validate_relative_package_path(path, &format!("bin `{name}`"))?;
-                }
-                Some(bins)
-            }
+            Some(value) => Some(parse_target_conditional_bins(
+                value,
+                "addendum patch field `bins`",
+            )?),
         };
         let sources = match val.get("sources") {
             Some(Value::Nothing { .. }) | None => None,
@@ -847,7 +945,7 @@ impl AddendumPatch {
             record.push("summary", Value::string(summary, Span::unknown()));
         }
         if let Some(bins) = &self.bins {
-            record.push("bins", string_map_value(bins));
+            record.push("bins", string_map_of_maps_value(bins));
         }
         if let Some(sources) = &self.sources {
             let mut out = Record::new();
@@ -1155,6 +1253,26 @@ fn expect_string_map(value: &Value, label: &str) -> Result<BTreeMap<String, Stri
     Ok(out)
 }
 
+fn parse_target_conditional_bins(
+    value: &Value,
+    label: &str,
+) -> Result<BTreeMap<String, BTreeMap<String, String>>> {
+    let Value::Record { val, .. } = value else {
+        bail!("{label} must be a record keyed by target pattern");
+    };
+
+    let mut out = BTreeMap::new();
+    for (target_key, inner) in val.iter() {
+        let inner_map = expect_string_map(inner, &format!("{label} target `{target_key}`"))?;
+        for (name, path) in &inner_map {
+            validate_bin_name(name)?;
+            validate_relative_package_path(path, &format!("bin `{name}`"))?;
+        }
+        out.insert(target_key.clone(), inner_map);
+    }
+    Ok(out)
+}
+
 fn parse_sources(value: &Value) -> Result<BTreeMap<String, Source>> {
     let Value::Record { val, .. } = value else {
         bail!("package field `sources` must be a record");
@@ -1334,6 +1452,14 @@ fn string_map_value(items: &BTreeMap<String, String>) -> Value {
     let mut record = Record::new();
     for (key, value) in items {
         record.push(key, Value::string(value, Span::unknown()));
+    }
+    Value::record(record, Span::unknown())
+}
+
+fn string_map_of_maps_value(items: &BTreeMap<String, BTreeMap<String, String>>) -> Value {
+    let mut record = Record::new();
+    for (key, inner) in items {
+        record.push(key, string_map_value(inner));
     }
     Value::record(record, Span::unknown())
 }
@@ -1655,5 +1781,71 @@ mod tests {
             .map(|d| d.name)
             .collect();
         assert_eq!(names, vec!["always", "linux-only"]);
+    }
+
+    #[test]
+    fn build_for_merges_os_wildcard() {
+        let mut build = BTreeMap::new();
+        build.insert("default".to_owned(), vec![Dependency::any("cmake")]);
+        build.insert("linux".to_owned(), vec![Dependency::any("m4")]);
+        build.insert("linux-x86_64-musl".to_owned(), vec![Dependency::any("gcc")]);
+        let deps = Deps {
+            build,
+            runtime: Vec::new(),
+        };
+        let names: Vec<_> = deps
+            .build_for("linux-x86_64-musl")
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(names, vec!["cmake", "m4", "gcc"]);
+        assert_eq!(
+            deps.build_for("macos-aarch64-darwin")
+                .into_iter()
+                .map(|d| d.name)
+                .collect::<Vec<_>>(),
+            vec!["cmake"]
+        );
+    }
+
+    #[test]
+    fn bins_for_merges_default_os_and_target() {
+        let mut bins = BTreeMap::new();
+        let mut default = BTreeMap::new();
+        default.insert("sed".to_owned(), "bin/sed".to_owned());
+        bins.insert("default".to_owned(), default);
+
+        let mut linux = BTreeMap::new();
+        linux.insert("awk".to_owned(), "bin/awk".to_owned());
+        bins.insert("linux".to_owned(), linux);
+
+        let mut musl = BTreeMap::new();
+        musl.insert("tar".to_owned(), "bin/tar".to_owned());
+        bins.insert("linux-x86_64-musl".to_owned(), musl);
+
+        let meta = PackageMetadata {
+            name: "toybox".to_owned(),
+            version: "0.8.13".to_owned(),
+            target: None,
+            store_path: None,
+            targets: vec![],
+            fixed_output: false,
+            summary: None,
+            bins,
+            sources: BTreeMap::new(),
+            deps: Deps::default(),
+            build_flags: BTreeMap::new(),
+            provides: Vec::new(),
+            libs: Vec::new(),
+        };
+
+        let resolved: Vec<_> = meta.bins_for("linux-x86_64-musl").into_keys().collect();
+        assert_eq!(resolved, vec!["awk", "sed", "tar"]);
+
+        let resolved: Vec<_> = meta.bins_for("linux-aarch64-gnu").into_keys().collect();
+        assert_eq!(resolved, vec!["awk", "sed"]);
+
+        let resolved: Vec<_> = meta.bins_for("macos-aarch64-darwin").into_keys().collect();
+        assert_eq!(resolved, vec!["sed"]);
     }
 }

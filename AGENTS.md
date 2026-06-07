@@ -66,14 +66,28 @@ Managed builds receive a controlled `PATH` in strict priority order:
 2. **Build dependency `bin/` directories** — explicit deps declared by the rune being built.
 3. **Host compiler boundary symlinks** (`cc`, `c++`, `ar`, `ld`, etc.) — **bootstrap only**.
    Skipped entirely once `toolchain-wrappers` is installed; core compilers take over.
-4. **Host tool directories** (`/opt/homebrew/bin`, `/usr/local/bin`) — **temporary**.
-   Non-POSIX build tools (CMake, Python3) that core does not yet self-provide. Removed
-   once Phase 2 (CMake + Python3 in core) is complete.
-5. **POSIX ambient directories:** `/usr/bin` and `/bin` — permanent platform fallback.
+4. **POSIX ambient directories:** `/usr/bin` and `/bin` — permanent platform fallback.
 
 **Rule:** Declare only non-POSIX tools that the build script calls explicitly. Do not declare
 POSIX utilities (`sed`, `grep`, `awk`, `find`, `coreutils`, `diffutils`) as build deps — they are
 always available via the ambient directories (or, once bootstrapped, via core toybox).
+
+Managed builds also receive a sandboxed environment:
+
+1. Host discovery variables are cleared before the rune runs (`CMAKE_PREFIX_PATH`,
+   `PKG_CONFIG_PATH`, `CPATH`, `LIBRARY_PATH`, language package-manager roots, Homebrew prefixes,
+   dynamic-library search paths, etc.).
+2. Build dependency prefixes are layered back in explicitly through managed discovery variables
+   such as `CMAKE_PREFIX_PATH`, `PKG_CONFIG_PATH`/`PKG_CONFIG_LIBDIR`, `CPATH`, `LIBRARY_PATH`,
+   `ACLOCAL_PATH`, and `<DEP>_PREFIX`.
+3. `HOME`, `TMPDIR`, `TEMP`, `TMP`, and XDG directories point inside `ctx.work_dir`, so package
+   build systems cannot read or write the user's normal home/config/cache/temp state by default.
+4. External commands launched by the embedded Nushell build runner receive blank overrides for
+   inherited host environment variables unless Grimoire deliberately sets them.
+
+**Rule:** If a build system needs to discover a dependency, that dependency must be declared in
+`deps.build`; do not rely on host env vars, Homebrew/MacPorts prefixes, language package-manager
+state, or the user's shell configuration.
 
 ## 6. Dependencies
 
@@ -140,13 +154,10 @@ export const package = {
 
 export def build [ctx] {
   let source_dir = ($ctx.sources.main.dir | path join "example-1.0.0")
-  sh -c $"
-    set -eu
-    cd '($source_dir)'
-    ./configure --prefix='($ctx.prefix)'
-    make -j($env.NPROC)
-    make install DESTDIR='($ctx.package_dir)'
-  "
+  cd $source_dir
+  ./configure --prefix=$ctx.prefix
+  make -j($ctx.nproc)
+  make install DESTDIR=$ctx.package_dir
 }
 ```
 
@@ -186,12 +197,20 @@ cmake --install build --prefix '($ctx.package_dir)'
 
 ### Build script patterns
 
-**Prefer `sh -c` for complex builds.** Nushell's string interpolation (`$"..."`) makes it easy to
-inject Grimoire-managed paths into shell scripts. Use `set -eu` for early failure. For simple
-operations (creating directories, writing files), native Nushell is fine.
+**Do not use `sh -c` in runes.** Rune `build` functions are native Nushell. Use Nushell's own
+control flow, variables, and external command invocation. Shelling out to `sh` forfeits error
+handling, obscures the build logic, and makes runes harder to read and test. If a build step is
+too complex for native Nushell, decompose it into smaller steps rather than hiding them in a
+shell script.
+
+**Use explicit parentheses for variable interpolation in external commands.** Bare record-field
+access like `$ctx.prefix` or `$env.VAR` in external command position can be parsed incorrectly by
+Nushell, silently producing wrong paths or empty strings. Always wrap the expression in
+parentheses: `($ctx.prefix)`, `($env.VAR)`, `($nproc)`. This applies to both `ctx` fields and
+local variables when they are passed to external commands.
 
 **Parallel builds:** Pass `-j` to `make` and parallel flags to build systems. The build environment
-may set `$env.NPROC` (or you can query it). If absent, omit the flag and let the build system
+provides `ctx.nproc` for the host's parallelism. If absent, omit the flag and let the build system
 default.
 
 **Out-of-tree builds:** Use `ctx.work_dir` for build artifacts when the source system supports it
@@ -242,9 +261,13 @@ Grimoire has no database. Durability is explicit transaction directories plus at
 1. Never mutate an installed package directory or state file in place. Stage, then promote.
 2. An operation either fully completes or leaves the previous state intact. Because state is
    promoted via atomic `rename`, a failure partway through leaves the old state untouched.
-3. Installed package version directories are immutable once promoted. Upgrades create new version
+3. Mutating package commands are command-atomic. `grm install a b c`, `grm remove x y`, upgrades,
+   and any dependency/autoremove work they trigger either commit the whole requested state change
+   (store paths, package state, lockfile, and active generation) or commit none of it. On any error,
+   no package from that command is installed, removed, upgraded, autoremoved, held, or unheld.
+4. Installed package version directories are immutable once promoted. Upgrades create new version
    directories.
-4. Local state is inspectable NUON under the install root. No databases.
+5. Local state is inspectable NUON under the install root. No databases.
 
 ## 10. Security invariants
 
@@ -279,8 +302,10 @@ skipped during `grm tome build --all`.
 2. Error messages are for humans. Say what failed and, where possible, what to do.
 3. The CLI is imperative and explicit. Commands directly and transactionally update state.
 4. Commands that operate on packages accept multiple positional arguments where semantically
-   reasonable (`grm install a b c`, `grm remove x y`). Each package is processed independently;
-   a failure in one does not prevent processing the others.
+   reasonable (`grm install a b c`, `grm remove x y`). Multi-package mutations are a single
+   all-or-nothing transaction: validate, resolve, build/fetch, and stage everything needed for the
+   whole command before committing any user-visible state. If any package fails, the command fails
+   and the user's installed state remains unchanged.
 
 ## 13. Testing
 
@@ -297,6 +322,8 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 ```
+
+**Exception:** When a change touches only rune (`.rn`) files and/or documentation (`.md`, `README`, etc.), the Rust checks above are not required. Rune changes are validated by parsing and smoke-test coverage; doc changes do not affect compilation.
 
 ## 14. Readability
 
