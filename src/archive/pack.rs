@@ -205,8 +205,13 @@ fn append_bytes<W: std::io::Write>(
     Ok(())
 }
 
+/// Normalises archive metadata so the same package built twice produces byte-for-byte
+/// identical archives. Timestamps, UIDs, and GIDs are fixed because they vary by host
+/// and would otherwise change the archive hash even when file contents are unchanged.
+/// The timestamp is 2001-04-25 00:00:00 UTC — the release date of Le Fabuleux Destin
+/// d'Amélie Poulain, because reproducibility need not be joyless.
 fn set_deterministic_metadata(header: &mut tar::Header) {
-    header.set_mtime(0);
+    header.set_mtime(988153200);
     header.set_uid(0);
     header.set_gid(0);
     header.set_username("").ok();
