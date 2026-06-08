@@ -145,48 +145,38 @@ fn is_binary_affecting_tool(name: &str) -> bool {
     )
 }
 
-/// Returns the macOS system SDK path (e.g. "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk")
-/// when running on macOS with `xcrun` available. Passed to builds as `SDKROOT` so the managed
-/// compiler can locate system headers and libraries.
-pub fn macos_sdk_path() -> Option<String> {
+/// Runs `xcrun --show-{flag}` and returns the first non-empty line of stdout.
+fn xcrun_show(flag: &str) -> Option<String> {
     if env::consts::OS != "macos" {
         return None;
     }
     let output = std::process::Command::new("xcrun")
-        .args(["--show-sdk-path"])
+        .args([flag])
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let path = stdout.lines().next()?.trim();
-    if path.is_empty() {
+    let value = stdout.lines().next()?.trim();
+    if value.is_empty() {
         return None;
     }
-    Some(path.to_string())
+    Some(value.to_string())
+}
+
+/// Returns the macOS system SDK path (e.g. "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk")
+/// when running on macOS with `xcrun` available. Passed to builds as `SDKROOT` so the managed
+/// compiler can locate system headers and libraries.
+pub fn macos_sdk_path() -> Option<String> {
+    xcrun_show("--show-sdk-path")
 }
 
 /// Returns the macOS system SDK version (e.g. "15.2") when running on macOS with
 /// `xcrun` available. This affects headers, libraries, and binary output, so it is
 /// part of the build-environment identity.
 fn macos_sdk_version() -> Option<String> {
-    if env::consts::OS != "macos" {
-        return None;
-    }
-    let output = std::process::Command::new("xcrun")
-        .args(["--show-sdk-version"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let ver = stdout.lines().next()?.trim();
-    if ver.is_empty() {
-        return None;
-    }
-    Some(ver.to_string())
+    xcrun_show("--show-sdk-version")
 }
 
 /// Runs `tool --version` (or `tool -version` for macOS tools) and returns the first line of stdout,

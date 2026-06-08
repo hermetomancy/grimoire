@@ -121,6 +121,24 @@ pointing to the active generation's `bin/`. Current user-local
 - AGENTS.md updated to reflect current architecture (rune authoring, PATH
   order, platform-conditional deps, multi-package CLI, project hygiene).
 
+### Security and correctness audit fixes (high impact)
+
+- **Archive TOCTOU** — `install_store_only` now copies the archive into its
+  private transaction directory before hashing, validating, and extracting.
+  `extract_source_archive` copies source archives into the private `work_dir`
+  before validation and extraction.
+- **Source archive nested-under-symlink check** — `validate_tar_entries` now
+  rejects members nested under earlier symlinks, matching the binary-archive
+  validator.
+- **setup chown TOCTOU** — Replaced `std::os::unix::fs::chown` with
+  `libc::lchown` so symlinks are not followed during ownership changes.
+- **is_writable symlink safety** — Returns `false` when the path is a symlink,
+  preventing probe-file creation through an attacker-controlled link.
+- **closure.rs signature verification** — `store_hash_for_rune_with_deps` now
+  calls `tome::verify_rune` before hashing, closing the bypass the solver used.
+- **tome build target-blind skip** — `build_runes` now filters catalog entries
+  by the current target triple instead of matching names across targets.
+
 ## Active work
 
 ### Phase 1: Bootstrap core on all targets
@@ -142,29 +160,32 @@ supported target. Current status:
 Add `cmake` and `python3` to `core` so no non-POSIX host tools are required
 for bootstrap. Removes the need for `host_tool_dirs()`.
 
+### Source tree reorganization
+
+The `src/` root has become a flat dumping ground. `model.rs` is nearly 2,000
+lines, `install.rs` is 1,350+, and there are ~20 modules at the top level.
+Navigation is painful and cohesion is low.
+
+- **Split `model.rs`** into a `src/model/` directory with one file per
+  concern: `package.rs`, `deps.rs`, `catalog.rs`, `manifest.rs`, `index.rs`,
+  `source.rs`, etc. Keep `src/model.rs` as a thin `pub use` re-export root.
+- **Split `install.rs`** into `src/install/` with `plan.rs`, `transaction.rs`,
+  `store.rs` (rename from the current `install_store_only` logic), `orphans.rs`,
+  and `root.rs`.
+- **Split `solve.rs`** into `src/solve/` with `index.rs`, `resolver.rs`,
+  `capabilities.rs`, and `plan.rs`.
+- **Group related leaf modules** under directories:
+  - `src/archive/` — `pack.rs`, `unpack.rs`, `validate.rs` (split from
+    current monolithic `archive/mod.rs` and `archive/pack.rs`)
+  - `src/fs/` or `src/util/` — `fs_util.rs`, `paths.rs`, `time_util.rs`
+- **Move test helpers out of `tests/smoke.rs`** into a `tests/support/`
+  directory so the integration test file stops approaching 5,000 lines.
+- Target: no file >500 lines except `tests/smoke.rs` itself, and no more than
+  ~10 modules at `src/` root level.
+
 ### 6. Security and correctness audit fixes (post-subagent review)
 
 Items identified during the comprehensive subagent audit that remain unfixed.
-
-#### High impact
-
-- **Archive TOCTOU (validation → extraction race)**  
-  `src/install.rs:209,231` and `src/build.rs:486-494` — `validate_archive_paths` opens the archive, then `extract_archive` opens it again. A local attacker with cache write access can swap the file between the two opens. Fix: stream validation and extraction in a single pass, or copy to a private temp file before extracting.
-
-- **Source archive TOCTOU + missing nested-under-symlink check**  
-  `src/build.rs:486-494` and `src/build.rs:509-531` — Same double-open race for source archives. Additionally, `validate_tar_entries` does not check whether a later member is nested under an earlier symlink (the binary validator does; the source validator does not).
-
-- **`setup_linux` / `setup_macos` chown TOCTOU**  
-  `src/setup.rs:35-68` and `src/setup.rs:75-90` — Between `path.exists()` and `chown_path(path)`, an attacker can replace `/grm` with a symlink. `std::os::unix::fs::chown` follows symlinks; there's no `lchown` in std.
-
-- **`is_writable` follows symlinks**  
-  `src/setup.rs:137-145` — The probe file is created via the symlink target, allowing arbitrary file creation as a side effect of the writability check.
-
-- **`closure.rs::store_hash_for_rune_with_deps` skips signature verification**  
-  `src/closure.rs:45-82` — The solver calls this directly on resolved runes. If signature verification is required by the tome, this codepath bypasses it.
-
-- **`tome/mod.rs::build_runes` target-blind skip logic**  
-  `src/tome/mod.rs:230-243` — When checking if a rune was already built, it looks for *any* existing catalog entry with the same name. If the catalog contains entries for multiple targets, it may skip the current target because a different-target archive exists.
 
 #### Medium impact
 

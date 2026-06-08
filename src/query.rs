@@ -10,11 +10,11 @@ use std::{
 };
 
 use crate::{
-    addendum,
+    build,
     cli::{PackageArg, QueryArg, UpgradeArgs},
     install,
     model::{PackageMetadata, PackageState, parse_version_relaxed},
-    nu::runtime::{EmbeddedNuRuntime, RuneRuntime},
+    nu::runtime::EmbeddedNuRuntime,
     paths, progress, solve, tome,
 };
 
@@ -186,7 +186,7 @@ fn print_upgrade_plan(to_upgrade: &[(String, Version, Version)]) {
 }
 
 fn tome_packages() -> Result<Vec<TomePackage>> {
-    let runtime = EmbeddedNuRuntime;
+    let _runtime = EmbeddedNuRuntime;
     let mut packages = Vec::new();
 
     for state in tome::load_tomes()? {
@@ -198,11 +198,7 @@ fn tome_packages() -> Result<Vec<TomePackage>> {
         }
 
         for rune in rune_files(&runes_dir)? {
-            let mut metadata = runtime
-                .package_metadata(&rune)
-                .with_context(|| format!("read rune metadata {}", rune.display()))?;
-            addendum::patched_package_metadata(&mut metadata, Some(&state.name), &rune)
-                .with_context(|| format!("apply addendums to {}", rune.display()))?;
+            let metadata = build::read_rune_metadata(&rune, Some(&state.name))?;
             packages.push(TomePackage {
                 tome: state.name.clone(),
                 rune,

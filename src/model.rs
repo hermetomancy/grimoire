@@ -253,6 +253,36 @@ pub struct TomePackages {
     pub index: String,
 }
 
+/// Shared interface for catalog state (tomes and addenda).
+///
+/// Both tomes and addenda follow the same lifecycle — clone, validate, promote, record —
+/// and carry identical metadata fields. This trait lets `sync_common.rs` operate on either
+/// without duplicating the CRUD logic.
+pub trait Catalog: Clone {
+    type Manifest: CatalogManifest;
+    const ENTITY_KIND: &'static str;
+    const SUBDIR: &'static str;
+
+    fn name(&self) -> &str;
+    fn url(&self) -> &str;
+    fn ref_name(&self) -> &str;
+    fn signer_pubkeys(&self) -> &[String];
+
+    fn set_checked_ref(&mut self, v: Option<String>);
+    fn set_checked_commit(&mut self, v: Option<String>);
+    fn set_manifest(&mut self, v: Option<Self::Manifest>);
+    fn set_signer_pubkeys(&mut self, v: Vec<String>);
+
+    fn from_nuon(value: Value) -> Result<Self>;
+    fn to_nuon(&self) -> Value;
+}
+
+/// Shared interface for catalog manifests.
+pub trait CatalogManifest: Clone {
+    fn name(&self) -> &str;
+    fn signers(&self) -> &[String];
+}
+
 impl Deps {
     /// Build dependencies that apply to `target`: the `default` set plus any entry keyed by
     /// the exact target triple, de-duplicated while preserving order. Platform-conditional deps
@@ -786,6 +816,54 @@ impl LockFile {
     }
 }
 
+impl Catalog for AddendumState {
+    type Manifest = AddendumManifest;
+    const ENTITY_KIND: &'static str = "addendum";
+    const SUBDIR: &'static str = "addendums";
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn url(&self) -> &str {
+        &self.url
+    }
+    fn ref_name(&self) -> &str {
+        &self.ref_name
+    }
+    fn signer_pubkeys(&self) -> &[String] {
+        &self.signer_pubkeys
+    }
+
+    fn set_checked_ref(&mut self, v: Option<String>) {
+        self.checked_ref = v;
+    }
+    fn set_checked_commit(&mut self, v: Option<String>) {
+        self.checked_commit = v;
+    }
+    fn set_manifest(&mut self, v: Option<Self::Manifest>) {
+        self.addendum = v;
+    }
+    fn set_signer_pubkeys(&mut self, v: Vec<String>) {
+        self.signer_pubkeys = v;
+    }
+
+    fn from_nuon(value: Value) -> Result<Self> {
+        Self::from_value(value)
+    }
+    fn to_nuon(&self) -> Value {
+        self.to_value()
+    }
+}
+
+impl CatalogManifest for AddendumManifest {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn signers(&self) -> &[String] {
+        &self.signers
+    }
+}
+
 impl AddendumState {
     pub fn from_value(value: Value) -> Result<Self> {
         let record = expect_record(value, "addendum state")?;
@@ -964,6 +1042,54 @@ impl AddendumPatch {
             record.push("build_flags", string_map_value(build_flags));
         }
         Value::record(record, Span::unknown())
+    }
+}
+
+impl Catalog for TomeState {
+    type Manifest = TomeManifest;
+    const ENTITY_KIND: &'static str = "tome";
+    const SUBDIR: &'static str = "tomes";
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn url(&self) -> &str {
+        &self.url
+    }
+    fn ref_name(&self) -> &str {
+        &self.ref_name
+    }
+    fn signer_pubkeys(&self) -> &[String] {
+        &self.signer_pubkeys
+    }
+
+    fn set_checked_ref(&mut self, v: Option<String>) {
+        self.checked_ref = v;
+    }
+    fn set_checked_commit(&mut self, v: Option<String>) {
+        self.checked_commit = v;
+    }
+    fn set_manifest(&mut self, v: Option<Self::Manifest>) {
+        self.tome = v;
+    }
+    fn set_signer_pubkeys(&mut self, v: Vec<String>) {
+        self.signer_pubkeys = v;
+    }
+
+    fn from_nuon(value: Value) -> Result<Self> {
+        Self::from_value(value)
+    }
+    fn to_nuon(&self) -> Value {
+        self.to_value()
+    }
+}
+
+impl CatalogManifest for TomeManifest {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn signers(&self) -> &[String] {
+        &self.signers
     }
 }
 

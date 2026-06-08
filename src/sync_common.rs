@@ -10,7 +10,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{fs_util, paths, progress, signing};
+use crate::{
+    fs_util,
+    model::{Catalog, CatalogManifest},
+    nu::nuon_io,
+    paths, progress, signing,
+};
 
 /// Returns `true` when `url` is a local directory containing `manifest_name`.
 pub fn is_local_source(url: &str, manifest_name: &str) -> bool {
@@ -219,4 +224,141 @@ pub fn capture_signer(
     }
 
     Ok(existing.to_vec())
+}
+
+/// Loads every catalog state file of a given kind.
+pub fn load_catalogs<C: Catalog>() -> anyhow::Result<Vec<C>> {
+    let state_dir = state_dir(C::SUBDIR)?;
+    let mut states = Vec::new();
+    for path in list_state_files(&state_dir)? {
+        states.push(
+            C::from_nuon(nuon_io::read_nuon(&path)?)
+                .with_context(|| format!("read {} state {}", C::ENTITY_KIND, path.display()))?,
+        );
+    }
+    Ok(states)
+}
+
+/// Loads a single catalog state by name.
+pub fn load_catalog<C: Catalog>(name: &str) -> anyhow::Result<C> {
+    let state_path = state_dir(C::SUBDIR)?.join(format!("{name}.nuon"));
+    if !state_path.exists() {
+        anyhow::bail!("{} `{name}` is not configured", C::ENTITY_KIND);
+    }
+    C::from_nuon(nuon_io::read_nuon(&state_path)?)
+        .with_context(|| format!("read {} state {}", C::ENTITY_KIND, state_path.display()))
+}
+
+/// Removes a catalog's state file and optionally its cache.
+pub fn remove_catalog<C: Catalog>(name: &str, remove_cache: bool) -> anyhow::Result<()> {
+    crate::model::validate_tome_name(name)?;
+    let state_path = state_dir(C::SUBDIR)?.join(format!("{name}.nuon"));
+    if !state_path.exists() {
+        anyhow::bail!("{} `{name}` is not configured", C::ENTITY_KIND);
+    }
+    fs::remove_file(&state_path)?;
+    if remove_cache {
+        let cache_path = cache_path(C::SUBDIR, name)?;
+        if cache_path.exists() {
+            fs::remove_dir_all(&cache_path)?;
+        }
+    }
+    progress::report(&format!("removed {} {name}", C::ENTITY_KIND));
+    Ok(())
+}
+
+/// Lists every catalog of a given kind.
+pub fn list_catalogs<C: Catalog>() -> anyhow::Result<()> {
+    for state in load_catalogs::<C>()? {
+        println!("{}\t{}\t{}", state.name(), state.url(), state.ref_name());
+    }
+    Ok(())
+}
+
+/// Reads the self-declared name from a catalog source without permanently caching it.
+pub fn read_source_catalog_name(
+    url: &str,
+    ref_name: &str,
+    manifest_name: &str,
+    read_name: impl Fn(&Path) -> anyhow::Result<String>,
+    clone: impl Fn(&str, &str, &Path) -> anyhow::Result<()>,
+) -> anyhow::Result<String> {
+    if is_local_source(url, manifest_name) {
+        return read_name(Path::new(url));
+    }
+
+    let temp =
+        tempfile::tempdir().context("create temporary directory to read catalog manifest")?;
+    clone(url, ref_name, temp.path())
+        .with_context(|| format!("clone `{url}` to read its manifest"))?;
+    read_name(temp.path())
+}
+
+/// Syncs a catalog cache: clone/copy, validate, promote, and record state.
+pub fn sync_catalog_cache<C: Catalog, T>(
+    state: &C,
+    manifest_name: &str,
+    clone: impl Fn(&str, &str, &Path) -> anyhow::Result<()>,
+    validate: impl Fn(&C, &Path) -> anyhow::Result<()>,
+    record: impl FnOnce(&C, &Path) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let cache_dir = cache_dir(C::SUBDIR)?;
+    let cache_path = cache_path(C::SUBDIR, state.name())?;
+    fs::create_dir_all(&cache_dir)?;
+    let temp = tempfile::Builder::new()
+        .prefix(&format!("grimoire-{}-", C::SUBDIR))
+        .tempdir_in(&cache_dir)?;
+    let staged = temp.path().join("cache");
+
+    if !copy_local_source(state.name(), state.url(), &staged, manifest_name)? {
+        progress::status(&format!("cloning {} ({})", C::ENTITY_KIND, state.name()));
+        clone(state.url(), state.ref_name(), &staged)
+            .with_context(|| format!("could not sync {} `{}`", C::ENTITY_KIND, state.name()))?;
+    }
+
+    validate(state, &staged)?;
+    promote_cache(&staged, &cache_path, || record(state, &cache_path))
+}
+
+/// Records a successful sync into the catalog state file, pinning signers trust-on-first-use.
+pub fn record_catalog_sync_state<C: Catalog>(
+    state: &C,
+    cache_path: &Path,
+    manifest_name: &str,
+    manifest: &C::Manifest,
+    commit: Option<&str>,
+) -> anyhow::Result<()> {
+    let mut new_state = load_catalog::<C>(state.name()).unwrap_or_else(|_| state.clone());
+    let signer_pubkeys = capture_signer(
+        C::ENTITY_KIND,
+        state.name(),
+        &cache_path.join(manifest_name),
+        manifest.signers(),
+        state.signer_pubkeys(),
+    )?;
+    new_state.set_checked_ref(Some(state.ref_name().to_owned()));
+    new_state.set_checked_commit(commit.map(|c| c.to_owned()));
+    new_state.set_manifest(Some(manifest.clone()));
+    new_state.set_signer_pubkeys(signer_pubkeys);
+
+    let state_path = state_dir(C::SUBDIR)?.join(format!("{}.nuon", state.name()));
+    nuon_io::write_nuon(&state_path, &new_state.to_nuon())?;
+    Ok(())
+}
+
+/// Validates that a catalog manifest declares the same name as its configured state.
+pub fn validate_catalog_identity<C: Catalog>(
+    state: &C,
+    manifest: &C::Manifest,
+) -> anyhow::Result<()> {
+    if manifest.name() != state.name() {
+        anyhow::bail!(
+            "{} manifest name `{}` does not match configured {} `{}`",
+            C::ENTITY_KIND,
+            manifest.name(),
+            C::ENTITY_KIND,
+            state.name()
+        );
+    }
+    Ok(())
 }

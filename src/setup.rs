@@ -5,7 +5,7 @@
 //! paths portable across users and machines.
 
 use anyhow::{Context, Result, bail};
-use std::{env, fs, path::Path};
+use std::{env, fs, os::unix::ffi::OsStrExt, path::Path};
 
 use crate::paths;
 
@@ -26,10 +26,7 @@ pub fn setup() -> Result<()> {
     return setup_linux();
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-fn setup_linux() -> Result<()> {
-    let path = Path::new("/grm");
-
+fn setup_posix(path: &Path) -> Result<()> {
     if path.exists() {
         if is_writable(path)? {
             println!("Grimoire store {} is already set up.", path.display());
@@ -66,25 +63,17 @@ fn setup_linux() -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn setup_linux() -> Result<()> {
+    setup_posix(Path::new("/grm"))
+}
+
 #[cfg(target_os = "macos")]
 fn setup_macos() -> Result<()> {
     let path = Path::new("/grm");
 
     if path.exists() {
-        if is_writable(path)? {
-            println!("Grimoire store {} is already set up.", path.display());
-            return Ok(());
-        }
-        if let Some((uid, gid)) = sudo_identity() {
-            chown_path(path, uid, gid)?;
-            println!("Made {} writable for the invoking user.", path.display());
-            return Ok(());
-        }
-        bail!(
-            "{} exists but is not writable. Run: sudo chown $(whoami): {}",
-            path.display(),
-            path.display()
-        );
+        return setup_posix(path);
     }
 
     let synthetic = Path::new("/etc/synthetic.conf");
@@ -130,7 +119,14 @@ fn setup_macos() -> Result<()> {
 }
 
 /// Best-effort check whether the current process can write into `dir`.
+/// Returns `false` if `dir` is a symlink to prevent following it to an arbitrary target.
 fn is_writable(dir: &Path) -> Result<bool> {
+    if fs::symlink_metadata(dir)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
     let probe = dir.join(".grimoire-write-test");
     match fs::File::create(&probe) {
         Ok(_) => {
@@ -149,8 +145,18 @@ fn sudo_identity() -> Option<(u32, u32)> {
 }
 
 fn chown_path(path: &Path, uid: u32, gid: u32) -> Result<()> {
-    std::os::unix::fs::chown(path, Some(uid), Some(gid))
-        .with_context(|| format!("chown {} to uid {uid} gid {gid}", path.display()))
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .with_context(|| format!("invalid path {}", path.display()))?;
+    // SAFETY: lchown is a POSIX syscall; c_path is a valid NUL-terminated string.
+    let rc = unsafe { libc::lchown(c_path.as_ptr(), uid, gid) };
+    if rc != 0 {
+        bail!(
+            "lchown {} to uid {uid} gid {gid}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]

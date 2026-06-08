@@ -6,7 +6,7 @@
 
 pub mod pack;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
@@ -101,11 +101,19 @@ pub fn validate_archive_paths(path: &Path) -> Result<()> {
     let file = File::open(path)?;
     let decoder = zstd::stream::read::Decoder::new(file)?;
     let mut archive = tar::Archive::new(decoder);
+    validate_tar_entries(&mut archive)
+        .with_context(|| format!("validate archive {}", path.display()))
+}
+
+/// Generic tar entry validator shared by archive installs and source extraction.
+/// Rejects traversal, absolute paths, Windows-style paths, hard links,
+/// escaping symlinks, and members nested under symlinks.
+pub fn validate_tar_entries<R: Read>(tar: &mut tar::Archive<R>) -> Result<()> {
     let mut bad = Vec::new();
     let mut members: Vec<PathBuf> = Vec::new();
     let mut symlinks: BTreeSet<PathBuf> = BTreeSet::new();
 
-    for entry in archive.entries()? {
+    for entry in tar.entries()? {
         let entry = entry?;
         let member_path = entry.path()?.into_owned();
         let member = member_path.display().to_string();
