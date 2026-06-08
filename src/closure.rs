@@ -12,11 +12,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::{
-    addendum, build,
-    nu::runtime::{EmbeddedNuRuntime, RuneRuntime},
-    paths, store, tome, toolchain,
-};
+use crate::{build, paths, store, toolchain};
 
 /// Computes the content address (store hash) of the package named `name`, resolving its runtime
 /// dependency closure to store hashes.
@@ -39,6 +35,16 @@ pub fn store_hash_for_rune_with_target(rune: &Path, target: &str) -> Result<Stri
     walker.of_rune(&metadata.name, rune)
 }
 
+/// Computes the store hash from already-read rune bytes and metadata.
+/// Avoids writing a temporary file when the bytes are already in memory.
+pub fn store_hash_for_rune_bytes(
+    rune_bytes: &[u8],
+    metadata: &crate::model::PackageMetadata,
+) -> Result<String> {
+    let mut walker = Walker::new()?;
+    walker.of_rune_with_bytes(&metadata.name, metadata, rune_bytes)
+}
+
 /// Computes the store hash for a rune whose dependency closure has already been resolved.
 /// `dep_hashes` maps dependency names to their already-computed store hashes.
 /// This is used by the solver after version resolution to compute hashes eagerly.
@@ -48,15 +54,7 @@ pub fn store_hash_for_rune_with_deps(
     target: &str,
     build_env: &str,
 ) -> Result<String> {
-    let mut metadata = EmbeddedNuRuntime
-        .package_metadata(rune)
-        .with_context(|| format!("read rune metadata {}", rune.display()))?;
-    addendum::patched_package_metadata(
-        &mut metadata,
-        build::tome_name_for_rune(rune)?.as_deref(),
-        rune,
-    )
-    .with_context(|| format!("apply addendums to {}", rune.display()))?;
+    let metadata = build::read_rune_metadata(rune, build::tome_name_for_rune(rune)?.as_deref())?;
 
     let dep_store_hashes: Vec<String> = metadata
         .deps
@@ -119,6 +117,20 @@ impl Walker {
             bail!("dependency cycle computing store hash for `{name}`");
         }
         let metadata = self.metadata(rune)?;
+        let rune_bytes =
+            std::fs::read(rune).with_context(|| format!("read rune {}", rune.display()))?;
+        self.of_rune_with_bytes(name, &metadata, &rune_bytes)
+    }
+
+    fn of_rune_with_bytes(
+        &mut self,
+        name: &str,
+        metadata: &crate::model::PackageMetadata,
+        rune_bytes: &[u8],
+    ) -> Result<String> {
+        if self.stack.iter().any(|entry| entry == name) {
+            bail!("dependency cycle computing store hash for `{name}`");
+        }
         self.stack.push(name.to_string());
         let dep_hashes_result: Result<Vec<String>> = (|| {
             let mut dep_hashes = Vec::with_capacity(metadata.deps.runtime.len());
@@ -130,11 +142,9 @@ impl Walker {
         self.stack.pop();
         let dep_hashes = dep_hashes_result?;
 
-        let rune_bytes =
-            std::fs::read(rune).with_context(|| format!("read rune {}", rune.display()))?;
         let hash = store::store_hash_for_metadata(
-            &metadata,
-            &rune_bytes,
+            metadata,
+            rune_bytes,
             &dep_hashes,
             &self.target,
             &self.build_env,
@@ -144,17 +154,7 @@ impl Walker {
     }
 
     fn metadata(&self, rune: &Path) -> Result<crate::model::PackageMetadata> {
-        tome::verify_rune(rune)
-            .with_context(|| format!("verify rune signature {}", rune.display()))?;
-        let mut metadata = EmbeddedNuRuntime
-            .package_metadata(rune)
-            .with_context(|| format!("read rune metadata {}", rune.display()))?;
-        addendum::patched_package_metadata(
-            &mut metadata,
-            build::tome_name_for_rune(rune)?.as_deref(),
-            rune,
-        )
-        .with_context(|| format!("apply addendums to {}", rune.display()))?;
-        Ok(metadata)
+        let tome_name = build::tome_name_for_rune(rune)?;
+        build::read_rune_metadata(rune, tome_name.as_deref())
     }
 }

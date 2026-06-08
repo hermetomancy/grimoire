@@ -1416,6 +1416,44 @@ fn source_archive_is_extracted_into_build_context(
 }
 
 #[test]
+fn reject_source_archive_nested_under_symlink() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let out = TempDir::new().unwrap();
+    let out = out.path();
+    let src = TempDir::new().unwrap();
+    let src = src.path();
+
+    let source_archive = src.join("payload.tar.zst");
+    write_nested_symlink_source_archive(&source_archive);
+    let source_hash = sha256_file(&source_archive);
+
+    let rune = src.join("extractor.rn");
+    fs::write(
+        &rune,
+        format!(
+            "export const package = {{\n  name: 'extractor'\n  version: '0.1.0'\n  sources: {{ main: {{ url: 'payload.tar.zst', sha256: '{source_hash}' }} }}\n  bins: {{default: {{ extractor: 'bin/extractor' }}}}\n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  'echo ok' | save ($ctx.package_dir | path join 'bin' 'extractor')\n}}\n"
+        ),
+    )
+    .unwrap();
+
+    let build = run(
+        root,
+        &[
+            "build",
+            rune.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert_failure_contains(
+        &build,
+        "nested under symlink",
+        "reject source archive member nested under symlink",
+    );
+}
+
+#[test]
 fn source_build_supports_configure_make_install_contract() {
     let root = TempDir::new().unwrap();
     let root = root.path();
@@ -4431,6 +4469,21 @@ fn write_test_source_archive(path: &Path, kind: TestArchiveKind) {
             finish_archive(builder);
         }
     }
+}
+
+fn write_nested_symlink_source_archive(path: &Path) {
+    let mut builder = open_archive(path);
+    // `payload -> sub` has an in-package target (so the target check passes), but the member
+    // `payload/evil.txt` underneath it would extract through the link.
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Symlink);
+    header.set_size(0);
+    header.set_mode(0o777);
+    builder
+        .append_link(&mut header, "payload", "sub")
+        .expect("append symlink");
+    append_file(&mut builder, "payload/evil.txt", b"x\n", 0o644);
+    finish_archive(builder);
 }
 
 fn append_file<W: Write>(builder: &mut tar::Builder<W>, path: &str, data: &[u8], mode: u32) {

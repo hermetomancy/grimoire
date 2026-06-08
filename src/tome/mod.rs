@@ -6,9 +6,8 @@
 //! git-untracked `dist/index.nuon` served either from a local path or over HTTP.
 
 use anyhow::{Context, Result, bail};
-use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -21,14 +20,11 @@ use crate::{
     cli::{TomeAddArgs, TomeBuildArgs, TomeInitArgs, TomeRemoveArgs, TomeRuneArgs, TomeUpdateArgs},
     install,
     model::{
-        IndexEntry, PackageIndex, TomeManifest, TomePackages, TomeState, validate_package_name,
-        validate_package_version, validate_relative_package_path, validate_tome_name,
-        validate_tome_ref, validate_tome_url,
+        Catalog, IndexEntry, PackageIndex, TomeManifest, TomePackages, TomeState,
+        validate_package_name, validate_package_version, validate_relative_package_path,
+        validate_tome_name, validate_tome_ref, validate_tome_url,
     },
-    nu::{
-        nuon_io,
-        runtime::{EmbeddedNuRuntime, RuneRuntime},
-    },
+    nu::{nuon_io, runtime::EmbeddedNuRuntime},
     paths,
     progress::{report, status},
     signing, sync_common,
@@ -41,11 +37,23 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
 
     // The tome names itself: read the `name` from its manifest rather than asking the user
     // to repeat it on the command line. Remote sources are cloned to a temp dir to read it.
-    let name = read_source_tome_name(&args.git_url, &args.ref_name)?;
+    let name = sync_common::read_source_catalog_name(
+        &args.git_url,
+        &args.ref_name,
+        "tome.rn",
+        |path| {
+            let manifest_path = path.join("tome.rn");
+            Ok(EmbeddedNuRuntime
+                .tome_manifest(&manifest_path)
+                .with_context(|| format!("read tome manifest {}", manifest_path.display()))?
+                .name)
+        },
+        git::clone,
+    )?;
     validate_tome_name(&name)?;
     validate_local_tome_if_available(&name, &args.git_url)?;
 
-    let state_dir = sync_common::state_dir("tomes")?;
+    let state_dir = sync_common::state_dir(TomeState::SUBDIR)?;
     let state_path = state_dir.join(format!("{name}.nuon"));
     if state_path.exists() {
         bail!("tome `{name}` already exists");
@@ -190,15 +198,13 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
     };
 
     build_runes(
-        &BuildRunesConfig {
-            root,
-            dist_dir: &dist_dir,
-            index_path: &index_path,
-            all: args.all,
-            bootstrap: args.bootstrap,
-            target: args.target.as_deref(),
-            force: args.force,
-        },
+        root,
+        &dist_dir,
+        &index_path,
+        args.all,
+        args.bootstrap,
+        args.target.as_deref(),
+        args.force,
         &rune_names,
         &mut catalog,
     )?;
@@ -211,25 +217,29 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
     Ok(())
 }
 
-struct BuildRunesConfig<'a> {
-    root: &'a Path,
-    dist_dir: &'a Path,
-    index_path: &'a Path,
+#[allow(clippy::too_many_arguments)]
+fn build_runes(
+    root: &Path,
+    dist_dir: &Path,
+    index_path: &Path,
     all: bool,
     bootstrap: bool,
-    target: Option<&'a str>,
+    target: Option<&str>,
     force: bool,
-}
-
-fn build_runes(
-    config: &BuildRunesConfig<'_>,
     rune_names: &[String],
     catalog: &mut PackageIndex,
 ) -> Result<()> {
+    let host_target = paths::target_triple();
+    let current_target = target.unwrap_or(&host_target);
+    let mut any_built = false;
     for name in rune_names {
-        if !config.force {
-            if let Some(existing) = catalog.entries.values().find(|e| e.name == *name) {
-                let archive_path = config.dist_dir.join(format!(
+        if !force {
+            if let Some(existing) = catalog
+                .entries
+                .values()
+                .find(|e| e.name == *name && e.target == current_target)
+            {
+                let archive_path = dist_dir.join(format!(
                     "{}-{}-{}.tar.zst",
                     existing.name, existing.version, existing.target
                 ));
@@ -242,13 +252,8 @@ fn build_runes(
                 }
             }
         }
-        let (store_hash, entry, archive) = build_rune_into(
-            config.root,
-            name,
-            config.dist_dir,
-            config.bootstrap,
-            config.target,
-        )?;
+        let (store_hash, entry, archive) =
+            build_rune_into(root, name, dist_dir, bootstrap, target)?;
         report(&format!(
             "built {} {} ({}) into {}",
             entry.name,
@@ -256,13 +261,18 @@ fn build_runes(
             entry.target,
             archive.display()
         ));
-        if config.all {
+        if all {
             install::install_store_only(&archive, None, None)
                 .with_context(|| format!("store-only install of {}", entry.name))?;
         }
         catalog.upsert(store_hash, entry);
-        nuon_io::write_nuon(config.index_path, &catalog.to_value())
-            .with_context(|| format!("update index {}", config.index_path.display()))?;
+        any_built = true;
+    }
+    // Write the index once, atomically, after all runes built successfully.
+    // If any rune failed, the previous index and dist/ remain untouched.
+    if any_built {
+        nuon_io::write_nuon(index_path, &catalog.to_value())
+            .with_context(|| format!("update index {}", index_path.display()))?;
     }
     Ok(())
 }
@@ -384,10 +394,7 @@ fn read_archive_index_entry(path: &Path) -> Result<(String, IndexEntry)> {
         anyhow::anyhow!("archive {} is missing .grimoire/rune.rn", path.display())
     })?;
 
-    let temp_rune = tempfile::NamedTempFile::with_suffix(".rn")
-        .with_context(|| "create temporary rune file")?;
-    fs::write(temp_rune.path(), &rune_bytes).with_context(|| "write temporary rune file")?;
-    let store_hash = crate::closure::store_hash_for_rune(temp_rune.path())
+    let store_hash = crate::closure::store_hash_for_rune_bytes(&rune_bytes, &metadata)
         .with_context(|| format!("compute store hash for {}", path.display()))?;
 
     let archive_hash = crate::archive::archive_hash(path)
@@ -466,7 +473,7 @@ fn rune_names_ordered(root: &Path) -> Result<Vec<String>> {
 
     // Build adjacency list: dependent -> [its dependencies within this tome]
     let mut adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut in_degree: HashMap<String, usize> = HashMap::new();
+    let mut in_degree: BTreeMap<String, usize> = BTreeMap::new();
     for name in &filtered_names {
         in_degree.entry(name.clone()).or_insert(0);
     }
@@ -489,10 +496,7 @@ fn rune_names_ordered(root: &Path) -> Result<Vec<String>> {
         .collect();
     queue.sort(); // Deterministic tie-break for seeds
     let mut ordered = Vec::new();
-    let mut idx = 0;
-    while idx < queue.len() {
-        let name = queue[idx].clone();
-        idx += 1;
+    while let Some(name) = queue.pop() {
         ordered.push(name.clone());
         if let Some(deps) = adj.get(&name) {
             for dep in deps {
@@ -566,7 +570,7 @@ export def build [ctx] {
   # `$ctx.sources.<name>.path`. Replace this stub with the real build steps.
   let bin_dir = ($ctx.package_dir | path join "bin")
   mkdir $bin_dir
-  "#!/usr/bin/env sh\nprintf '{NAME} is not implemented yet\n'\n" | save ($bin_dir | path join "{NAME}")
+  "#!/usr/bin/env sh\nprintf '{NAME} is not implemented yet\n'" | save ($bin_dir | path join "{NAME}")
 }
 "##;
     TEMPLATE
@@ -579,47 +583,17 @@ fn escape_nu_string(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Reads the `name` a tome declares for itself in its root `tome.rn`. Local sources are read
-/// in place; a remote source is cloned into a temporary directory just long enough to read
-/// its manifest.
-fn read_source_tome_name(url: &str, ref_name: &str) -> Result<String> {
-    let runtime = EmbeddedNuRuntime;
-    if sync_common::is_local_source(url, "tome.rn") {
-        let manifest_path = Path::new(url).join("tome.rn");
-        return Ok(runtime
-            .tome_manifest(&manifest_path)
-            .with_context(|| format!("read tome manifest {}", manifest_path.display()))?
-            .name);
-    }
-
-    let temp = tempfile::tempdir().context("create temporary directory to read tome manifest")?;
-    git::clone(url, ref_name, temp.path())
-        .with_context(|| format!("clone tome `{url}` to read its manifest"))?;
-    let manifest_path = temp.path().join("tome.rn");
-    if !manifest_path.exists() {
-        bail!("tome `{url}` is missing root tome.rn");
-    }
-    Ok(runtime
-        .tome_manifest(&manifest_path)
-        .with_context(|| format!("read tome manifest from {url}"))?
-        .name)
-}
-
 pub fn list() -> Result<()> {
-    for state in load_tomes()? {
-        println!("{}\t{}\t{}", state.name, state.url, state.ref_name);
-    }
-    // Note: the loop above prints requested data and uses plain `println!` so it survives `--quiet`.
-    Ok(())
+    sync_common::list_catalogs::<TomeState>()
 }
 
 pub fn update(args: TomeUpdateArgs) -> Result<()> {
     let tomes = match args.name {
         Some(name) => {
             validate_tome_name(&name)?;
-            vec![load_tome(&name)?]
+            vec![sync_common::load_catalog::<TomeState>(&name)?]
         }
-        None => load_tomes()?,
+        None => sync_common::load_catalogs::<TomeState>()?,
     };
 
     if tomes.is_empty() {
@@ -627,56 +601,30 @@ pub fn update(args: TomeUpdateArgs) -> Result<()> {
     }
 
     for tome in tomes {
-        let sync = sync_tome_cache(&tome)?;
-        report(&sync.report_line());
+        let line = sync_tome_cache(&tome)?;
+        report(&line);
     }
     Ok(())
 }
 
 pub fn update_all_configured() -> Result<()> {
-    for tome in load_tomes()? {
-        let sync = sync_tome_cache(&tome)?;
-        report(&sync.report_line());
+    for tome in sync_common::load_catalogs::<TomeState>()? {
+        let line = sync_tome_cache(&tome)?;
+        report(&line);
     }
     Ok(())
 }
 
 pub fn remove(args: TomeRemoveArgs) -> Result<()> {
-    validate_tome_name(&args.name)?;
-
-    let state_path = sync_common::state_dir("tomes")?.join(format!("{}.nuon", args.name));
-    if !state_path.exists() {
-        bail!("tome `{}` is not configured", args.name);
-    }
-
-    fs::remove_file(state_path)?;
-    report(&format!("removed tome {}", args.name));
-    Ok(())
+    sync_common::remove_catalog::<TomeState>(&args.name, false)
 }
 
 pub fn load_tomes() -> Result<Vec<TomeState>> {
-    let state_dir = sync_common::state_dir("tomes")?;
-    let mut states = Vec::new();
-    for path in sync_common::list_state_files(&state_dir)? {
-        states.push(
-            TomeState::from_value(nuon_io::read_nuon(&path)?)
-                .with_context(|| format!("read tome state {}", path.display()))?,
-        );
-    }
-    Ok(states)
-}
-
-pub fn load_tome(name: &str) -> Result<TomeState> {
-    let state_path = sync_common::state_dir("tomes")?.join(format!("{name}.nuon"));
-    if !state_path.exists() {
-        bail!("tome `{name}` is not configured");
-    }
-    TomeState::from_value(nuon_io::read_nuon(&state_path)?)
-        .with_context(|| format!("read tome state {}", state_path.display()))
+    sync_common::load_catalogs::<TomeState>()
 }
 
 pub fn ensure_tome_cache(tome: &TomeState) -> Result<PathBuf> {
-    let cache_path = sync_common::cache_path("tomes", &tome.name)?;
+    let cache_path = sync_common::cache_path(TomeState::SUBDIR, &tome.name)?;
     // Re-sync when the cache is missing *or* invalid: a sync that failed partway (e.g. after a
     // misconfigured URL) can leave a directory with no root `tome.rn`, which would otherwise be
     // trusted forever and fail every later read. Treating that as "not cached" lets it self-heal.
@@ -692,8 +640,8 @@ pub fn find_tome_for_path(path: &std::path::Path) -> Result<Option<TomeState>> {
     let canonical = path
         .canonicalize()
         .with_context(|| format!("canonicalize {}", path.display()))?;
-    for tome in load_tomes()? {
-        let cache = sync_common::cache_path("tomes", &tome.name)?;
+    for tome in sync_common::load_catalogs::<TomeState>()? {
+        let cache = sync_common::cache_path(TomeState::SUBDIR, &tome.name)?;
         let cache = if cache.exists() {
             cache
                 .canonicalize()
@@ -732,33 +680,17 @@ pub fn verify_archive(archive: &std::path::Path, tome: &TomeState) -> Result<()>
         .with_context(|| format!("verify archive signature for {}", archive.display()))
 }
 
-#[derive(Debug)]
-struct TomeSyncReport {
-    name: String,
-    ref_name: String,
-    from_commit: Option<String>,
-    to_commit: Option<String>,
-}
-
-impl TomeSyncReport {
-    fn report_line(&self) -> String {
-        if self.from_commit.is_some()
-            && self.to_commit.is_some()
-            && self.from_commit == self.to_commit
-        {
-            return format!(
-                "tome {} already at latest ({} {})",
-                self.name,
-                self.ref_name,
-                short_commit(self.to_commit.as_deref())
-            );
-        }
+fn sync_report_line(name: &str, ref_name: &str, from: Option<&str>, to: Option<&str>) -> String {
+    if from.is_some() && to.is_some() && from == to {
         format!(
-            "updated tome {} ({} {} -> {})",
-            self.name,
-            self.ref_name,
-            short_commit(self.from_commit.as_deref()),
-            short_commit(self.to_commit.as_deref())
+            "tome {name} already at latest ({ref_name} {})",
+            short_commit(to)
+        )
+    } else {
+        format!(
+            "updated tome {name} ({ref_name} {} -> {})",
+            short_commit(from),
+            short_commit(to)
         )
     }
 }
@@ -769,35 +701,35 @@ fn short_commit(commit: Option<&str>) -> String {
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
-fn sync_tome_cache(tome: &TomeState) -> Result<TomeSyncReport> {
-    let cache_dir = sync_common::cache_dir("tomes")?;
-    let cache_path = sync_common::cache_path("tomes", &tome.name)?;
-    fs::create_dir_all(&cache_dir)?;
-    let temp = tempfile::Builder::new()
-        .prefix("grimoire-tome-")
-        .tempdir_in(&cache_dir)?;
-    let staged = temp.path().join("cache");
-
-    if !sync_common::copy_local_source(&tome.name, &tome.url, &staged, "tome.rn")? {
-        status(&format!("cloning tome ({})", tome.name));
-        status(&format!(
-            "checking out tome ({}) ref ({})",
-            tome.name, tome.ref_name
-        ));
-        git::clone(&tome.url, &tome.ref_name, &staged)
-            .with_context(|| format!("could not sync tome `{}`", tome.name))?;
-    }
-
-    validate_staged_tome_cache(tome, &staged)?;
-    let to_commit = sync_common::promote_cache(&staged, &cache_path, || {
-        record_tome_sync_state(tome, &cache_path)
-    })?;
-    Ok(TomeSyncReport {
-        name: tome.name.clone(),
-        ref_name: tome.ref_name.clone(),
-        from_commit: tome.checked_commit.clone(),
-        to_commit,
-    })
+fn sync_tome_cache(tome: &TomeState) -> Result<String> {
+    let from_commit = tome.checked_commit.clone();
+    let to_commit = sync_common::sync_catalog_cache(
+        tome,
+        "tome.rn",
+        git::clone,
+        |tome, cache_path| {
+            let manifest = read_tome_manifest(cache_path)?;
+            validate_tome_cache(tome, cache_path, &manifest, &EmbeddedNuRuntime)
+        },
+        |tome, cache_path| {
+            let manifest = read_tome_manifest(cache_path)?;
+            let commit = git::head_commit(cache_path)?;
+            sync_common::record_catalog_sync_state::<TomeState>(
+                tome,
+                cache_path,
+                "tome.rn",
+                &manifest,
+                commit.as_deref(),
+            )?;
+            Ok(commit)
+        },
+    )?;
+    Ok(sync_report_line(
+        &tome.name,
+        &tome.ref_name,
+        from_commit.as_deref(),
+        to_commit.as_deref(),
+    ))
 }
 
 fn validate_local_tome_if_available(name: &str, url: &str) -> Result<()> {
@@ -806,8 +738,7 @@ fn validate_local_tome_if_available(name: &str, url: &str) -> Result<()> {
     }
 
     let source = Path::new(url);
-    let runtime = EmbeddedNuRuntime;
-    let manifest = runtime
+    let manifest = EmbeddedNuRuntime
         .tome_manifest(&source.join("tome.rn"))
         .with_context(|| format!("validate local tome manifest {}", source.display()))?;
     let tome = TomeState {
@@ -819,39 +750,7 @@ fn validate_local_tome_if_available(name: &str, url: &str) -> Result<()> {
         tome: None,
         signer_pubkeys: Vec::new(),
     };
-    validate_tome_cache(&tome, source, &manifest, &runtime)
-}
-
-fn record_tome_sync_state(tome: &TomeState, cache_path: &Path) -> Result<Option<String>> {
-    let runtime = EmbeddedNuRuntime;
-    let manifest_path = cache_path.join("tome.rn");
-    if !manifest_path.exists() {
-        bail!(
-            "tome cache is missing root tome.rn: {}",
-            cache_path.display()
-        );
-    }
-    let manifest = runtime.tome_manifest(&manifest_path)?;
-    validate_tome_cache(tome, cache_path, &manifest, &runtime)?;
-    let commit = git::head_commit(cache_path)?;
-    let mut state = load_tome(&tome.name).unwrap_or_else(|_| tome.clone());
-    // Trust-on-first-use: capture (or re-confirm) the signing key from this sync before the new
-    // state is written, so the pin and the cached manifest always move together.
-    let signer_pubkeys = sync_common::capture_signer(
-        "tome",
-        &tome.name,
-        &manifest_path,
-        &manifest.signers,
-        &state.signer_pubkeys,
-    )?;
-    state.checked_ref = Some(tome.ref_name.clone());
-    state.checked_commit = commit.clone();
-    state.tome = Some(manifest);
-    state.signer_pubkeys = signer_pubkeys;
-
-    let state_path = sync_common::state_dir("tomes")?.join(format!("{}.nuon", tome.name));
-    nuon_io::write_nuon(&state_path, &state.to_value())?;
-    Ok(commit)
+    validate_tome_cache(&tome, source, &manifest, &EmbeddedNuRuntime)
 }
 
 /// Loads a tome's binary package index along with the package-repository root that its
@@ -932,34 +831,14 @@ fn is_http_repo(repo: &str) -> bool {
     repo.starts_with("http://") || repo.starts_with("https://")
 }
 
-fn validate_staged_tome_cache(tome: &TomeState, cache_path: &Path) -> Result<()> {
-    let runtime = EmbeddedNuRuntime;
-    let manifest_path = cache_path.join("tome.rn");
+fn read_tome_manifest(path: &Path) -> Result<TomeManifest> {
+    let manifest_path = path.join("tome.rn");
     if !manifest_path.exists() {
-        bail!(
-            "tome cache is missing root tome.rn: {}",
-            cache_path.display()
-        );
+        bail!("tome cache is missing root tome.rn: {}", path.display());
     }
-    let manifest = runtime.tome_manifest(&manifest_path)?;
-    validate_tome_cache(tome, cache_path, &manifest, &runtime)
-}
-
-fn sha256_file(path: &Path) -> Result<String> {
-    let mut file = fs::File::open(path)
-        .with_context(|| format!("open file for hashing {}", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = file
-            .read(&mut buf)
-            .with_context(|| format!("read file for hashing {}", path.display()))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hex::encode(hasher.finalize()))
+    EmbeddedNuRuntime
+        .tome_manifest(&manifest_path)
+        .with_context(|| format!("read tome manifest {}", manifest_path.display()))
 }
 
 fn verify_runes_manifest(cache: &Path, pubkeys: &[String]) -> Result<()> {
@@ -1005,11 +884,12 @@ fn verify_rune_hashes(runes: &nu_protocol::Record, runes_dir: &Path) -> Result<(
         if !rune_path.exists() {
             bail!("runes manifest lists `{name}` but it does not exist in runes/");
         }
-        let actual_hex = sha256_file(&rune_path)
+        let actual_hash = crate::archive::archive_hash(&rune_path)
             .with_context(|| format!("hash rune {}", rune_path.display()))?;
+        let actual_hex = actual_hash.strip_prefix("sha256:").unwrap_or(&actual_hash);
         if actual_hex != expected_hex {
             bail!(
-                "runes manifest hash mismatch for `{name}`: expected {expected}, got sha256:{actual_hex}"
+                "runes manifest hash mismatch for `{name}`: expected {expected}, got {actual_hash}"
             );
         }
     }
@@ -1042,13 +922,7 @@ fn validate_tome_cache(
     manifest: &TomeManifest,
     runtime: &EmbeddedNuRuntime,
 ) -> Result<()> {
-    if manifest.name != tome.name {
-        bail!(
-            "tome manifest name `{}` does not match configured tome `{}`",
-            manifest.name,
-            tome.name
-        );
-    }
+    sync_common::validate_catalog_identity::<TomeState>(tome, manifest)?;
 
     let packages = manifest
         .packages
@@ -1125,39 +999,4 @@ fn validate_tome_packages(packages: &TomePackages) -> Result<()> {
     }
     validate_relative_package_path(&packages.index, "tome packages.index")?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sync_report_says_already_latest_when_commit_is_unchanged() {
-        let report = TomeSyncReport {
-            name: "core".to_owned(),
-            ref_name: "main".to_owned(),
-            from_commit: Some("abcdef1234567890".to_owned()),
-            to_commit: Some("abcdef1234567890".to_owned()),
-        };
-
-        assert_eq!(
-            report.report_line(),
-            "tome core already at latest (main abcdef1)"
-        );
-    }
-
-    #[test]
-    fn sync_report_shows_commit_movement_when_commit_changes() {
-        let report = TomeSyncReport {
-            name: "core".to_owned(),
-            ref_name: "main".to_owned(),
-            from_commit: Some("abcdef1234567890".to_owned()),
-            to_commit: Some("1234567890abcdef".to_owned()),
-        };
-
-        assert_eq!(
-            report.report_line(),
-            "updated tome core (main abcdef1 -> 1234567)"
-        );
-    }
 }

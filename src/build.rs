@@ -21,7 +21,7 @@ use crate::{
     cli::BuildArgs,
     fetch::{self, FetchedSource},
     install,
-    nu::runtime::{BuildDirs, BuildEnv, EmbeddedNuRuntime, RuneRuntime},
+    nu::runtime::{BuildDirs, BuildEnv, EmbeddedNuRuntime},
     paths,
     progress::{report, status},
     tome, toolchain,
@@ -54,18 +54,24 @@ fn core_bin_dirs() -> Result<Vec<PathBuf>> {
         let Some(state) = states.iter().find(|s| s.name == *name) else {
             continue;
         };
-        for path in state.bins.values() {
-            let bin = PathBuf::from(&state.store_path).join(path);
-            let Some(parent) = bin.parent() else {
-                continue;
-            };
-            let dir = parent.to_path_buf();
-            if !dirs.contains(&dir) {
-                dirs.push(dir);
-            }
-        }
+        install::push_bin_dirs(&mut dirs, state);
     }
     Ok(dirs)
+}
+
+/// Reads a rune's package metadata, verifying its signature and applying addendum patches.
+/// `tome_name` scopes tome-specific patches; pass `None` when the rune is not inside a tome.
+pub fn read_rune_metadata(
+    rune: &Path,
+    tome_name: Option<&str>,
+) -> Result<crate::model::PackageMetadata> {
+    tome::verify_rune(rune).with_context(|| format!("verify rune signature {}", rune.display()))?;
+    let mut metadata = EmbeddedNuRuntime
+        .package_metadata(rune)
+        .with_context(|| format!("read rune metadata {}", rune.display()))?;
+    addendum::apply_patches(&mut metadata, tome_name, rune)
+        .with_context(|| format!("apply addendums to {}", rune.display()))?;
+    Ok(metadata)
 }
 
 /// Returns `true` when `toolchain-wrappers` is installed, meaning the managed compiler boundary
@@ -212,12 +218,7 @@ pub fn build_package_with_env(
     let rune = resolve_rune(package)?;
 
     status(&format!("reading metadata ({package})"));
-    let runtime = EmbeddedNuRuntime;
-    let mut metadata = runtime
-        .package_metadata(&rune)
-        .with_context(|| format!("read rune metadata {}", rune.display()))?;
-    addendum::patched_package_metadata(&mut metadata, tome_name_for_rune(&rune)?.as_deref(), &rune)
-        .with_context(|| format!("apply addendums to {}", rune.display()))?;
+    let mut metadata = read_rune_metadata(&rune, tome_name_for_rune(&rune)?.as_deref())?;
 
     status(&format!("checking sources ({package})"));
     let rune_dir = rune.parent().unwrap_or_else(|| Path::new("."));
@@ -246,7 +247,7 @@ pub fn build_package_with_env(
         rune.display(),
         store_hash
     ));
-    let manifest = runtime
+    let manifest = EmbeddedNuRuntime
         .build(&rune, &dirs, &sources, &metadata.build_flags, env)
         .with_context(|| format!("build rune {}", rune.display()));
     std::env::set_current_dir(&original_cwd)
@@ -484,8 +485,24 @@ fn source_archive_kind(url: &str) -> Option<SourceArchiveKind> {
 }
 
 fn extract_source_archive(path: &Path, destination: &Path, kind: SourceArchiveKind) -> Result<()> {
+    // Copy into the private build directory before reading so a local attacker cannot swap
+    // the shared cache file between validation and extraction (AGENTS.md §10).
+    let safe = destination.with_extension("grimoire-tmp");
+    fs::copy(path, &safe)
+        .with_context(|| format!("copy source archive to temp {}", safe.display()))?;
+    let result = extract_source_archive_inner(&safe, destination, kind);
+    let _ = fs::remove_file(&safe);
+    result
+}
+
+fn extract_source_archive_inner(
+    path: &Path,
+    destination: &Path,
+    kind: SourceArchiveKind,
+) -> Result<()> {
     let mut tar = tar::Archive::new(source_archive_reader(path, kind)?);
-    validate_tar_entries(&mut tar)?;
+    archive::validate_tar_entries(&mut tar)
+        .with_context(|| format!("validate source archive {}", path.display()))?;
 
     let mut tar = tar::Archive::new(source_archive_reader(path, kind)?);
     tar.unpack(destination)
@@ -504,30 +521,6 @@ fn source_archive_reader(path: &Path, kind: SourceArchiveKind) -> Result<Box<dyn
                 .with_context(|| format!("decode zstd source archive {}", path.display()))?,
         )),
     }
-}
-
-fn validate_tar_entries<R: std::io::Read>(tar: &mut tar::Archive<R>) -> Result<()> {
-    for entry in tar.entries()? {
-        let entry = entry?;
-        let member = entry.path()?.display().to_string();
-        if !archive::validate_archive_member_path(&entry.path()?) {
-            bail!("source archive contains unsafe path: {member}");
-        }
-        let entry_type = entry.header().entry_type();
-        if entry_type.is_symlink() {
-            let link_target = entry.link_name()?.unwrap_or_default();
-            if !archive::validate_symlink_target(&entry.path()?, &link_target) {
-                bail!(
-                    "source archive contains unsafe symlink: {member} -> {}",
-                    link_target.display()
-                );
-            }
-        }
-        if entry_type.is_hard_link() {
-            bail!("source archive contains a hard link, which is not accepted yet: {member}");
-        }
-    }
-    Ok(())
 }
 
 pub fn resolve_rune(package: &str) -> Result<PathBuf> {

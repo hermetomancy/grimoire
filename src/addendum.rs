@@ -6,16 +6,13 @@
 //! `package` record. Addenda never execute code; they only replace or merge structured data.
 
 use anyhow::{Context, Result, bail};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use crate::{
     cli::{TomeAddArgs, TomeRemoveArgs, TomeUpdateArgs},
     model::{
-        AddendumManifest, AddendumState, PackageMetadata, validate_tome_name, validate_tome_ref,
-        validate_tome_url,
+        AddendumManifest, AddendumState, Catalog, PackageMetadata, validate_tome_name,
+        validate_tome_ref, validate_tome_url,
     },
     nu::nuon_io,
     progress::{report, status},
@@ -29,17 +26,23 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
     validate_tome_ref(&args.ref_name)?;
     sync_common::validate_local_source(&args.git_url, MANIFEST)?;
 
-    let name = read_source_addendum_name(&args.git_url, &args.ref_name)?;
+    let name = sync_common::read_source_catalog_name(
+        &args.git_url,
+        &args.ref_name,
+        MANIFEST,
+        |path| Ok(read_manifest(path)?.name),
+        tome::git::clone,
+    )?;
     validate_tome_name(&name)?;
     validate_local_addendum_if_available(&name, &args.git_url)?;
 
-    let state_dir = sync_common::state_dir("addendums")?;
+    let state_dir = sync_common::state_dir(AddendumState::SUBDIR)?;
     let state_path = state_dir.join(format!("{name}.nuon"));
     if state_path.exists() {
         bail!("addendum `{name}` already exists");
     }
 
-    fs::create_dir_all(&state_dir)?;
+    std::fs::create_dir_all(&state_dir)?;
     let state = AddendumState {
         name: name.clone(),
         url: sync_common::resolve_source_url(&args.git_url, MANIFEST)?,
@@ -55,34 +58,20 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
 }
 
 pub fn remove(args: TomeRemoveArgs) -> Result<()> {
-    validate_tome_name(&args.name)?;
-    let state_path = sync_common::state_dir("addendums")?.join(format!("{}.nuon", args.name));
-    if !state_path.exists() {
-        bail!("addendum `{}` is not configured", args.name);
-    }
-    fs::remove_file(state_path)?;
-    let cache_path = sync_common::cache_path("addendums", &args.name)?;
-    if cache_path.exists() {
-        fs::remove_dir_all(cache_path)?;
-    }
-    report(&format!("removed addendum {}", args.name));
-    Ok(())
+    sync_common::remove_catalog::<AddendumState>(&args.name, true)
 }
 
 pub fn list() -> Result<()> {
-    for state in load_addendums()? {
-        println!("{}\t{}\t{}", state.name, state.url, state.ref_name);
-    }
-    Ok(())
+    sync_common::list_catalogs::<AddendumState>()
 }
 
 pub fn update(args: TomeUpdateArgs) -> Result<()> {
     let addenda = match args.name {
         Some(name) => {
             validate_tome_name(&name)?;
-            vec![load_addendum(&name)?]
+            vec![sync_common::load_catalog::<AddendumState>(&name)?]
         }
-        None => load_addendums()?,
+        None => sync_common::load_catalogs::<AddendumState>()?,
     };
 
     if addenda.is_empty() {
@@ -115,7 +104,7 @@ pub fn apply_patches(
     tome_name: Option<&str>,
     rune: &Path,
 ) -> Result<()> {
-    for state in load_addendums()? {
+    for state in sync_common::load_catalogs::<AddendumState>()? {
         let cache = ensure_addendum_cache(&state)?;
         verify_addendum(&cache, &state)
             .with_context(|| format!("verify addendum `{}`", state.name))?;
@@ -154,28 +143,8 @@ pub fn apply_patches(
     Ok(())
 }
 
-pub fn patched_package_metadata(
-    metadata: &mut PackageMetadata,
-    tome_name: Option<&str>,
-    rune: &Path,
-) -> Result<()> {
-    apply_patches(metadata, tome_name, rune)
-}
-
-pub fn load_addendums() -> Result<Vec<AddendumState>> {
-    let state_dir = sync_common::state_dir("addendums")?;
-    let mut states = Vec::new();
-    for path in sync_common::list_state_files(&state_dir)? {
-        states.push(
-            AddendumState::from_value(nuon_io::read_nuon(&path)?)
-                .with_context(|| format!("read addendum state {}", path.display()))?,
-        );
-    }
-    Ok(states)
-}
-
 fn ensure_addendum_cache(state: &AddendumState) -> Result<PathBuf> {
-    let cache_path = sync_common::cache_path("addendums", &state.name)?;
+    let cache_path = sync_common::cache_path(AddendumState::SUBDIR, &state.name)?;
     if !cache_path.join(MANIFEST).exists() {
         sync_addendum_cache(state)?;
     }
@@ -183,63 +152,26 @@ fn ensure_addendum_cache(state: &AddendumState) -> Result<PathBuf> {
 }
 
 pub(crate) fn sync_addendum_cache(state: &AddendumState) -> Result<()> {
-    let cache_dir = sync_common::cache_dir("addendums")?;
-    let cache_path = sync_common::cache_path("addendums", &state.name)?;
-    fs::create_dir_all(&cache_dir)?;
-    let temp = tempfile::Builder::new()
-        .prefix("grimoire-addendum-")
-        .tempdir_in(&cache_dir)?;
-    let staged = temp.path().join("cache");
-
-    if !sync_common::copy_local_source(&state.name, &state.url, &staged, MANIFEST)? {
-        status(&format!(
-            "cloning addendum ({}) ref ({})",
-            state.name, state.ref_name
-        ));
-        tome::git::clone(&state.url, &state.ref_name, &staged)
-            .with_context(|| format!("could not sync addendum `{}`", state.name))?;
-    }
-
-    validate_staged_addendum_cache(state, &staged)?;
-    sync_common::promote_cache(&staged, &cache_path, || {
-        record_addendum_sync_state(state, &cache_path)
-    })
-}
-
-fn validate_staged_addendum_cache(state: &AddendumState, cache_path: &Path) -> Result<()> {
-    let manifest = read_manifest(cache_path)?;
-    validate_addendum_cache(state, &manifest)
-}
-
-fn validate_addendum_cache(state: &AddendumState, manifest: &AddendumManifest) -> Result<()> {
-    if manifest.name != state.name {
-        bail!(
-            "addendum manifest name `{}` does not match configured addendum `{}`",
-            manifest.name,
-            state.name
-        );
-    }
-    Ok(())
-}
-
-fn record_addendum_sync_state(state: &AddendumState, cache_path: &Path) -> Result<()> {
-    let manifest = read_manifest(cache_path)?;
-    validate_addendum_cache(state, &manifest)?;
-    let commit = tome::git::head_commit(cache_path)?;
-    let mut state = load_addendum(&state.name).unwrap_or_else(|_| state.clone());
-    let signer_pubkeys = sync_common::capture_signer(
-        "addendum",
-        &state.name,
-        &cache_path.join(MANIFEST),
-        &manifest.signers,
-        &state.signer_pubkeys,
-    )?;
-    state.checked_ref = Some(state.ref_name.clone());
-    state.checked_commit = commit;
-    state.addendum = Some(manifest);
-    state.signer_pubkeys = signer_pubkeys;
-    let state_path = sync_common::state_dir("addendums")?.join(format!("{}.nuon", state.name));
-    nuon_io::write_nuon(&state_path, &state.to_value())
+    sync_common::sync_catalog_cache(
+        state,
+        MANIFEST,
+        tome::git::clone,
+        |state, cache_path| {
+            let manifest = read_manifest(cache_path)?;
+            sync_common::validate_catalog_identity::<AddendumState>(state, &manifest)
+        },
+        |state, cache_path| {
+            let manifest = read_manifest(cache_path)?;
+            let commit = tome::git::head_commit(cache_path)?;
+            sync_common::record_catalog_sync_state::<AddendumState>(
+                state,
+                cache_path,
+                MANIFEST,
+                &manifest,
+                commit.as_deref(),
+            )
+        },
+    )
 }
 
 /// Verifies an addendum's detached signature (`addendum.nuon.minisig`) against the addendum's
@@ -252,27 +184,6 @@ pub fn verify_addendum(cache_path: &Path, state: &AddendumState) -> Result<()> {
     let manifest_path = cache_path.join(MANIFEST);
     signing::verify_detached(&manifest_path, &state.signer_pubkeys)
         .with_context(|| format!("verify addendum signature for {}", state.name))
-}
-
-fn load_addendum(name: &str) -> Result<AddendumState> {
-    let state_path = sync_common::state_dir("addendums")?.join(format!("{name}.nuon"));
-    if !state_path.exists() {
-        bail!("addendum `{name}` is not configured");
-    }
-    AddendumState::from_value(nuon_io::read_nuon(&state_path)?)
-        .with_context(|| format!("read addendum state {}", state_path.display()))
-}
-
-fn read_source_addendum_name(url: &str, ref_name: &str) -> Result<String> {
-    if sync_common::is_local_source(url, MANIFEST) {
-        return Ok(read_manifest(Path::new(url))?.name);
-    }
-
-    let temp =
-        tempfile::tempdir().context("create temporary directory to read addendum manifest")?;
-    tome::git::clone(url, ref_name, temp.path())
-        .with_context(|| format!("clone addendum `{url}` to read its manifest"))?;
-    Ok(read_manifest(temp.path())?.name)
 }
 
 fn read_manifest(root: &Path) -> Result<AddendumManifest> {
@@ -288,7 +199,7 @@ fn validate_local_addendum_if_available(name: &str, url: &str) -> Result<()> {
         return Ok(());
     }
     let manifest = read_manifest(Path::new(url))?;
-    validate_addendum_cache(
+    sync_common::validate_catalog_identity::<AddendumState>(
         &AddendumState {
             name: name.to_owned(),
             url: url.to_owned(),

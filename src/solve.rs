@@ -17,9 +17,9 @@ use std::{
 };
 
 use crate::{
-    addendum, archive, build, closure,
+    archive, build, closure,
     model::{Dependency, IndexEntry, PackageIndex, parse_version_relaxed},
-    nu::runtime::{EmbeddedNuRuntime, RuneRuntime},
+    nu::runtime::EmbeddedNuRuntime,
     paths, tome, toolchain,
 };
 
@@ -570,15 +570,7 @@ fn gather_rune_candidate(
     let Some(rune) = build::find_rune(name)? else {
         return Ok(None);
     };
-    let mut metadata = EmbeddedNuRuntime
-        .package_metadata(&rune)
-        .with_context(|| format!("read rune metadata {}", rune.display()))?;
-    addendum::patched_package_metadata(
-        &mut metadata,
-        build::tome_name_for_rune(&rune)?.as_deref(),
-        &rune,
-    )
-    .with_context(|| format!("apply addendums to {}", rune.display()))?;
+    let metadata = build::read_rune_metadata(&rune, build::tome_name_for_rune(&rune)?.as_deref())?;
     let version = parse_version_relaxed(&metadata.version)
         .with_context(|| format!("rune version `{}` for `{name}`", metadata.version))?;
     let runtime: Vec<Dependency> = metadata

@@ -16,17 +16,14 @@ use std::{
 };
 
 use crate::{
-    addendum, archive, build,
+    archive, build,
     cli::{InstallArgs, PackageArg},
     fetch, lock,
     model::{
         Dependency, PackageMetadata, PackageState, parse_version_relaxed,
         validate_relative_package_path, validate_sha256, validate_target, validate_targets,
     },
-    nu::{
-        nuon_io,
-        runtime::{EmbeddedNuRuntime, RuneRuntime},
-    },
+    nu::nuon_io,
     paths, profile,
     progress::{report, status, success},
     solve::{self, Plan, PlanStep, Substitute},
@@ -193,34 +190,38 @@ pub(crate) fn install_store_only(
         validate_sha256(expected, "expected archive hash")?;
     }
 
-    // Verify integrity before the archive is read or extracted. A mismatch is fatal.
-    status("hashing archive");
-    let archive_hash = archive::archive_hash(archive_path)?;
-    if let Some(expected) = &expected_hash {
-        archive::verify_hash(&archive_hash, expected)
-            .with_context(|| format!("verify archive {}", archive_path.display()))?;
-        success("archive hash verified");
-    }
-
-    status(&format!(
-        "validating archive paths ({})",
-        archive_path.display()
-    ));
-    archive::validate_archive_paths(archive_path)?;
-
-    status("reading package metadata");
-    let metadata = inspect_archive(archive_path)?;
-    validate_target(&metadata, &paths::target_triple())?;
-
-    let root = paths::install_root()?;
-    let (package_dir, store_hash) = resolve_store_dir(&metadata, expected_store_hash)?;
-
     // Stage on the same filesystem as the store so `promote_package` can use an atomic rename.
     let store_root = paths::store_root()?;
     fs::create_dir_all(&store_root)?;
     let transaction = tempfile::Builder::new()
         .prefix("grimoire-")
         .tempdir_in(&store_root)?;
+    let safe_archive = transaction.path().join("archive.tar.zst");
+    fs::copy(archive_path, &safe_archive)
+        .with_context(|| format!("copy archive to transaction {}", safe_archive.display()))?;
+
+    // Verify integrity before the archive is read or extracted. A mismatch is fatal.
+    status("hashing archive");
+    let archive_hash = archive::archive_hash(&safe_archive)?;
+    if let Some(expected) = &expected_hash {
+        archive::verify_hash(&archive_hash, expected)
+            .with_context(|| format!("verify archive {}", safe_archive.display()))?;
+        success("archive hash verified");
+    }
+
+    status(&format!(
+        "validating archive paths ({})",
+        safe_archive.display()
+    ));
+    archive::validate_archive_paths(&safe_archive)?;
+
+    status("reading package metadata");
+    let metadata = inspect_archive(&safe_archive)?;
+    validate_target(&metadata, &paths::target_triple())?;
+
+    let root = paths::install_root()?;
+    let (package_dir, store_hash) = resolve_store_dir(&metadata, expected_store_hash)?;
+
     let staging_dir = transaction.path().join("package");
     fs::create_dir_all(&staging_dir)?;
 
@@ -228,7 +229,7 @@ pub(crate) fn install_store_only(
         "extracting into transaction ({})",
         transaction.path().display()
     ));
-    extract_archive(archive_path, &staging_dir)?;
+    extract_archive(&safe_archive, &staging_dir)?;
 
     status("validating extracted files");
     validate_bins(&metadata, &paths::target_triple(), &staging_dir)?;
@@ -334,15 +335,8 @@ fn ensure_build_deps_installed_inner(
         } else if let Some(rune) = &step.rune {
             let store_hash = crate::closure::store_hash_for_rune(rune)
                 .with_context(|| format!("cannot compute store hash for `{}`", step.name))?;
-            let mut metadata = EmbeddedNuRuntime
-                .package_metadata(rune)
-                .with_context(|| format!("read rune metadata {}", rune.display()))?;
-            addendum::patched_package_metadata(
-                &mut metadata,
-                build::tome_name_for_rune(rune)?.as_deref(),
-                rune,
-            )
-            .with_context(|| format!("apply addendums to {}", rune.display()))?;
+            let metadata =
+                build::read_rune_metadata(rune, build::tome_name_for_rune(rune)?.as_deref())?;
             let build_deps = metadata.deps.build_for(&paths::target_triple());
             ensure_build_deps_installed_inner(&build_deps, building)
                 .with_context(|| format!("install build dependencies for `{}`", step.name))?;
@@ -423,15 +417,8 @@ impl Installer {
     /// Prints the plan for a source-rune root install: the rune itself, plus the solver plan
     /// for its build and runtime dependencies (everything that would land in the install root).
     fn dry_run_source_root(&self, rune: &Path) -> Result<()> {
-        let mut metadata = EmbeddedNuRuntime
-            .package_metadata(rune)
-            .with_context(|| format!("read rune metadata {}", rune.display()))?;
-        addendum::patched_package_metadata(
-            &mut metadata,
-            build::tome_name_for_rune(rune)?.as_deref(),
-            rune,
-        )
-        .with_context(|| format!("apply addendums to {}", rune.display()))?;
+        let metadata =
+            build::read_rune_metadata(rune, build::tome_name_for_rune(rune)?.as_deref())?;
         println!(
             "plan:\n  + {} {} (source rune {})",
             metadata.name,
@@ -599,17 +586,8 @@ impl Installer {
     /// dependencies are resolved and installed first so they are present when the rune runs; the
     /// `building` guard rejects a build dependency that cycles back to the package being built.
     fn build_and_install(&mut self, rune: &Path, store_hash: &str) -> Result<InstalledArchive> {
-        tome::verify_rune(rune)
-            .with_context(|| format!("verify rune signature {}", rune.display()))?;
-        let mut metadata = EmbeddedNuRuntime
-            .package_metadata(rune)
-            .with_context(|| format!("read rune metadata {}", rune.display()))?;
-        addendum::patched_package_metadata(
-            &mut metadata,
-            build::tome_name_for_rune(rune)?.as_deref(),
-            rune,
-        )
-        .with_context(|| format!("apply addendums to {}", rune.display()))?;
+        let metadata =
+            build::read_rune_metadata(rune, build::tome_name_for_rune(rune)?.as_deref())?;
         validate_targets(&metadata, &paths::target_triple())
             .with_context(|| format!("validate target for `{}`", metadata.name))?;
         if !self.building.insert(metadata.name.clone()) {
@@ -805,6 +783,19 @@ pub(crate) fn find_dep_state<'a>(
         })
 }
 
+pub(crate) fn push_bin_dirs(dirs: &mut Vec<PathBuf>, state: &PackageState) {
+    for path in state.bins.values() {
+        let bin = PathBuf::from(&state.store_path).join(path);
+        let Some(parent) = bin.parent() else {
+            continue;
+        };
+        let dir = parent.to_path_buf();
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+}
+
 pub(crate) fn build_dep_bin_dirs(deps: &[Dependency]) -> Result<Vec<PathBuf>> {
     let states = installed_states()?;
     let mut dirs = Vec::new();
@@ -812,16 +803,7 @@ pub(crate) fn build_dep_bin_dirs(deps: &[Dependency]) -> Result<Vec<PathBuf>> {
         let Some(state) = find_dep_state(&states, &dep.name) else {
             continue;
         };
-        for path in state.bins.values() {
-            let bin = PathBuf::from(&state.store_path).join(path);
-            let Some(parent) = bin.parent() else {
-                continue;
-            };
-            let dir = parent.to_path_buf();
-            if !dirs.contains(&dir) {
-                dirs.push(dir);
-            }
-        }
+        push_bin_dirs(&mut dirs, state);
     }
     Ok(dirs)
 }
@@ -993,11 +975,11 @@ fn remove_one(name: &str) -> Result<PackageState> {
 fn autoremove_orphans(initial: Vec<String>) -> Result<()> {
     let mut queue: VecDeque<String> = initial.into();
     let mut seen: HashSet<String> = HashSet::new();
+    let mut states = installed_states()?;
     while let Some(name) = queue.pop_front() {
         if !seen.insert(name.clone()) {
             continue;
         }
-        let states = installed_states()?;
         let Some(name_state) = states.iter().find(|s| s.name == name) else {
             continue;
         };
@@ -1020,6 +1002,7 @@ fn autoremove_orphans(initial: Vec<String>) -> Result<()> {
         for dep in removed.runtime_deps {
             queue.push_back(dep);
         }
+        states = installed_states()?;
     }
     Ok(())
 }

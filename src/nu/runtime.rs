@@ -28,19 +28,6 @@ use crate::{
     toolchain::HostTool,
 };
 
-pub trait RuneRuntime {
-    fn package_metadata(&self, rune: &Path) -> Result<PackageMetadata>;
-    fn tome_manifest(&self, tome: &Path) -> Result<TomeManifest>;
-    fn build(
-        &self,
-        rune: &Path,
-        dirs: &BuildDirs,
-        sources: &BTreeMap<String, FetchedSource>,
-        build_flags: &BTreeMap<String, String>,
-        env: &BuildEnv,
-    ) -> Result<Option<BuildManifest>>;
-}
-
 #[derive(Debug, Default)]
 pub struct EmbeddedNuRuntime;
 
@@ -97,18 +84,18 @@ impl Default for BuildEnv {
     }
 }
 
-impl RuneRuntime for EmbeddedNuRuntime {
-    fn package_metadata(&self, rune: &Path) -> Result<PackageMetadata> {
+impl EmbeddedNuRuntime {
+    pub fn package_metadata(&self, rune: &Path) -> Result<PackageMetadata> {
         PackageMetadata::from_value(exported_const(rune, "package")?, false)
             .with_context(|| format!("parse package metadata from {}", rune.display()))
     }
 
-    fn tome_manifest(&self, tome: &Path) -> Result<TomeManifest> {
+    pub fn tome_manifest(&self, tome: &Path) -> Result<TomeManifest> {
         TomeManifest::from_value(exported_const(tome, "tome")?)
             .with_context(|| format!("parse tome manifest from {}", tome.display()))
     }
 
-    fn build(
+    pub fn build(
         &self,
         rune: &Path,
         dirs: &BuildDirs,
@@ -146,7 +133,7 @@ impl RuneRuntime for EmbeddedNuRuntime {
         let env_prefix = path_env_assignment(&path_entries)?;
         let source = format!(
             "{env_prefix}use {} build\nbuild {}\n",
-            nuon_string(&rune.display().to_string())?,
+            nuon_io::to_nuon_string(&Value::string(rune.display().to_string(), Span::unknown()))?,
             nuon_io::to_nuon_string(&context)?,
         );
 
@@ -586,28 +573,27 @@ impl BuildLogStreamer {
     /// Joins the reader threads (so the tail holds all drained output) and returns the retained
     /// trailing lines for error reporting together with the log file path.
     fn finish(mut self) -> (Vec<String>, Option<PathBuf>) {
-        if let Some(handle) = self.stdout.take() {
-            let _ = handle.join();
-        }
-        if let Some(handle) = self.stderr.take() {
-            let _ = handle.join();
-        }
+        self.join_handles();
         let tail = match self.tail.lock() {
             Ok(tail) => tail.iter().cloned().collect(),
             Err(poisoned) => poisoned.into_inner().iter().cloned().collect(),
         };
         (tail, self.log_path.clone())
     }
-}
 
-impl Drop for BuildLogStreamer {
-    fn drop(&mut self) {
+    fn join_handles(&mut self) {
         if let Some(handle) = self.stdout.take() {
             let _ = handle.join();
         }
         if let Some(handle) = self.stderr.take() {
             let _ = handle.join();
         }
+    }
+}
+
+impl Drop for BuildLogStreamer {
+    fn drop(&mut self) {
+        self.join_handles();
     }
 }
 
@@ -665,10 +651,6 @@ impl Drop for WorkingDirectoryGuard {
 
 /// Renders a string as a NUON string literal so it can be safely interpolated into the
 /// generated Nushell build runner. Routed through `nuon_io` per the single-NUON-layer rule.
-fn nuon_string(value: &str) -> Result<String> {
-    nuon_io::to_nuon_string(&Value::string(value, nu_protocol::Span::unknown()))
-}
-
 /// Directories containing POSIX-mandated utilities that the host OS provides.
 /// These are always included in managed build PATH so runes don't need to declare
 /// ambient POSIX tools as managed build dependencies.

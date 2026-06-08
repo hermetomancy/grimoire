@@ -10,10 +10,10 @@ use semver::Version;
 use std::path::PathBuf;
 
 use crate::{
-    addendum, install,
-    model::{LockFile, parse_version_relaxed},
+    install,
+    model::{AddendumState, LockFile, parse_version_relaxed},
     nu::nuon_io,
-    paths, tome,
+    paths, sync_common, tome,
 };
 
 /// One package as recorded in `grimoire.lock.nuon`: enough to pin a reproducible reinstall to the
@@ -40,7 +40,7 @@ pub fn rebuild() -> Result<()> {
     let lock = LockFile::new(
         paths::target_triple(),
         tome::load_tomes()?,
-        addendum::load_addendums()?,
+        sync_common::load_catalogs::<AddendumState>()?,
         install::installed_states()?,
     );
     let path = lock_path()?;

@@ -63,26 +63,12 @@ pub fn pack_built_rune(
     Ok(archive_path)
 }
 
-fn package_payload_dir<'a>(package_dir: &'a Path, final_prefix: &Path) -> PathBufOrBorrowed<'a> {
+fn package_payload_dir(package_dir: &Path, final_prefix: &Path) -> PathBuf {
     let destdir_payload = package_dir.join(relative_destdir_prefix(final_prefix));
     if destdir_payload.exists() {
-        PathBufOrBorrowed::Owned(destdir_payload)
+        destdir_payload
     } else {
-        PathBufOrBorrowed::Borrowed(package_dir)
-    }
-}
-
-enum PathBufOrBorrowed<'a> {
-    Borrowed(&'a Path),
-    Owned(PathBuf),
-}
-
-impl AsRef<Path> for PathBufOrBorrowed<'_> {
-    fn as_ref(&self) -> &Path {
-        match self {
-            Self::Borrowed(path) => path,
-            Self::Owned(path) => path.as_path(),
-        }
+        package_dir.to_path_buf()
     }
 }
 
