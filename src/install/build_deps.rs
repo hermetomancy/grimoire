@@ -117,7 +117,7 @@ pub(crate) fn find_dep_state<'a>(
         .or_else(|| {
             states
                 .iter()
-                .find(|state| state.provides.contains(&name.to_owned()))
+                .find(|state| state.provides.iter().any(|p| p == name))
         })
 }
 

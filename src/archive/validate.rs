@@ -58,10 +58,20 @@ pub fn validate_symlink_target(link: &Path, target: &Path) -> bool {
 /// Rejects traversal, absolute paths, Windows-style paths, hard links,
 /// escaping symlinks, and members nested under symlinks (AGENTS.md §10.2–§10.3).
 pub fn validate_archive_paths(path: &Path) -> Result<()> {
+    validate_archive_paths_capturing(path, None).map(|_| ())
+}
+
+/// Like [`validate_archive_paths`], but also returns the text of the member named `capture`
+/// (when present) from the same pass, so callers that need embedded metadata do not have to
+/// re-read the archive after validating it.
+pub fn validate_archive_paths_capturing(
+    path: &Path,
+    capture: Option<&str>,
+) -> Result<Option<String>> {
     let file = File::open(path)?;
     let decoder = zstd::stream::read::Decoder::new(file)?;
     let mut archive = tar::Archive::new(decoder);
-    validate_tar_entries(&mut archive)
+    validate_tar_entries_capturing(&mut archive, capture)
         .with_context(|| format!("validate archive {}", path.display()))
 }
 
@@ -69,12 +79,21 @@ pub fn validate_archive_paths(path: &Path) -> Result<()> {
 /// Rejects traversal, absolute paths, Windows-style paths, hard links,
 /// escaping symlinks, and members nested under symlinks.
 pub fn validate_tar_entries<R: Read>(tar: &mut tar::Archive<R>) -> Result<()> {
+    validate_tar_entries_capturing(tar, None).map(|_| ())
+}
+
+/// [`validate_tar_entries`] plus single-pass capture of the member named `capture`.
+pub fn validate_tar_entries_capturing<R: Read>(
+    tar: &mut tar::Archive<R>,
+    capture: Option<&str>,
+) -> Result<Option<String>> {
     let mut bad = Vec::new();
     let mut members: Vec<PathBuf> = Vec::new();
     let mut symlinks: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut captured = None;
 
     for entry in tar.entries()? {
-        let entry = entry?;
+        let mut entry = entry?;
         let member_path = entry.path()?.into_owned();
         let member = member_path.display().to_string();
         if !validate_archive_member_path(&member_path) {
@@ -97,6 +116,20 @@ pub fn validate_tar_entries<R: Read>(tar: &mut tar::Archive<R>) -> Result<()> {
                 );
             }
             symlinks.insert(member_path.clone());
+        }
+        if let Some(wanted) = capture {
+            let normalized = member_path
+                .strip_prefix(".")
+                .unwrap_or(&member_path)
+                .display()
+                .to_string();
+            if normalized == wanted {
+                let mut text = String::new();
+                entry
+                    .read_to_string(&mut text)
+                    .with_context(|| format!("read archive member `{wanted}`"))?;
+                captured = Some(text);
+            }
         }
         members.push(member_path);
     }
@@ -123,7 +156,7 @@ pub fn validate_tar_entries<R: Read>(tar: &mut tar::Archive<R>) -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(captured)
 }
 
 #[cfg(test)]
