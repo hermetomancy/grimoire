@@ -11,7 +11,7 @@
 
 use anyhow::{Context, Result, bail};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -21,6 +21,7 @@ use crate::{
     model::PackageState,
     nu::nuon_io,
     paths,
+    preferences::Preferences,
     progress::{report, status, success},
 };
 
@@ -116,6 +117,11 @@ pub fn create_generation(states: &[PackageState]) -> Result<u64> {
 
     status(&format!("building generation {next_id}"));
 
+    // Resolve contested bin names across the whole set before linking anything, so the
+    // outcome does not depend on package iteration order.
+    let skip_bins = contested_bin_skips(states)?;
+    let no_skips = BTreeSet::new();
+
     for state in states {
         let store_path = PathBuf::from(&state.store_path);
         if !store_path.exists() {
@@ -125,7 +131,8 @@ pub fn create_generation(states: &[PackageState]) -> Result<u64> {
             ));
             continue;
         }
-        link_package_into_generation(state, &gen_dir)?;
+        let skips = skip_bins.get(state.name.as_str()).unwrap_or(&no_skips);
+        link_package_into_generation(state, &gen_dir, skips)?;
     }
 
     let generation = Generation {
@@ -447,7 +454,52 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
-fn link_package_into_generation(state: &PackageState, gen_dir: &Path) -> Result<()> {
+/// For each bin name declared by more than one package, applies the user's `grm prefer`
+/// choice: the preferred package keeps the bin, every other claimant gets it added to its
+/// skip set. A contested bin with no applicable preference is an error naming the contenders,
+/// so the failure is order-independent and actionable.
+fn contested_bin_skips(states: &[PackageState]) -> Result<BTreeMap<String, BTreeSet<String>>> {
+    let mut owners: BTreeMap<&str, Vec<&PackageState>> = BTreeMap::new();
+    for state in states {
+        for bin_name in state.bins.keys() {
+            owners.entry(bin_name).or_default().push(state);
+        }
+    }
+    let preferences = Preferences::load().unwrap_or_default();
+    let mut skips: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (bin_name, claimants) in owners {
+        if claimants.len() < 2 {
+            continue;
+        }
+        let preferred = preferences
+            .providers
+            .get(bin_name)
+            .and_then(|p| claimants.iter().find(|s| s.name == *p));
+        let Some(winner) = preferred else {
+            let names: Vec<&str> = claimants.iter().map(|s| s.name.as_str()).collect();
+            bail!(
+                "bin `{bin_name}` is provided by multiple installed packages ({}); \
+                 run `grm prefer {bin_name} <package>` to choose which one provides it",
+                names.join(", ")
+            );
+        };
+        for state in &claimants {
+            if state.name != winner.name {
+                skips
+                    .entry(state.name.clone())
+                    .or_default()
+                    .insert(bin_name.to_owned());
+            }
+        }
+    }
+    Ok(skips)
+}
+
+fn link_package_into_generation(
+    state: &PackageState,
+    gen_dir: &Path,
+    skip_bins: &BTreeSet<String>,
+) -> Result<()> {
     let store_path = PathBuf::from(&state.store_path);
     let store_root = paths::store_root()?;
     if !store_path.starts_with(&store_root) {
@@ -462,6 +514,10 @@ fn link_package_into_generation(state: &PackageState, gen_dir: &Path) -> Result<
     // Link declared bins into the generation's bin/ directory.
     // The bin name in the profile is the key from `state.bins`; the source path is the value.
     for (bin_name, bin_path) in &state.bins {
+        // This package lost the contested bin to a `grm prefer` choice; the winner links it.
+        if skip_bins.contains(bin_name) {
+            continue;
+        }
         let src = store_path.join(bin_path);
         if !src.exists() {
             report(&format!(
@@ -473,9 +529,12 @@ fn link_package_into_generation(state: &PackageState, gen_dir: &Path) -> Result<
         }
         let dst = gen_dir.join("bin").join(bin_name);
         if dst.exists() {
+            // Backstop only: contested declared bins are resolved order-independently by
+            // `contested_bin_skips` before linking starts.
             bail!(
                 "bin `{bin_name}` from `{}` collides with an earlier package in this generation. \
-                 To fix: remove or upgrade the other package, or adjust its binaries to avoid overlap.",
+                 To fix: run `grm prefer {bin_name} <package>` to choose a provider, or remove \
+                 the other package.",
                 state.name
             );
         }

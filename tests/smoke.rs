@@ -3132,6 +3132,181 @@ fn orphans_lists_and_autoremove_reclaims() {
     );
 }
 
+/// Like [`dep_archive_entry`], but the archive ships a bin named `bin_name` (instead of the
+/// package name) whose shim prints the package name — for contested-capability scenarios.
+fn capability_archive_entry(
+    dist: &Path,
+    pkg: &str,
+    bin_name: &str,
+    triple: &str,
+    store_hash: &str,
+) -> String {
+    let name = format!("{pkg}-0.1.0-{triple}.tar.zst");
+    let package_nuon = format!(
+        "{{format: 1, name: \"{pkg}\", version: \"0.1.0\", target: \"{triple}\", store_path: \"{}\", bins: {{default: {{{bin_name}: \"bin/{bin_name}\"}}}}, deps: {{ runtime: [] }}}}\n",
+        fake_store_basename_with_hash(pkg, "0.1.0", store_hash)
+    );
+    fs::create_dir_all(dist).unwrap();
+    let archive_path = dist.join(&name);
+    let mut builder = open_archive(&archive_path);
+    append_file(
+        &mut builder,
+        ".grimoire/package.nuon",
+        package_nuon.as_bytes(),
+        0o644,
+    );
+    append_file(
+        &mut builder,
+        &format!("bin/{bin_name}"),
+        format!("#!/usr/bin/env sh\nprintf '{pkg}\\n'\n").as_bytes(),
+        0o755,
+    );
+    finish_archive(builder);
+    let hash = sha256_file(&archive_path);
+    format!(
+        "    \"{store_hash}\": {{ name: \"{pkg}\", version: \"0.1.0\", target: \"{triple}\", archive: \"{name}\", archive_hash: \"{hash}\", runtime_deps: [], provides: [\"{bin_name}\"]}}"
+    )
+}
+
+#[test]
+fn prefer_resolves_contested_bins_between_installed_packages() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let dist = tome.join("dist");
+
+    // Both packages declare the bin `tool`; their shims print their own package name so the
+    // test can observe which provider owns the contested bin in the active generation.
+    let entries = vec![
+        capability_archive_entry(&dist, "alpha", "tool", &triple, "cafef00dcafef00d-alf"),
+        capability_archive_entry(&dist, "beta", "tool", &triple, "cafef00dcafef00d-bet"),
+    ];
+    write_dep_tome(tome, "prefcore", &entries);
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add prefcore",
+    );
+    assert_success(&run(root, &["tome", "update", "prefcore"]), "tome update");
+
+    assert_success(&run(root, &["install", "alpha"]), "install alpha");
+    // Installing the second claimant must fail with an actionable pointer at `grm prefer`.
+    assert_failure_contains(
+        &run(root, &["install", "beta"]),
+        "grm prefer tool",
+        "contested bin without preference",
+    );
+
+    // Preferring a package that doesn't provide the capability is rejected with providers.
+    assert_failure_contains(
+        &run(root, &["prefer", "tool", "nosuchpkg"]),
+        "does not provide `tool`",
+        "prefer a non-provider",
+    );
+
+    assert_success(&run(root, &["prefer", "tool", "beta"]), "prefer beta");
+    assert_success(
+        &run(root, &["install", "beta"]),
+        "install beta after prefer",
+    );
+    assert_eq!(
+        stdout(&run_shim(root, "tool")).trim(),
+        "beta",
+        "preferred package must own the contested bin"
+    );
+
+    // Switching the preference relinks the active generation without reinstalling.
+    assert_success(&run(root, &["prefer", "tool", "alpha"]), "prefer alpha");
+    assert_eq!(
+        stdout(&run_shim(root, "tool")).trim(),
+        "alpha",
+        "switching the preference must flip the bin"
+    );
+
+    // The listing shows the recorded choice.
+    let listing = run(root, &["prefer"]);
+    assert_success(&listing, "prefer listing");
+    assert!(
+        stdout(&listing).contains("tool\talpha"),
+        "listing should show the preference: {}",
+        stdout(&listing)
+    );
+
+    // Clearing the preference is refused while the bin is still contested; once only one
+    // claimant remains it succeeds.
+    assert_failure_contains(
+        &run(root, &["prefer", "--unset", "tool"]),
+        "would leave it contested",
+        "unset while contested",
+    );
+    assert_success(&run(root, &["remove", "beta"]), "remove beta");
+    assert_success(
+        &run(root, &["prefer", "--unset", "tool"]),
+        "unset after remove",
+    );
+    assert_eq!(
+        stdout(&run_shim(root, "tool")).trim(),
+        "alpha",
+        "sole remaining claimant owns the bin"
+    );
+}
+
+#[test]
+fn solver_resolves_capability_dependency_through_preference() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let dist = tome.join("dist");
+
+    // `consumer` depends on the capability `tool`, provided by both alpha and beta. Without
+    // a preference the pick is arbitrary; with one it must be the preferred provider.
+    let entries = vec![
+        capability_archive_entry(&dist, "alpha", "tool", &triple, "cafef00dcafef00d-alf"),
+        capability_archive_entry(&dist, "beta", "tool", &triple, "cafef00dcafef00d-bet"),
+        dep_archive_entry(
+            &dist,
+            "consumer",
+            "0.1.0",
+            &triple,
+            "[\"tool\"]",
+            "cafef00dcafef00d-con",
+        ),
+    ];
+    write_dep_tome(tome, "capcore", &entries);
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add capcore",
+    );
+    assert_success(&run(root, &["tome", "update", "capcore"]), "tome update");
+
+    assert_success(&run(root, &["prefer", "tool", "beta"]), "prefer beta");
+    assert_success(&run(root, &["install", "consumer"]), "install consumer");
+    assert!(
+        root.join("state")
+            .join("packages")
+            .join("beta.nuon")
+            .exists(),
+        "preferred provider must be installed"
+    );
+    assert!(
+        !root
+            .join("state")
+            .join("packages")
+            .join("alpha.nuon")
+            .exists(),
+        "non-preferred provider must not be installed"
+    );
+}
+
 #[test]
 fn files_owns_and_provides_resolve_package_contents() {
     let root = TempDir::new().unwrap();

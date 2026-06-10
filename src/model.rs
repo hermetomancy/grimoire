@@ -1372,7 +1372,7 @@ fn expect_string(value: &Value, label: &str) -> Result<String> {
     }
 }
 
-fn expect_string_map(value: &Value, label: &str) -> Result<BTreeMap<String, String>> {
+pub(crate) fn expect_string_map(value: &Value, label: &str) -> Result<BTreeMap<String, String>> {
     let Value::Record { val, .. } = value else {
         bail!("{label} must be a record");
     };
