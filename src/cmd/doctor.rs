@@ -66,6 +66,7 @@ pub fn doctor() -> Result<()> {
     problems += check_install_root(&root);
     problems += check_current_symlink()?;
     problems += check_state_files()?;
+    problems += check_state_generation_divergence()?;
     problems += check_tomes()?;
     problems += check_packages()?;
     problems += check_duplicate_bins()?;
@@ -131,6 +132,40 @@ fn check_state_files() -> Result<usize> {
         }
     }
     Ok(problems)
+}
+
+/// Activation restores state from the generation snapshot before flipping the symlink, so
+/// state and the active generation should always agree; divergence means an interrupted
+/// activation (crash between state restore and symlink flip) or a hand-edited state dir.
+fn check_state_generation_divergence() -> Result<usize> {
+    let Some(id) = profile::current_generation_id()? else {
+        return Ok(0);
+    };
+    let gen_dir = profile::generation_dir(id)?;
+    let Some(snapshot) = profile::read_state_snapshot(&gen_dir)? else {
+        return Ok(0); // pre-snapshot generation; nothing to compare against
+    };
+    let installed: BTreeMap<String, String> = install::installed_states()?
+        .into_iter()
+        .map(|s| (s.name, s.version))
+        .collect();
+    // Subset check, not equality: store-only installs (`grm tome build`) legitimately add
+    // state entries that are not linked into the active generation. What must never happen
+    // is the active generation describing packages that state lost or re-versioned.
+    let diverged: Vec<String> = snapshot
+        .into_iter()
+        .filter(|s| installed.get(&s.name) != Some(&s.version))
+        .map(|s| format!("{} {}", s.name, s.version))
+        .collect();
+    if !diverged.is_empty() {
+        eprintln!(
+            "grimoire: state/packages diverges from active generation {id} ({}); interrupted \
+             activation? run `grm switch <id>` to converge",
+            diverged.join(", ")
+        );
+        return Ok(1);
+    }
+    Ok(0)
 }
 
 /// Two installed packages claiming the same bin name without a `grm prefer` choice will fail
