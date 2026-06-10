@@ -102,18 +102,29 @@ pub fn install(args: InstallArgs) -> Result<()> {
 
     let mut installer = Installer::new(installed, pins).with_dry_run(args.dry_run);
 
+    let mut root_names = Vec::new();
     for package in &args.packages {
-        if args.from_source || package.ends_with(".rn") {
-            installer.install_source_root(package)?;
+        let name = if args.from_source || package.ends_with(".rn") {
+            installer.install_source_root(package)?
         } else if PathBuf::from(package).exists() || package.ends_with(".tar.zst") {
-            installer.install_local_root(package, args.sha256.clone())?;
+            installer.install_local_root(package, args.sha256.clone())?
         } else {
-            installer.install_named(package)?;
-        }
+            installer.install_named(package)?
+        };
+        root_names.push(name);
     }
 
     if args.dry_run {
         return Ok(());
+    }
+
+    // The user asked for these by name, so they are exempt from orphan cleanup — including
+    // when the package was already installed as a mere dependency and this install produced
+    // no steps: an explicit install promotes it. The marking sits outside the per-package
+    // transactions; it is idempotent, and a crash here just leaves a root marked as a dep,
+    // fixed by re-running the install.
+    for name in &root_names {
+        set_requested(name, true, false)?;
     }
 
     // A resolve that reuses an already-satisfying install produces no steps, so nothing above
@@ -372,7 +383,7 @@ fn ensure_build_deps_installed_inner(
 impl Installer {
     /// Installs `name` and its transitive runtime dependencies. The solver picks a concrete
     /// version for every package in the graph and orders the plan so dependencies install first.
-    fn install_named(&mut self, name: &str) -> Result<()> {
+    fn install_named(&mut self, name: &str) -> Result<String> {
         let mut plan = solve::resolve(
             &[Dependency::any(name)],
             &self.installed,
@@ -382,36 +393,43 @@ impl Installer {
             .with_context(|| format!("compute store hashes for `{name}`"))?;
         if self.dry_run {
             print_plan(&plan);
-            return Ok(());
+            return Ok(name.to_owned());
         }
-        self.execute_plan(plan)
+        self.execute_plan(plan)?;
+        Ok(name.to_owned())
     }
 
     /// Builds `package` (a rune path or known name) from source as the root, then resolves and
     /// installs its runtime dependencies through the solver.
-    fn install_source_root(&mut self, package: &str) -> Result<()> {
+    fn install_source_root(&mut self, package: &str) -> Result<String> {
         let rune = build::resolve_rune(package)?;
         if self.dry_run {
-            return self.dry_run_source_root(&rune);
+            self.dry_run_source_root(&rune)?;
+            return Ok(package.to_owned());
         }
         let store_hash = crate::closure::store_hash_for_rune(&rune)
             .with_context(|| format!("compute store hash for source root `{package}`"))?;
         let installed = self.build_and_install(&rune, &store_hash)?;
+        let name = installed.name.clone();
         let runtime = installed.runtime_deps.clone();
         self.record(installed);
-        self.install_deps(&runtime)
+        self.install_deps(&runtime)?;
+        Ok(name)
     }
 
     /// Installs a local pre-built archive as the root, verifying it against `sha256` when given,
     /// then resolves and installs the runtime dependencies its embedded metadata declares.
-    fn install_local_root(&mut self, package: &str, sha256: Option<String>) -> Result<()> {
+    fn install_local_root(&mut self, package: &str, sha256: Option<String>) -> Result<String> {
         if self.dry_run {
-            return self.dry_run_local_root(package);
+            self.dry_run_local_root(package)?;
+            return Ok(package.to_owned());
         }
         let installed = install_archive(&PathBuf::from(package), sha256, None)?;
+        let name = installed.name.clone();
         let runtime = installed.runtime_deps.clone();
         self.record(installed);
-        self.install_deps(&runtime)
+        self.install_deps(&runtime)?;
+        Ok(name)
     }
 
     /// Prints the plan for a source-rune root install: the rune itself, plus the solver plan
@@ -706,6 +724,61 @@ fn set_hold(name: &str, held: bool) -> Result<()> {
     Ok(())
 }
 
+/// Marks `name` as explicitly requested (or demotes it back to a dependency). `name` is
+/// resolved like a dependency — an exact package name, a bin, or a provided capability — so
+/// `grm install awk` marks whichever package actually satisfied `awk`.
+fn set_requested(name: &str, requested: bool, announce: bool) -> Result<()> {
+    let states = installed_states()?;
+    let Some(found) = find_dep_state(&states, name) else {
+        bail!("package `{name}` is not installed");
+    };
+    let mut state = found.clone();
+    let state_path = paths::install_root()?
+        .join("state")
+        .join("packages")
+        .join(format!("{}.nuon", state.name));
+    if state.requested == requested {
+        if announce {
+            report(&format!(
+                "{} is already {}",
+                state.name,
+                if requested {
+                    "requested"
+                } else {
+                    "a dependency"
+                }
+            ));
+        }
+        return Ok(());
+    }
+    state.requested = requested;
+    nuon_io::write_nuon(&state_path, &state.to_value())?;
+    if announce {
+        report(&format!(
+            "{} marked as {}",
+            state.name,
+            if requested {
+                "requested"
+            } else {
+                "a dependency"
+            }
+        ));
+    }
+    Ok(())
+}
+
+/// Demotes packages to dependency status so `grm autoremove` may reclaim them once nothing
+/// references them. The inverse of the implicit promotion `grm install <name>` performs.
+pub fn unrequest(args: PackageArg) -> Result<()> {
+    if args.packages.is_empty() {
+        bail!("specify at least one package to unrequest");
+    }
+    for package in &args.packages {
+        set_requested(package, false, true)?;
+    }
+    Ok(())
+}
+
 pub fn installed_states() -> Result<Vec<PackageState>> {
     let state_dir = paths::install_root()?.join("state").join("packages");
     if !state_dir.exists() {
@@ -735,6 +808,13 @@ pub fn upgrade_packages(names: &[String]) -> Result<()> {
     if let Some(msg) = paths::fixed_store_setup_instructions() {
         bail!("{msg}");
     }
+    // An upgrade can drop dependency edges (the new version no longer needs a lib); capture
+    // the pre-upgrade edges so the stale ones can be swept once the upgrades land.
+    let pre_upgrade_deps: Vec<String> = installed_states()?
+        .iter()
+        .filter(|state| names.contains(&state.name))
+        .flat_map(|state| state.runtime_deps.iter().cloned())
+        .collect();
     let mut installed = installed_versions()?;
     for name in names {
         installed.remove(name);
@@ -749,6 +829,10 @@ pub fn upgrade_packages(names: &[String]) -> Result<()> {
         report("all requested packages are already up to date");
         return Ok(());
     }
+    // Sweep before finalize() so the single new generation reflects both the upgrades and
+    // the removals. Each autoremove is its own committed transaction; a failure mid-sweep
+    // leaves the upgrades committed and the sweep partial, same containment as `remove`.
+    autoremove_orphans(pre_upgrade_deps)?;
     installer.finalize()?;
     Ok(())
 }
@@ -968,13 +1052,56 @@ fn remove_one(name: &str) -> Result<PackageState> {
     Ok(state)
 }
 
-/// Removes runtime dependencies left orphaned by a previous removal — packages no other
-/// installed package still lists in its `runtime_deps`. Cascades transitively: a dep that
-/// becomes orphaned mid-pass is itself a candidate. Build dependencies are not considered;
-/// once a package is installed they are no longer load-bearing for it.
-fn autoremove_orphans(initial: Vec<String>) -> Result<()> {
+/// Whether any *other* package in `others` lists `state` in its `runtime_deps` — by package
+/// name, by one of its bins, or by a capability it provides.
+fn referenced_by_other<'a>(
+    others: impl IntoIterator<Item = &'a PackageState>,
+    state: &PackageState,
+) -> bool {
+    others.into_iter().any(|other| {
+        if other.name == state.name {
+            return false;
+        }
+        other.runtime_deps.iter().any(|dep| {
+            dep == &state.name
+                || state.bins.contains_key(dep)
+                || state.provides.iter().any(|p| p == dep)
+        })
+    })
+}
+
+/// The packages `grm autoremove` would delete: dependency-installed (`!requested`), not held,
+/// and unreferenced by any remaining package. Iterates to a fixed point so chains collapse —
+/// removing an orphan can orphan its own dependencies in turn. Read-only; serves `grm orphans`.
+pub(crate) fn orphan_candidates(states: &[PackageState]) -> Vec<String> {
+    let mut remaining: Vec<&PackageState> = states.iter().collect();
+    let mut orphans = Vec::new();
+    loop {
+        let (gone, kept): (Vec<&PackageState>, Vec<&PackageState>) =
+            remaining.iter().copied().partition(|state| {
+                !state.requested
+                    && !state.held
+                    && !referenced_by_other(remaining.iter().copied(), state)
+            });
+        if gone.is_empty() {
+            break;
+        }
+        orphans.extend(gone.iter().map(|state| state.name.clone()));
+        remaining = kept;
+    }
+    orphans.sort();
+    orphans
+}
+
+/// Removes runtime dependencies left orphaned by a previous removal or upgrade — packages no
+/// other installed package still lists in its `runtime_deps`. Cascades transitively: a dep
+/// that becomes orphaned mid-pass is itself a candidate. Explicitly requested and held
+/// packages are never autoremoved. Build dependencies are not considered; once a package is
+/// installed they are no longer load-bearing for it. Returns the names removed.
+fn autoremove_orphans(initial: Vec<String>) -> Result<Vec<String>> {
     let mut queue: VecDeque<String> = initial.into();
     let mut seen: HashSet<String> = HashSet::new();
+    let mut removed_names = Vec::new();
     let mut states = installed_states()?;
     while let Some(name) = queue.pop_front() {
         if !seen.insert(name.clone()) {
@@ -983,27 +1110,63 @@ fn autoremove_orphans(initial: Vec<String>) -> Result<()> {
         let Some(name_state) = states.iter().find(|s| s.name == name) else {
             continue;
         };
-        let still_needed = states.iter().any(|other| {
-            if other.name == name {
-                return false;
-            }
-            other.runtime_deps.iter().any(|dep| {
-                dep == &name
-                    || name_state.bins.contains_key(dep)
-                    || name_state.provides.iter().any(|p| p == dep)
-            })
-        });
-        if still_needed {
+        if name_state.requested || name_state.held {
+            continue;
+        }
+        if referenced_by_other(states.iter(), name_state) {
             continue;
         }
         let removed =
             remove_one(&name).with_context(|| format!("autoremove unused dependency `{name}`"))?;
         report(&format!("autoremoved unused dependency {name}"));
+        removed_names.push(name);
         for dep in removed.runtime_deps {
             queue.push_back(dep);
         }
         states = installed_states()?;
     }
+    Ok(removed_names)
+}
+
+/// Lists the packages `grm autoremove` would remove, without removing anything.
+pub fn orphans() -> Result<()> {
+    let states = installed_states()?;
+    let candidates = orphan_candidates(&states);
+    if candidates.is_empty() {
+        report("no orphaned packages");
+        return Ok(());
+    }
+    for name in candidates {
+        let version = states
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.version.as_str())
+            .unwrap_or("");
+        println!("{name}\t{version}");
+    }
+    Ok(())
+}
+
+/// Removes every orphaned dependency package: installed as a dependency (not requested, not
+/// held) and referenced by no remaining package. Rebuilds the active generation when anything
+/// was removed.
+pub fn autoremove() -> Result<()> {
+    if let Some(msg) = paths::fixed_store_setup_instructions() {
+        bail!("{msg}");
+    }
+    let states = installed_states()?;
+    let seeds: Vec<String> = states
+        .iter()
+        .filter(|state| !state.requested && !state.held)
+        .map(|state| state.name.clone())
+        .collect();
+    let removed = autoremove_orphans(seeds)?;
+    if removed.is_empty() {
+        report("no orphaned packages");
+        return Ok(());
+    }
+    let states = installed_states()?;
+    profile::rebuild_and_activate(&states)?;
     Ok(())
 }
 
@@ -1182,15 +1345,17 @@ fn write_state(
     fs::create_dir_all(&state_dir)?;
     let state_path = state_dir.join(format!("{}.nuon", metadata.name));
 
-    // A hold is user intent that survives reinstalls and upgrades — preserve it when we
-    // rewrite the state file. (Nothing else in the prior state is worth carrying forward;
-    // the install we just performed is the authoritative source for everything else.)
-    let previous_held = if state_path.exists() {
+    // Holds and install reasons are user intent that survives reinstalls and upgrades —
+    // preserve them when we rewrite the state file. A brand-new package starts as a
+    // dependency (`requested: false`); the install entry point promotes the roots the user
+    // actually named. (Nothing else in the prior state is worth carrying forward; the
+    // install we just performed is the authoritative source for everything else.)
+    let (previous_held, previous_requested) = if state_path.exists() {
         PackageState::from_value(nuon_io::read_nuon(&state_path)?)
-            .map(|prior| prior.held)
-            .unwrap_or(false)
+            .map(|prior| (prior.held, prior.requested))
+            .unwrap_or((false, false))
     } else {
-        false
+        (false, false)
     };
 
     let state = PackageState {
@@ -1220,6 +1385,7 @@ fn write_state(
             .map(|(name, source)| (name.clone(), source.sha256.clone()))
             .collect(),
         held: previous_held,
+        requested: previous_requested,
         provides: metadata.provides.clone(),
         libs: metadata.libs.clone(),
     };
@@ -1351,4 +1517,77 @@ fn make_executable(path: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+
+    fn state(name: &str, runtime_deps: &[&str], requested: bool, held: bool) -> PackageState {
+        PackageState {
+            name: name.to_owned(),
+            version: "1.0.0".to_owned(),
+            target: None,
+            archive_hash: "0".repeat(64),
+            store_hash: "deadbeef".to_owned(),
+            store_path: format!("/grm/store/deadbeef-{name}-1.0.0"),
+            bins: BTreeMap::new(),
+            runtime_deps: runtime_deps.iter().map(|s| s.to_string()).collect(),
+            build_deps: Vec::new(),
+            source_hashes: BTreeMap::new(),
+            held,
+            requested,
+            provides: Vec::new(),
+            libs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn orphan_candidates_keeps_referenced_deps() {
+        let states = vec![
+            state("app", &["lib"], true, false),
+            state("lib", &[], false, false),
+        ];
+        assert!(orphan_candidates(&states).is_empty());
+    }
+
+    #[test]
+    fn orphan_candidates_finds_unreferenced_dep() {
+        let states = vec![
+            state("app", &[], true, false),
+            state("lib", &[], false, false),
+        ];
+        assert_eq!(orphan_candidates(&states), vec!["lib".to_owned()]);
+    }
+
+    #[test]
+    fn orphan_candidates_cascades_chains() {
+        // app no longer depends on lib-a; lib-a -> lib-b becomes a dead chain.
+        let states = vec![
+            state("app", &[], true, false),
+            state("lib-a", &["lib-b"], false, false),
+            state("lib-b", &[], false, false),
+        ];
+        assert_eq!(
+            orphan_candidates(&states),
+            vec!["lib-a".to_owned(), "lib-b".to_owned()]
+        );
+    }
+
+    #[test]
+    fn orphan_candidates_spares_requested_and_held() {
+        let states = vec![
+            state("explicit", &[], true, false),
+            state("pinned", &[], false, true),
+            state("dep-of-pinned", &[], false, false),
+        ];
+        // `pinned` is held so it survives, and it references nothing, so `dep-of-pinned`
+        // (referenced by nobody) is the only orphan.
+        assert_eq!(orphan_candidates(&states), vec!["dep-of-pinned".to_owned()]);
+    }
+
+    #[test]
+    fn orphan_candidates_resolves_capability_references() {
+        let mut provider = state("gawk", &[], false, false);
+        provider.provides = vec!["awk".to_owned()];
+        let states = vec![state("app", &["awk"], true, false), provider];
+        assert!(orphan_candidates(&states).is_empty());
+    }
+}
