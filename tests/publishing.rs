@@ -316,11 +316,24 @@ fn tome_build_all_skips_non_matching_targets() {
     )
     .unwrap();
 
+    // A target-unrestricted rune so every platform (including FreeBSD, where both
+    // platform-specific runes are filtered out) has something to build.
+    fs::write(
+        tome_dir.join("runes").join("always.rn"),
+        "export const package = {\n  name: 'always'\n  version: '0.1.0'\n  sources: {}\n  deps: { build: {} runtime: [] }\n \n}\n\nexport def build [ctx] {\n  let bin_dir = ($ctx.package_dir | path join 'bin')\n  mkdir $bin_dir\n  \"#!/usr/bin/env sh\\nprintf 'always\\n'\" | save ($bin_dir | path join 'always')\n}\n",
+    )
+    .unwrap();
+
     let build = run(root, &["tome", "build", "--all", "--path", tome_path]);
     assert_success(&build, "tome build --all with target filtering");
 
     let target = target_triple();
     let dist = tome_dir.join("dist");
+
+    assert!(
+        dist.join(format!("always-0.1.0-{target}.tar.zst")).exists(),
+        "the target-unrestricted rune must build on every platform"
+    );
 
     let current_is_macos = target.starts_with("macos-");
     let current_is_linux = target.starts_with("linux-");
