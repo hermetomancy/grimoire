@@ -69,6 +69,60 @@ pointing to the active generation's `bin/`. Current user-local
 - Add `grm setup --system` or similar that creates `/usr/bin -> /grm/profiles/current/bin`.
 - Require root for this step only; day-to-day use stays unprivileged.
 
+### 6. Semantic rollback: activation restores state
+
+Today `grm rollback`/`grm switch` only repoint the `profiles/current`
+symlink; `state/packages/` still describes the set rolled back *from*. So
+queries (`list`, `info`, `files`, `owns`, `orphans`) report the wrong set,
+and the next mutating command rebuilds a generation from the stale state —
+silently undoing the rollback. Rollback must mean *actually rolling back*:
+activating a generation restores the full package state it was built from.
+
+- `src/profile.rs`: snapshot the complete `PackageState` set into each
+  generation at `create_generation` time (`gen.nuon` currently records only
+  names + store paths, which cannot reconstruct state — bins, deps, flags,
+  requested/held are missing).
+- `activate_generation`: rewrite `state/packages/` and rebuild the lockfile
+  from the activated generation's snapshot, transactionally (stage + atomic
+  promote, per AGENTS.md §9). Decide `requested`/`held` semantics: restore
+  from the snapshot (state travels with the generation).
+- `profile::gc`: always retain the current generation's rollback target —
+  today `gc --keep 1` deletes it and the next `grm rollback` fails.
+- `grm doctor`: add a state ↔ active-generation divergence check (also
+  useful for pre-migration installs).
+- Document the state/generation relationship in AGENTS.md §9.
+- Tests: rollback then `grm list` reports the rolled-back set; rollback
+  then install does not resurrect rolled-back packages; gc preserves the
+  rollback target; crash-window behavior of the state restore.
+
+### 7. Restore-able generations: lockfile as a blueprint
+
+Any Grimoire generation should be reconstructable on a fresh install root
+from its lockfile alone. Today the lockfile is only a resolution constraint:
+`--locked` requires naming packages, re-resolves against whatever the tome
+caches currently hold, and cannot reproduce locally built archives.
+
+- `src/lock.rs` / `src/model.rs`: record `requested`, `held`, and
+  `store_hash` per package in `grimoire.lock.nuon` (`package_value`
+  currently drops them), so the lock distinguishes roots from dependencies
+  and pins the content address, not just the archive hash.
+- New `grm restore [--lockfile <path>]`: install every `requested` package
+  from the lock under pins, restore `requested`/`held` flags, then sweep
+  orphans — yielding the recorded set exactly.
+- Enforce recorded tome commits during `--locked`/`restore` resolution:
+  check out the pinned commit in the tome cache before resolving (the lock
+  records commits today but never uses them, so a moved ref changes what
+  `--locked` resolves against).
+- Source-built packages: pin rune identity (tome + rune sha256) so a locked
+  source build is rebuilt from the same recipe; fail loudly when the
+  pinned rune/archive is unavailable anywhere.
+- Per-generation lockfiles fall out of item 6's state snapshots: restoring
+  generation N = `grm restore` against N's snapshot lock.
+- Update the README "Reproducible state" claim to match whatever lands.
+- Tests: restore onto an empty root reproduces packages, flags, and
+  versions byte-for-byte against state files; moved tome ref under
+  `--locked` still resolves the pinned set.
+
 ## Completed
 
 ### Store-hash-keyed binary cache
