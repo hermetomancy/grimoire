@@ -54,7 +54,7 @@ pub struct PackageMetadata {
 }
 
 /// A declared source artifact for a source build. Every source must carry a checksum so
-/// it can be verified before the build consumes it (AGENTS.md §5.1).
+/// it can be verified before the build consumes it (AGENTS.md §10.1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
     pub url: String,
@@ -148,7 +148,7 @@ pub struct PackageState {
 }
 
 /// A binary package repository index (`index.nuon`): the set of pre-built archives a tome's
-/// package repository offers. Read-only data — Grimoire reads it, never executes it (§3).
+/// package repository offers. Read-only data — Grimoire reads it, never executes it (§4).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageIndex {
     pub entries: BTreeMap<String, IndexEntry>,

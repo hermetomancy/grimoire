@@ -9,7 +9,7 @@
 //! - **Quiet** — suppresses progress and result confirmations; explicitly requested data (the
 //!   `println!` output of `list`/`search`/`info`/`doctor`) and errors still print.
 //!
-//! Progress goes to stderr so stdout carries only command results/data (AGENTS.md §7). Color and
+//! Progress goes to stderr so stdout carries only command results/data (AGENTS.md §12.1). Color and
 //! the `::`/`✓` decorations are only emitted when the target stream is a real terminal and
 //! `NO_COLOR` is unset, so piped or captured output stays plain and byte-stable. The spinner uses
 //! [`indicatif`], which draws to stderr and auto-hides when stderr is not a terminal.

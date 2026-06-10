@@ -5,26 +5,20 @@ rule wins. When two rules conflict, prefer correctness and safety, then clarity,
 
 ## 0. What Grimoire is
 
-Grimoire is a **Rust program that embeds Nushell**. The CLI, package manager core,
-transaction logic, and orchestration are Rust. Nushell executes rune (`.rn`) build scripts
+A **Rust program that embeds Nushell**: the CLI, package-manager core, transaction logic, and
+orchestration are Rust; the embedded Nushell engine executes rune (`.rn`) build scripts
 in-process and reads/writes NUON data.
-
-`git`, `tar`, `zstd`, and HTTP are provided by linked Rust crates (`gix`, `tar`, `zstd`, `ureq`).
-Grimoire does not shell out for its own machinery.
 
 ## 1. No shelling out
 
-1. Do not use `std::process::Command` to invoke external CLIs. All Grimoire functionality is
-   native and in-process.
-2. The only executed code is the embedded Nushell engine running `.rn` rune build scripts.
-3. A rune's `build` function may invoke its package's build tooling (`make`, `cc`) — that is the
-   package's business, not Grimoire's.
-4. If a capability seems to require an external tool, find or vendor a Rust crate. "No suitable
-   crate" is a design problem, not a license to shell out.
-5. **Exception:** read-only host toolchain discovery (`cc --version`, `ld --version`,
-   `xcrun --show-sdk-version`, etc.) may shell out because version strings and platform
-   identities are not embedded in a parseable form in all binary formats. This is limited
-   to `src/toolchain.rs` and only for identity discovery, not for builds.
+1. Never invoke an external CLI via `std::process::Command`. git, tar, zstd, xz, and HTTP come
+   from linked crates (`gix`, `tar`, `zstd`, `xz2`, `ureq`); the only executed code is the
+   embedded Nushell engine running runes. If a capability seems to require an external tool,
+   find or vendor a crate — "no suitable crate" is a design problem, not a license to shell out.
+2. A rune's `build` function may invoke its package's build tooling (`make`, `cc`) — that is
+   the package's business, not Grimoire's.
+3. **Exception:** read-only host toolchain identity discovery (`cc --version`,
+   `xcrun --show-sdk-version`, …) may shell out, confined to `src/toolchain.rs`.
 
 ## 2. Rust idiom
 
@@ -46,19 +40,15 @@ Grimoire does not shell out for its own machinery.
 3. Follow DRY, but do not invent abstractions for a single caller.
 4. Modularise aggressively. Group related modules under folders with a clear root.
 5. Keep surfaces minimal and intentional. Do not add `pub` just for cross-module convenience.
-6. **File size limits: 500 lines soft, 800 lines hard.** A source file past 500 lines is a
-   standing invitation to find a seam and split it; a change that would push a file past 800
-   lines must split the file first — into a directory module (`src/foo/` with focused
-   submodules and a thin `mod.rs` or re-export root), per rule 4. Do not dodge the limit by
-   compressing code or stripping comments; the limit exists to force scoping, not brevity.
-   `tests/smoke.rs` is temporarily exempt until the planned `tests/support/` split lands
-   (see TODO.md); new test helpers still go in focused files, not appended there.
-7. **One module, one concern.** A module's name should predict everything in it; anything it
-   wouldn't predict belongs elsewhere. Shared logic used by two modules moves to a common
-   home (its own module or the more fundamental of the two) — never copy-paste it, and never
-   reach into a sibling's internals to borrow a private helper. When splitting an oversized
-   file, split along responsibilities (parsing vs. orchestration vs. IO), not along line
-   counts.
+6. **File size limits: 500 lines soft, 800 hard.** Past 500, look for a seam to split along; a
+   change that would cross 800 must split the file first, into a directory module per rule 4.
+   Do not dodge the limit by compressing code or stripping comments — it exists to force
+   scoping, not brevity. `tests/smoke.rs` is exempt until the `tests/support/` split lands
+   (TODO.md); new test helpers still go in focused files.
+7. **One module, one concern.** A module's name should predict its contents. Logic shared by
+   two modules moves to a common home — never copy-paste it or reach into a sibling's private
+   helpers. Split oversized files along responsibilities (parsing vs. orchestration vs. IO),
+   not line counts.
 
 ## 4. Data formats: the .rn / .nuon contract
 
@@ -72,193 +62,53 @@ Grimoire does not shell out for its own machinery.
 
 ## 5. Build environment
 
-Managed builds receive a controlled `PATH` in strict priority order:
+Managed builds get a controlled `PATH`, in priority order: core package `bin/` dirs → declared
+build-dep `bin/` dirs → host compiler boundary symlinks (bootstrap only; skipped once
+`toolchain-wrappers` is installed) → POSIX ambient `/usr/bin` and `/bin`.
 
-1. **Core package `bin/` directories** — always prepended. Once bootstrapped, the core
-   toolchain (toybox, toolchain-wrappers, etc.) takes precedence over everything.
-2. **Build dependency `bin/` directories** — explicit deps declared by the rune being built.
-3. **Host compiler boundary symlinks** (`cc`, `c++`, `ar`, `ld`, etc.) — **bootstrap only**.
-   Skipped entirely once `toolchain-wrappers` is installed; core compilers take over.
-4. **POSIX ambient directories:** `/usr/bin` and `/bin` — permanent platform fallback.
+The environment is sandboxed: host discovery variables (`CMAKE_PREFIX_PATH`,
+`PKG_CONFIG_PATH`, `CPATH`, `LIBRARY_PATH`, language package-manager roots, Homebrew prefixes,
+…) are cleared, then declared build-dep prefixes are layered back in through those same
+managed variables plus `<DEP>_PREFIX`. `HOME`, temp, and XDG directories point inside
+`ctx.work_dir`. External commands launched by the build runner receive blank overrides for
+inherited host env vars unless Grimoire deliberately sets them.
 
-**Rule:** Declare only non-POSIX tools that the build script calls explicitly. Do not declare
-POSIX utilities (`sed`, `grep`, `awk`, `find`, `coreutils`, `diffutils`) as build deps — they are
-always available via the ambient directories (or, once bootstrapped, via core toybox).
+**Rules:**
 
-Managed builds also receive a sandboxed environment:
-
-1. Host discovery variables are cleared before the rune runs (`CMAKE_PREFIX_PATH`,
-   `PKG_CONFIG_PATH`, `CPATH`, `LIBRARY_PATH`, language package-manager roots, Homebrew prefixes,
-   dynamic-library search paths, etc.).
-2. Build dependency prefixes are layered back in explicitly through managed discovery variables
-   such as `CMAKE_PREFIX_PATH`, `PKG_CONFIG_PATH`/`PKG_CONFIG_LIBDIR`, `CPATH`, `LIBRARY_PATH`,
-   `ACLOCAL_PATH`, and `<DEP>_PREFIX`.
-3. `HOME`, `TMPDIR`, `TEMP`, `TMP`, and XDG directories point inside `ctx.work_dir`, so package
-   build systems cannot read or write the user's normal home/config/cache/temp state by default.
-4. External commands launched by the embedded Nushell build runner receive blank overrides for
-   inherited host environment variables unless Grimoire deliberately sets them.
-
-**Rule:** If a build system needs to discover a dependency, that dependency must be declared in
-`deps.build`; do not rely on host env vars, Homebrew/MacPorts prefixes, language package-manager
-state, or the user's shell configuration.
+1. Declare every non-POSIX tool and every discoverable dependency the build needs in
+   `deps.build`. Never rely on host env vars, Homebrew/MacPorts prefixes, language
+   package-manager state, or the user's shell configuration.
+2. Do not declare POSIX utilities (`sed`, `grep`, `awk`, `find`, …) as build deps — the
+   ambient directories (or core toybox once bootstrapped) always provide them.
 
 ## 6. Dependencies
 
-### Capability-based resolution
-
-A rune's `bins` map declares provided commands. Any key that differs from the package `name` is a
-**capability** (e.g. `gawk` provides `gawk` and `awk`).
-
-- Literal names resolve directly (`gawk` → `gawk`).
-- Capability names fall back to any package whose `bins` map contains the name (`awk` → `gawk`).
-
-Prefer capability names when you need the command semantically (`awk`); use literal names when
-you require a specific implementation (`gawk`).
-
-### Dependency categories
-
-- **`deps.runtime`** — packages required at execution time. Resolved by the solver and installed
-  into the active generation.
-- **`deps.build`** — tools required during the build. Their `bin/` dirs are prepended to PATH for
-  the rune's build context.
+- **`deps.runtime`** — required at execution time. Resolved by the solver, installed into the
+  active generation.
+- **`deps.build`** — tools required during the build; their `bin/` dirs join the build PATH (§5).
 - **`deps.features`** — *(future work)* execution-time capabilities for FHS compatibility.
 
-### Platform-conditional build deps
+**Capability resolution:** any `bins` key that differs from the package name is a capability
+(`gawk` provides `gawk` and `awk`). Literal names resolve directly; capability names resolve
+to any provider, with `grm prefer` breaking ties. Depend on the capability (`awk`) when any
+implementation will do; on the literal name (`gawk`) when you need that implementation.
 
-A build dependency may carry a platform filter in brackets: `'name[platform-glob]'`.
-The dep is included only when the current target triple matches the glob. This lets runes
-declare platform-specific tools (e.g. `linux-headers[linux-*]`) without breaking builds on
-other targets. Globs may match the full triple or a prefix (e.g. `linux-*-musl`).
+**Platform-conditional build deps:** `'name[platform-glob]'` includes the dep only when the
+target triple matches the glob — full triple or prefix (`linux-*`, `linux-*-musl`).
 
 ## 7. Rune authoring
 
-A rune is a Nushell module exporting `package` (inert metadata) and `build` (the build function).
-Runes are the only place arbitrary package logic lives (§4). Follow these conventions so builds are
-predictable, portable, and compose correctly.
+The full reference — structure, the `ctx` record, build-script patterns, `bins`/`targets`/
+`notes` conventions — lives in [docs/rune-authoring.md](docs/rune-authoring.md). The binding
+rules:
 
-### Structure
-
-```rn
-export const package = {
-  name: "example"
-  version: "1.0.0"
-  summary: "One-line description"
-  homepage: "https://example.com/"
-  license: "MIT"
-  targets: ["linux-x86_64-musl" "macos-aarch64-darwin"]
-
-  sources: {
-    main: {
-      url: "https://example.com/example-1.0.0.tar.gz"
-      sha256: "sha256:..."
-    }
-  }
-
-  deps: {
-    build: { default: ["cmake"] }
-    runtime: ["libc"]
-  }
-
-  bins: {
-    example: "bin/example"
-    ex: "bin/example"  # capability alias
-  }
-}
-
-export def build [ctx] {
-  let source_dir = ($ctx.sources.main.dir | path join "example-1.0.0")
-  cd $source_dir
-  ./configure --prefix=$ctx.prefix
-  make -j($ctx.nproc)
-  make install DESTDIR=$ctx.package_dir
-}
-```
-
-### The `ctx` record
-
-| Field | Type | Meaning |
-|---|---|---|
-| `ctx.package_dir` | string | Staging root for this build. Install files here; Grimoire packs this directory into the archive. |
-| `ctx.prefix` | string | Final install prefix (e.g. `/grm/store/<hash>/example-1.0.0`). Bake this into configure-time metadata so the package knows where it will live. |
-| `ctx.store_path` | string | Alias for `ctx.prefix`. |
-| `ctx.work_dir` | string | Scratch directory for build artifacts. Use for out-of-tree builds. |
-| `ctx.target` | string | Target triple (e.g. `linux-x86_64-musl`). |
-| `ctx.sources.<name>.dir` | string | Extracted source directory for the named source. Always use `.dir`, not `.path` (which is the raw archive). |
-| `ctx.sources.<name>.path` | string | Raw archive path in the cache. Rarely needed. |
-| `ctx.build_flags` | record | Key-value flags from the rune metadata. Use for feature toggles. |
-| `ctx.env.PATH` | string | The build PATH (§5). |
-| `ctx.env.GRIMOIRE_VERBOSITY` | string | `"quiet"`, `"normal"`, or `"verbose"`. |
-| `ctx.env.*` | string | Extra env vars from `BuildEnv` (e.g. `CC`, `CFLAGS` for musl static builds). |
-
-### Installation convention
-
-**Install into `ctx.package_dir`, not `ctx.prefix`.** `package_dir` is the staging area that gets
-packed into the archive. `prefix` is the final location after extraction. For autotools:
-
-```rn
-./configure --prefix='($ctx.prefix)'
-make install DESTDIR='($ctx.package_dir)'
-```
-
-For CMake:
-
-```rn
-cmake -S . -B build -DCMAKE_INSTALL_PREFIX='($ctx.prefix)'
-cmake --build build
-cmake --install build --prefix '($ctx.package_dir)'
-```
-
-### Build script patterns
-
-**Do not use `sh -c` in runes.** Rune `build` functions are native Nushell. Use Nushell's own
-control flow, variables, and external command invocation. Shelling out to `sh` forfeits error
-handling, obscures the build logic, and makes runes harder to read and test. If a build step is
-too complex for native Nushell, decompose it into smaller steps rather than hiding them in a
-shell script.
-
-**Use explicit parentheses for variable interpolation in external commands.** Bare record-field
-access like `$ctx.prefix` or `$env.VAR` in external command position can be parsed incorrectly by
-Nushell, silently producing wrong paths or empty strings. Always wrap the expression in
-parentheses: `($ctx.prefix)`, `($env.VAR)`, `($nproc)`. This applies to both `ctx` fields and
-local variables when they are passed to external commands.
-
-**Parallel builds:** Pass `-j` to `make` and parallel flags to build systems. The build environment
-provides `ctx.nproc` for the host's parallelism. If absent, omit the flag and let the build system
-default.
-
-**Out-of-tree builds:** Use `ctx.work_dir` for build artifacts when the source system supports it
-(CMake, Meson). This keeps the source tree clean and avoids packing build artifacts.
-
-### Platform conditionals
-
-Use `ctx.target` for platform-specific logic. Prefer prefix matching over exact triples:
-
-```rn
-let is_macos = ($ctx.target | str starts-with "macos-")
-let is_linux = ($ctx.target | str starts-with "linux-")
-let is_musl = ($ctx.target | str ends-with "-musl")
-```
-
-Keep platform logic in the rune, not in Rust. The Rust side only provides the target triple.
-
-### `bins` conventions
-
-- The package `name` is always implicitly a bin (e.g. `example` → `bin/example`).
-- Additional entries are **capabilities**: `ex: "bin/example"` means `ex` resolves to this package.
-- Paths are relative to `package_dir` (e.g. `bin/foo`, `sbin/bar`, `libexec/baz`).
-- Only declare commands that end users or other runes invoke. Internal helpers (private scripts)
-  do not need entries.
-
-### `targets` filtering
-
-A rune whose `targets` list is non-empty and does not include the current triple is skipped by
-`grm tome build --all`. Use this for platform-specific packages (`linux-headers`, `musl`). A
-run with no `targets` builds on every platform.
-
-### No sources
-
-A rune may declare `sources: {}` and generate all outputs in `build` (e.g. `toolchain-wrappers`,
-which writes shell wrapper scripts). This is valid for meta-packages and pure-script tools.
+1. A rune exports `package` (inert metadata, §4) and `build` (the only place package logic runs).
+2. Install into `ctx.package_dir` (the staging area that gets packed); configure against
+   `ctx.prefix` (the final store location).
+3. **No `sh -c` in runes.** Build steps are native Nushell.
+4. Wrap variables in parentheses in external command position — `($ctx.prefix)`, never
+   `$ctx.prefix` — or Nushell can silently mis-parse them.
+5. Platform logic lives in the rune via `ctx.target` prefix matches; Rust only supplies the triple.
 
 ## 8. Store-only installation
 
@@ -276,8 +126,7 @@ Grimoire has no database. Durability is explicit transaction directories plus at
    promoted via atomic `rename`, a failure partway through leaves the old state untouched.
 3. Mutating package commands are command-atomic. `grm install a b c`, `grm remove x y`, upgrades,
    and any dependency/autoremove work they trigger either commit the whole requested state change
-   (store paths, package state, lockfile, and active generation) or commit none of it. On any error,
-   no package from that command is installed, removed, upgraded, autoremoved, held, or unheld.
+   (store paths, package state, lockfile, and active generation) or commit none of it.
 4. Installed package version directories are immutable once promoted. Upgrades create new version
    directories.
 5. Local state is inspectable NUON under the install root. No databases.
@@ -297,28 +146,19 @@ These must never be regressed:
 
 ## 11. Platform support
 
-Grimoire is **POSIX-only**: Linux, macOS, FreeBSD. No `#[cfg(windows)]` code.
-Platform-gated code for supported POSIX targets (`macos`, `linux`, `freebsd`) is allowed
-where necessary (e.g. filesystem features like `clonefile` or `FICLONE`).
-
-The bootstrap depends on a POSIX userland at `/usr/bin` and `/bin`. Default target triples are
-`linux-x86_64-musl`, `linux-aarch64-musl`, `macos-x86_64-darwin`, `macos-aarch64-darwin`,
-`freebsd-x86_64-unknown`, and `freebsd-aarch64-unknown`. The `-gnu` Linux variants remain
-supported via explicit `--target` but are no longer the default.
-
-Rune `targets` filtering: a rune whose `targets` list does not include the current triple is
-skipped during `grm tome build --all`.
+Grimoire is **POSIX-only**: Linux, macOS, FreeBSD — no `#[cfg(windows)]` code. Gating on
+supported POSIX targets is allowed where necessary (`clonefile`, `FICLONE`). The bootstrap
+depends on a POSIX userland at `/usr/bin` and `/bin`. Default target triples:
+`linux-{x86_64,aarch64}-musl`, `macos-{x86_64,aarch64}-darwin`,
+`freebsd-{x86_64,aarch64}-unknown`; the Linux `-gnu` variants remain supported via explicit
+`--target`.
 
 ## 12. CLI and user-facing output
 
 1. Progress and diagnostics go to **stderr**; final results go to **stdout**.
 2. Error messages are for humans. Say what failed and, where possible, what to do.
-3. The CLI is imperative and explicit. Commands directly and transactionally update state.
-4. Commands that operate on packages accept multiple positional arguments where semantically
-   reasonable (`grm install a b c`, `grm remove x y`). Multi-package mutations are a single
-   all-or-nothing transaction: validate, resolve, build/fetch, and stage everything needed for the
-   whole command before committing any user-visible state. If any package fails, the command fails
-   and the user's installed state remains unchanged.
+3. The CLI is imperative and explicit. Commands accept multiple positional packages where
+   semantically reasonable; multi-package mutations are one all-or-nothing transaction (§9.3).
 
 ## 13. Testing
 
@@ -328,15 +168,14 @@ skipped during `grm tome build --all`.
    binary against local fake tomes and hand-built `.tar.zst` archives. Tests run fully offline.
 4. Every security invariant from §10 has a test proving the unsafe input is rejected.
 
-Run before considering work done:
+Run before considering work done (skippable only for changes touching nothing but `.rn` runes
+and/or documentation):
 
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 ```
-
-**Exception:** When a change touches only rune (`.rn`) files and/or documentation (`.md`, `README`, etc.), the Rust checks above are not required. Rune changes are validated by parsing and smoke-test coverage; doc changes do not affect compilation.
 
 ## 14. Readability
 
@@ -347,11 +186,10 @@ next to it — and the code probably wants a better name.
 ## 15. Project hygiene
 
 1. **Commits are scoped and coherent.** A single commit changes one thing: a feature, a bugfix,
-   a refactor, or a documentation update. Do not bundle unrelated changes. The commit message
-   describes *what* changed and *why*; the diff shows *how*.
-2. **Update TODO.md as you go.** When you complete an item, move it to **Completed**. When you
-   start new work, add it to **Active work** or **Remaining**. When a todo becomes obsolete,
-   delete it. TODO.md is the canonical remaining-work list — keep it honest.
-3. **Update AGENTS.md when the rules change.** If you add a new invariant, change the build
-   environment, or introduce a new convention, document it here immediately. AGENTS.md is a
-   living document, not a fossil.
+   a refactor, or a documentation update. The commit message describes *what* changed and
+   *why*; the diff shows *how*.
+2. **Update TODO.md as you go.** Completed items move to **Completed**; new work lands in
+   **Active work** or **Remaining**; obsolete todos are deleted. TODO.md is the canonical
+   remaining-work list — keep it honest.
+3. **Update AGENTS.md when the rules change.** New invariants and conventions are documented
+   here immediately. AGENTS.md is a living document, not a fossil.

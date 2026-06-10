@@ -1,4 +1,4 @@
-//! Native git operations for tome repositories, via `gix` (no shelling out, AGENTS.md §1a):
+//! Native git operations for tome repositories, via `gix` (no shelling out, AGENTS.md §1):
 //! cloning a tome at a ref, fetching updates, and resolving the checked-out commit so the
 //! lockfile can pin exactly what was synced.
 
@@ -6,7 +6,7 @@ use anyhow::{Context, Result, anyhow};
 use std::{path::Path, sync::atomic::AtomicBool};
 
 /// Clones `url` at `ref_name` into `dest` and checks out a work tree. Network access uses
-/// `gix`; Grimoire never shells out to the `git` CLI (AGENTS.md §1a).
+/// `gix`; Grimoire never shells out to the `git` CLI (AGENTS.md §1).
 pub fn clone(url: &str, ref_name: &str, dest: &Path) -> Result<()> {
     let should_interrupt = AtomicBool::new(false);
     let mut prepare = gix::prepare_clone(url, dest)
