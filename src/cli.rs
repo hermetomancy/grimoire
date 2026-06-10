@@ -53,6 +53,13 @@ pub enum Command {
     /// Release a held package so it is eligible for `grm upgrade` again.
     #[command(visible_alias = "unpin")]
     Unhold(PackageArg),
+    /// Demote explicitly installed packages to dependency status, making them eligible for
+    /// `grm autoremove` once nothing else requires them.
+    Unrequest(PackageArg),
+    /// Remove every orphaned dependency: packages installed only as dependencies (never
+    /// requested by name, not held) that no installed package still requires.
+    #[command(visible_alias = "ar")]
+    Autoremove,
 
     // -----------------------------------------------------------------------
     // Query
@@ -65,6 +72,8 @@ pub enum Command {
     Search(QueryArg),
     /// Show detailed information about a package.
     Info(PackageArg),
+    /// List the orphaned dependencies `grm autoremove` would remove, without removing them.
+    Orphans,
 
     // -----------------------------------------------------------------------
     // Profiles

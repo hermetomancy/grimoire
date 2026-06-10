@@ -80,6 +80,9 @@ fn run(cli: Cli) -> Result<()> {
         Command::Upgrade(args) => query::upgrade(args),
         Command::Hold(args) => install::hold(args),
         Command::Unhold(args) => install::unhold(args),
+        Command::Unrequest(args) => install::unrequest(args),
+        Command::Orphans => install::orphans(),
+        Command::Autoremove => install::autoremove(),
         Command::Rollback => {
             let id = profile::rollback()?;
             println!("rolled back to generation {id}");
@@ -147,6 +150,8 @@ fn mutates_install_root(command: &Command) -> bool {
         | Command::Clean
         | Command::Hold(_)
         | Command::Unhold(_)
+        | Command::Unrequest(_)
+        | Command::Autoremove
         | Command::Rollback
         | Command::Switch(_)
         | Command::CollectGarbage(_)
@@ -164,6 +169,7 @@ fn mutates_install_root(command: &Command) -> bool {
         ),
         Command::Build(_) => true,
         Command::List
+        | Command::Orphans
         | Command::Doctor
         | Command::Search(_)
         | Command::Info(_)

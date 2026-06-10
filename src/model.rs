@@ -125,6 +125,11 @@ pub struct PackageState {
     /// `grm unhold`.
     #[serde(default)]
     pub held: bool,
+    /// `true` when the user asked for this package by name; `false` when the solver pulled it
+    /// in as a dependency. Non-requested packages are candidates for `grm autoremove` once
+    /// nothing references them.
+    #[serde(default)]
+    pub requested: bool,
     /// Command names this package provides (discovered at build time). Used for capability
     /// resolution when the solver reads from indexes or installed state.
     #[serde(default)]
@@ -645,6 +650,7 @@ impl PackageState {
             Some(value) => expect_string_map(value, "field `source_hashes`")?,
         };
         let held = optional_bool(&record, "held")?.unwrap_or(false);
+        let requested = optional_bool(&record, "requested")?.unwrap_or(false);
         let provides = optional_string_list(&record, "provides")?;
         let libs = optional_string_list(&record, "libs")?;
 
@@ -660,6 +666,7 @@ impl PackageState {
             build_deps,
             source_hashes,
             held,
+            requested,
             provides,
             libs,
         })
@@ -697,6 +704,7 @@ impl PackageState {
         if self.held {
             record.push("held", Value::bool(true, Span::unknown()));
         }
+        record.push("requested", Value::bool(self.requested, Span::unknown()));
         record.push("provides", string_list_value(&self.provides));
         record.push("libs", string_list_value(&self.libs));
         Value::record(record, Span::unknown())
