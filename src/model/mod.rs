@@ -5,6 +5,7 @@
 //! from Nushell `Value`s. Construction validates structure (names, targets, semver) so the rest
 //! of the codebase works with already-checked data. Split per concern: see each submodule.
 
+mod addendum_catalog;
 mod catalog;
 mod deps;
 mod index;
@@ -13,6 +14,7 @@ pub(crate) mod preferences;
 mod state;
 mod value;
 
+pub use addendum_catalog::*;
 pub use catalog::*;
 pub use deps::*;
 pub use index::*;
