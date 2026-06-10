@@ -11,7 +11,8 @@ use std::{
 use crate::{
     archive, build,
     model::{Dependency, parse_version_relaxed},
-    paths, tome,
+    tome,
+    util::paths,
 };
 
 use super::*;

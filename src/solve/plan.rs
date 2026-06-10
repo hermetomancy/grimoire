@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use semver::Version;
 use std::{collections::BTreeMap, path::PathBuf};
 
-use crate::{closure, model::IndexEntry, paths, toolchain};
+use crate::{build::toolchain, model::IndexEntry, store::closure, util::paths};
 
 /// A package pinned by the lockfile: the exact version and archive hash last installed. Used by
 /// `install --locked` to constrain resolution to the recorded reproducible set.

@@ -10,14 +10,15 @@ use std::{
 };
 
 use crate::{
-    archive, lock,
+    archive,
+    install::lock,
     model::{
         Dependency, PackageMetadata, PackageState, parse_version_relaxed,
         validate_relative_package_path, validate_sha256, validate_target,
     },
     nu::nuon_io,
-    paths,
-    progress::{report, status, success},
+    util::paths,
+    util::progress::{report, status, success},
 };
 
 use super::*;

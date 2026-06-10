@@ -6,7 +6,7 @@ use std::fs;
 use crate::{
     cli::{TomeInitArgs, TomeRuneArgs},
     model::{validate_package_name, validate_package_version, validate_tome_name},
-    progress::report,
+    util::progress::report,
 };
 
 /// Scaffolds a new tome: a self-naming `tome.rn` manifest, empty `runes/` and `sources/`

@@ -15,8 +15,8 @@ use crate::{
     archive,
     model::PackageMetadata,
     nu::nuon_io,
-    paths,
-    progress::{status, success},
+    util::paths,
+    util::progress::{status, success},
 };
 
 pub fn pack_built_rune(

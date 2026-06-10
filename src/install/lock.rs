@@ -10,10 +10,12 @@ use semver::Version;
 use std::path::PathBuf;
 
 use crate::{
+    catalog::sync_common,
     install,
     model::{AddendumState, LockFile, parse_version_relaxed},
     nu::nuon_io,
-    paths, sync_common, tome,
+    tome,
+    util::paths,
 };
 
 /// One package as recorded in `grimoire.lock.nuon`: enough to pin a reproducible reinstall to the

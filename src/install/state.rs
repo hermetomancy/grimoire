@@ -8,8 +8,8 @@ use crate::{
     cli::PackageArg,
     model::{PackageState, parse_version_relaxed},
     nu::nuon_io,
-    paths,
-    progress::report,
+    util::paths,
+    util::progress::report,
 };
 
 use super::*;

@@ -15,7 +15,7 @@ use crate::{
     fetch::FetchedSource,
     model::{BuildManifest, PackageMetadata, TomeManifest},
     nu::nuon_io,
-    progress,
+    util::progress,
 };
 
 mod env;

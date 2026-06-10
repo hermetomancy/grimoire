@@ -9,6 +9,7 @@ mod catalog;
 mod deps;
 mod index;
 mod package;
+pub(crate) mod preferences;
 mod state;
 mod value;
 

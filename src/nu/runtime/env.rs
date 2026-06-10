@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{paths, toolchain::HostTool};
+use crate::{build::toolchain::HostTool, util::paths};
 
 use super::*;
 

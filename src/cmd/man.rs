@@ -11,7 +11,7 @@ use clap_mangen::Man;
 use std::fs;
 
 use crate::cli::{Cli, CompletionsArgs, ManArgs};
-use crate::progress::report;
+use crate::util::progress::report;
 
 pub fn completions(args: CompletionsArgs) -> Result<()> {
     let mut cmd = Cli::command();

@@ -12,7 +12,7 @@ use fs4::fs_std::FileExt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, Write};
 
-use crate::paths;
+use crate::util::paths;
 
 const LOCK_FILE_NAME: &str = ".grimoire-lock";
 

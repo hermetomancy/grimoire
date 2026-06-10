@@ -4,7 +4,7 @@
 use anyhow::Result;
 use std::collections::HashMap;
 
-use crate::{model::PackageIndex, nu::runtime::EmbeddedNuRuntime, paths, tome};
+use crate::{model::PackageIndex, nu::runtime::EmbeddedNuRuntime, tome, util::paths};
 
 /// Maps capability names (e.g. "awk", "sh") to the package names that provide them.
 /// Built once per resolve by reading tome indexes first, then falling back to runes

@@ -12,6 +12,8 @@
 //!   excludes the build environment and the dependency closure, so the same fetched artifact lands
 //!   at the same store path regardless of which host produced it — Nix's fixed-output derivation.
 
+pub(crate) mod closure;
+
 use crate::model::{PackageMetadata, Source};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;

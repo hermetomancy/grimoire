@@ -6,42 +6,25 @@
 //! escalation. This crate is the binary; `main` parses the CLI and dispatches to each module's
 //! command entry point (`install`, `build`, `tome`, `doctor`, `query`, …).
 
-mod addendum;
 mod archive;
 mod build;
-mod clean;
+mod catalog;
 mod cli;
-mod closure;
-mod doctor;
+mod cmd;
 mod fetch;
-mod files;
-mod fs_util;
-mod index;
 mod install;
-mod lock;
-mod man;
 mod model;
 mod nu;
-mod paths;
-mod prefer;
-mod preferences;
-mod process_lock;
 mod profile;
-mod progress;
-mod query;
-mod setup;
-mod signing;
 mod solve;
 mod store;
-mod sync_common;
-mod time_util;
 mod tome;
-mod toolchain;
+mod util;
 
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Command, TomeCommand};
-use progress::Verbosity;
+use util::{process_lock, progress, progress::Verbosity, time_util};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -74,22 +57,22 @@ fn run(cli: Cli) -> Result<()> {
         Command::Build(args) => build::build(args),
         Command::Install(args) => install::install(args),
         Command::Remove(args) => install::remove(args),
-        Command::Clean => clean::clean(),
-        Command::Setup => setup::setup(),
+        Command::Clean => cmd::clean::clean(),
+        Command::Setup => cmd::setup::setup(),
         Command::List => install::list(),
-        Command::Doctor => doctor::doctor(),
-        Command::Search(args) => query::search(args),
-        Command::Info(args) => query::info(args),
-        Command::Upgrade(args) => query::upgrade(args),
+        Command::Doctor => cmd::doctor::doctor(),
+        Command::Search(args) => cmd::query::search(args),
+        Command::Info(args) => cmd::query::info(args),
+        Command::Upgrade(args) => cmd::query::upgrade(args),
         Command::Hold(args) => install::hold(args),
         Command::Unhold(args) => install::unhold(args),
         Command::Unrequest(args) => install::unrequest(args),
         Command::Orphans => install::orphans(),
-        Command::Files(args) => files::files(args),
-        Command::Owns(args) => files::owns(args),
-        Command::Provides(args) => files::provides(args),
+        Command::Files(args) => cmd::files::files(args),
+        Command::Owns(args) => cmd::files::owns(args),
+        Command::Provides(args) => cmd::files::provides(args),
         Command::Autoremove => install::autoremove(),
-        Command::Prefer(args) => prefer::prefer(args),
+        Command::Prefer(args) => cmd::prefer::prefer(args),
         Command::Rollback => {
             let id = profile::rollback()?;
             println!("rolled back to generation {id}");
@@ -132,19 +115,19 @@ fn run(cli: Cli) -> Result<()> {
             TomeCommand::News(args) => tome::news::news_command(args.name, args.all),
         },
         Command::Addendum { command } => match command {
-            cli::AddendumCommand::Add(args) => addendum::add(args),
-            cli::AddendumCommand::Remove(args) => addendum::remove(args),
-            cli::AddendumCommand::List => addendum::list(),
-            cli::AddendumCommand::Update(args) => addendum::update(args),
+            cli::AddendumCommand::Add(args) => catalog::addendum::add(args),
+            cli::AddendumCommand::Remove(args) => catalog::addendum::remove(args),
+            cli::AddendumCommand::List => catalog::addendum::list(),
+            cli::AddendumCommand::Update(args) => catalog::addendum::update(args),
         },
         Command::StoreHash(args) => {
             for package in &args.packages {
-                println!("{}", closure::store_hash(package)?);
+                println!("{}", store::closure::store_hash(package)?);
             }
             Ok(())
         }
-        Command::Completions(args) => man::completions(args),
-        Command::Man(args) => man::man(args),
+        Command::Completions(args) => cmd::man::completions(args),
+        Command::Man(args) => cmd::man::man(args),
     }
 }
 

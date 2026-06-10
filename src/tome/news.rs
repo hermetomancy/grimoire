@@ -10,10 +10,10 @@ use anyhow::{Context, Result};
 use std::{fs, path::Path};
 
 use crate::{
+    catalog::sync_common,
     model::{Catalog, TomeState},
     nu::nuon_io,
-    progress::report,
-    sync_common,
+    util::progress::report,
 };
 
 pub struct NewsItem {

@@ -17,7 +17,7 @@ use std::{
     thread,
 };
 
-use crate::progress;
+use crate::util::progress;
 
 use super::*;
 

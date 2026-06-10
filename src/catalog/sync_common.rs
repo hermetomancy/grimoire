@@ -11,10 +11,12 @@ use std::{
 };
 
 use crate::{
-    fs_util,
+    catalog::signing,
     model::{Catalog, CatalogManifest},
     nu::nuon_io,
-    paths, progress, signing,
+    util::fs_util,
+    util::paths,
+    util::progress,
 };
 
 /// Returns `true` when `url` is a local directory containing `manifest_name`.

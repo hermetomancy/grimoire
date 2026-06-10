@@ -18,7 +18,7 @@ use std::{
 use crate::{
     archive,
     model::Source,
-    progress::{status, success},
+    util::progress::{status, success},
 };
 
 /// Total attempts for a single HTTP GET before giving up. The first try plus retries on

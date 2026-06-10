@@ -10,8 +10,8 @@ use anyhow::{Result, bail};
 use std::collections::BTreeMap;
 
 use crate::{
-    cli::PreferArgs, install, paths, preferences::Preferences, profile, progress::report, query,
-    solve,
+    cli::PreferArgs, cmd::query, install, model::preferences::Preferences, profile, solve,
+    util::paths, util::progress::report,
 };
 
 pub fn prefer(args: PreferArgs) -> Result<()> {
