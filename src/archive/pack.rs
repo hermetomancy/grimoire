@@ -5,7 +5,7 @@
 use anyhow::{Context, Result, bail};
 use std::{
     fs::{self, File},
-    io::{Cursor, Read},
+    io::Cursor,
     path::{Path, PathBuf},
 };
 
@@ -161,16 +161,16 @@ fn append_file<W: std::io::Write>(
     path: &Path,
     mode: u32,
 ) -> Result<()> {
-    let mut bytes = Vec::new();
-    File::open(source)
-        .with_context(|| format!("read package output {}", source.display()))?
-        .read_to_end(&mut bytes)?;
+    // Stream straight from the file: package outputs can be large (debug info, static
+    // libraries), so buffering whole files would risk OOM during `grm tome build`.
+    let file =
+        File::open(source).with_context(|| format!("read package output {}", source.display()))?;
     let mut header = tar::Header::new_gnu();
-    header.set_size(bytes.len() as u64);
+    header.set_size(file.metadata()?.len());
     header.set_mode(mode);
     header.set_entry_type(tar::EntryType::Regular);
     set_deterministic_metadata(&mut header);
-    tar.append_data(&mut header, path, Cursor::new(bytes))?;
+    tar.append_data(&mut header, path, file)?;
     Ok(())
 }
 

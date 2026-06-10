@@ -36,6 +36,14 @@ fn main() -> Result<()> {
         Verbosity::Normal
     };
     progress::set_verbosity(verbosity);
+    // Tear the live spinner down before a panic message prints: the spinner thread redraws
+    // stderr on a timer, and a panic mid-redraw would interleave escape sequences with the
+    // panic report. The default hook still runs afterwards.
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        progress::finish();
+        default_panic(info);
+    }));
     // Tear down any live spinner before returning so it never lingers in front of an error report
     // (anyhow prints to stderr) or the shell prompt.
     let result = run(cli);

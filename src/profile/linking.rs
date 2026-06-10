@@ -127,8 +127,10 @@ pub(crate) fn link_package_into_generation(
     Ok(())
 }
 
-/// Try a CoW clone (APFS `clonefile` on macOS, `FICLONE` on Linux), falling back to a hard link
-/// when the filesystem or platform does not support it.
+/// Try a CoW clone (APFS `clonefile` on macOS, `FICLONE` on Linux), falling back to a hard
+/// link when the filesystem or platform does not support it, and to a plain file copy when
+/// the store and the profiles directory sit on different filesystems (`EXDEV`), where both
+/// cloning and hard-linking are impossible.
 pub(crate) fn clone_or_hard_link(src: &Path, dst: &Path) -> Result<()> {
     if let Err(e) = try_cow_clone(src, dst) {
         if !is_cow_unsupported(&e) {
@@ -137,8 +139,17 @@ pub(crate) fn clone_or_hard_link(src: &Path, dst: &Path) -> Result<()> {
     } else {
         return Ok(());
     }
-    fs::hard_link(src, dst)
-        .with_context(|| format!("hard link {} -> {}", dst.display(), src.display()))
+    match fs::hard_link(src, dst) {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+            fs::copy(src, dst)
+                .with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
+            Ok(())
+        }
+        Err(e) => {
+            Err(e).with_context(|| format!("hard link {} -> {}", dst.display(), src.display()))
+        }
+    }
 }
 
 /// Whether an error indicates that CoW cloning is unsupported on this filesystem.
