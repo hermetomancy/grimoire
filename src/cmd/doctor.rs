@@ -4,9 +4,17 @@
 //! lockfile presence, reporting counts to stdout and per-item problems to stderr.
 
 use anyhow::{Context, Result};
+use std::{collections::BTreeMap, fs, path::Path};
 
 use crate::{
-    build::toolchain, catalog::sync_common, install, install::lock, profile, tome, util::paths,
+    build::toolchain,
+    catalog::sync_common,
+    install,
+    install::lock,
+    model::{PackageState, preferences::Preferences},
+    nu::nuon_io,
+    profile, tome,
+    util::paths,
 };
 
 const CORE_USERLAND_TOOLS_LINUX: &[&str] = &[
@@ -55,8 +63,13 @@ pub fn doctor() -> Result<()> {
         problems += 1;
         eprintln!("grimoire: {msg}");
     }
+    problems += check_install_root(&root);
+    problems += check_current_symlink()?;
+    problems += check_state_files()?;
     problems += check_tomes()?;
     problems += check_packages()?;
+    problems += check_duplicate_bins()?;
+    problems += check_stale_backups()?;
     problems += check_source_build_readiness()?;
     check_lock(&mut problems)?;
 
@@ -66,6 +79,121 @@ pub fn doctor() -> Result<()> {
         println!("health: {problems} problem(s) found");
     }
     Ok(())
+}
+
+/// Whitespace in the install root breaks source builds: autotools bakes unquoted absolute
+/// tool paths into Makefiles, which split at the space.
+fn check_install_root(root: &Path) -> usize {
+    if root.to_string_lossy().chars().any(char::is_whitespace) {
+        eprintln!(
+            "grimoire: install root `{}` contains whitespace, which breaks source builds; \
+             set GRIMOIRE_ROOT to a space-free path",
+            root.display()
+        );
+        return 1;
+    }
+    0
+}
+
+/// A `profiles/current` symlink pointing at a deleted generation leaves a dead PATH entry.
+fn check_current_symlink() -> Result<usize> {
+    let link = profile::current_profile_link()?;
+    if fs::symlink_metadata(&link).is_ok() && fs::metadata(&link).is_err() {
+        eprintln!(
+            "grimoire: `{}` points at a generation that no longer exists; run `grm switch <id>`",
+            link.display()
+        );
+        return Ok(1);
+    }
+    Ok(0)
+}
+
+/// Reports state files that no longer parse, per file, instead of failing the whole check
+/// the way `installed_states()` would.
+fn check_state_files() -> Result<usize> {
+    let state_dir = paths::install_root()?.join("state").join("packages");
+    if !state_dir.exists() {
+        return Ok(0);
+    }
+    let mut problems = 0;
+    for entry in fs::read_dir(&state_dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("nuon") {
+            continue;
+        }
+        let parsed = nuon_io::read_nuon(&path).and_then(PackageState::from_value);
+        if let Err(e) = parsed {
+            problems += 1;
+            eprintln!(
+                "grimoire: package state file `{}` is corrupt: {e:#}",
+                path.display()
+            );
+        }
+    }
+    Ok(problems)
+}
+
+/// Two installed packages claiming the same bin name without a `grm prefer` choice will fail
+/// the next generation rebuild; surface it before that happens.
+fn check_duplicate_bins() -> Result<usize> {
+    let states = install::installed_states()?;
+    let preferences = Preferences::load().unwrap_or_default();
+    let mut owners: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for state in &states {
+        for bin in state.bins.keys() {
+            owners.entry(bin).or_default().push(&state.name);
+        }
+    }
+    let mut problems = 0;
+    for (bin, claimants) in owners {
+        if claimants.len() < 2 {
+            continue;
+        }
+        let resolved = preferences
+            .providers
+            .get(bin)
+            .is_some_and(|p| claimants.iter().any(|c| c == p));
+        if !resolved {
+            problems += 1;
+            eprintln!(
+                "grimoire: bin `{bin}` is provided by multiple packages ({}); run \
+                 `grm prefer {bin} <package>` before the next install",
+                claimants.join(", ")
+            );
+        }
+    }
+    Ok(problems)
+}
+
+/// `.grimoire-old` directories are move-aside backups dropped on commit; one left behind
+/// means an interrupted transaction, and it silently holds disk space.
+fn check_stale_backups() -> Result<usize> {
+    let mut dirs = vec![paths::store_root()?];
+    let cache = paths::install_root()?.join("cache");
+    for sub in ["tomes", "addenda"] {
+        dirs.push(cache.join(sub));
+    }
+    let mut problems = 0;
+    for dir in dirs {
+        if !dir.exists() {
+            continue;
+        }
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".grimoire-old"))
+            {
+                problems += 1;
+                eprintln!(
+                    "grimoire: stale transaction backup `{}` (safe to delete)",
+                    path.display()
+                );
+            }
+        }
+    }
+    Ok(problems)
 }
 
 fn check_source_build_readiness() -> Result<usize> {

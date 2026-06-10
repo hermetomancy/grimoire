@@ -53,7 +53,7 @@ pub fn pack_built_rune(
     let file = File::create(&archive_path)?;
     let encoder = zstd::stream::write::Encoder::new(file, 0)?;
     let mut tar = tar::Builder::new(encoder);
-    append_package_dir(&mut tar, package_payload_dir(package_dir, final_prefix))?;
+    append_package_dir(&mut tar, package_payload_dir(package_dir, final_prefix)?)?;
     append_bytes(&mut tar, ".grimoire/package.nuon", package_nuon.as_bytes())?;
     append_bytes(&mut tar, ".grimoire/rune.rn", &rune_source)?;
     let encoder = tar.into_inner()?;
@@ -63,23 +63,31 @@ pub fn pack_built_rune(
     Ok(archive_path)
 }
 
-fn package_payload_dir(package_dir: &Path, final_prefix: &Path) -> PathBuf {
-    let destdir_payload = package_dir.join(relative_destdir_prefix(final_prefix));
-    if destdir_payload.exists() {
+fn package_payload_dir(package_dir: &Path, final_prefix: &Path) -> Result<PathBuf> {
+    let destdir_payload = package_dir.join(relative_destdir_prefix(final_prefix)?);
+    Ok(if destdir_payload.exists() {
         destdir_payload
     } else {
         package_dir.to_path_buf()
-    }
+    })
 }
 
-fn relative_destdir_prefix(prefix: &Path) -> PathBuf {
+/// Re-roots the absolute store prefix under the staging dir (`/grm/store/x` → `grm/store/x`):
+/// dropping the root is the point, but a `..` or Windows prefix in a store path is never
+/// legitimate and silently stripping it would pack the wrong directory.
+fn relative_destdir_prefix(prefix: &Path) -> Result<PathBuf> {
     let mut relative = PathBuf::new();
     for component in prefix.components() {
-        if let std::path::Component::Normal(part) = component {
-            relative.push(part);
+        match component {
+            std::path::Component::Normal(part) => relative.push(part),
+            std::path::Component::RootDir | std::path::Component::CurDir => {}
+            std::path::Component::ParentDir | std::path::Component::Prefix(_) => bail!(
+                "store prefix `{}` contains an unsupported path component",
+                prefix.display()
+            ),
         }
     }
-    relative
+    Ok(relative)
 }
 
 fn append_package_dir<W: std::io::Write>(
@@ -149,6 +157,8 @@ fn append_dir<W: std::io::Write>(tar: &mut tar::Builder<W>, path: &Path) -> Resu
     let mut header = tar::Header::new_gnu();
     header.set_entry_type(tar::EntryType::Directory);
     header.set_size(0);
+    // Deliberately fixed, like file modes in `file_mode`: archives must be byte-identical
+    // across builders, and host umask would otherwise leak into directory modes.
     header.set_mode(0o755);
     set_deterministic_metadata(&mut header);
     tar.append_data(&mut header, path, Cursor::new([]))?;

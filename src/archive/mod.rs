@@ -38,6 +38,24 @@ fn normalize_hash(hash: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// Copies `src` to `dst` while hashing the stream, so staging an archive into a transaction
+/// and computing its content hash is a single read instead of two.
+pub fn copy_hashed(src: &Path, dst: &Path) -> Result<String> {
+    let mut reader = BufReader::new(File::open(src)?);
+    let mut writer = File::create(dst)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0_u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+        std::io::Write::write_all(&mut writer, &buf[..read])?;
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
 pub fn archive_hash(path: &Path) -> Result<String> {
     let mut reader = BufReader::new(File::open(path)?);
     let mut hasher = Sha256::new();

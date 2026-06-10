@@ -74,12 +74,14 @@ pub(crate) fn install_store_only(
         .prefix("grimoire-")
         .tempdir_in(&store_root)?;
     let safe_archive = transaction.path().join("archive.tar.zst");
-    fs::copy(archive_path, &safe_archive)
-        .with_context(|| format!("copy archive to transaction {}", safe_archive.display()))?;
 
-    // Verify integrity before the archive is read or extracted. A mismatch is fatal.
-    status("hashing archive");
-    let archive_hash = archive::archive_hash(&safe_archive)?;
+    // Verify integrity before the archive is read or extracted. A mismatch is fatal. The
+    // hash is computed while staging the copy, and the embedded metadata is captured during
+    // path validation, so the archive is read three times in total (stage, validate, extract)
+    // instead of five.
+    status("staging and hashing archive");
+    let archive_hash = archive::copy_hashed(archive_path, &safe_archive)
+        .with_context(|| format!("copy archive to transaction {}", safe_archive.display()))?;
     if let Some(expected) = &expected_hash {
         archive::verify_hash(&archive_hash, expected)
             .with_context(|| format!("verify archive {}", safe_archive.display()))?;
@@ -90,10 +92,10 @@ pub(crate) fn install_store_only(
         "validating archive paths ({})",
         safe_archive.display()
     ));
-    archive::validate_archive_paths(&safe_archive)?;
-
-    status("reading package metadata");
-    let metadata = inspect_archive(&safe_archive)?;
+    let metadata_text =
+        archive::validate_archive_paths_capturing(&safe_archive, Some(".grimoire/package.nuon"))?
+            .context("package archive is missing .grimoire/package.nuon")?;
+    let metadata = PackageMetadata::from_value(nuon_io::parse_nuon(&metadata_text)?, true)?;
     validate_target(&metadata, &paths::target_triple())?;
 
     let root = paths::install_root()?;

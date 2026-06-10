@@ -368,15 +368,16 @@ pub(crate) fn rune_names_ordered(root: &Path) -> Result<Vec<String>> {
         }
     }
 
-    // Kahn's algorithm
-    let mut queue: Vec<String> = filtered_names
+    // Kahn's algorithm. The ready set is an ordered set, not a stack, so ties break
+    // alphabetically for *every* node — not just the initial seeds — and the build order
+    // is fully deterministic.
+    let mut ready: std::collections::BTreeSet<String> = filtered_names
         .iter()
         .filter(|n| *in_degree.get(*n).unwrap_or(&0) == 0)
         .cloned()
         .collect();
-    queue.sort(); // Deterministic tie-break for seeds
     let mut ordered = Vec::new();
-    while let Some(name) = queue.pop() {
+    while let Some(name) = ready.pop_first() {
         ordered.push(name.clone());
         if let Some(deps) = adj.get(&name) {
             for dep in deps {
@@ -385,7 +386,7 @@ pub(crate) fn rune_names_ordered(root: &Path) -> Result<Vec<String>> {
                 };
                 *count -= 1;
                 if *count == 0 {
-                    queue.push(dep.clone());
+                    ready.insert(dep.clone());
                 }
             }
         }

@@ -116,7 +116,7 @@ pub fn http_get_text(url: &str) -> Result<Option<String>> {
         bail!("expected an http(s) URL, got `{url}`");
     }
     status(&format!("fetching index ({url})"));
-    match http_get(&http_agent(), url) {
+    match http_get(http_agent(), url) {
         Ok(response) => Ok(Some(
             response
                 .into_string()
@@ -127,13 +127,18 @@ pub fn http_get_text(url: &str) -> Result<Option<String>> {
     }
 }
 
-/// A reusable HTTP agent with connect/read/write timeouts so no request can hang the install.
-fn http_agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(HTTP_CONNECT_TIMEOUT)
-        .timeout_read(HTTP_IO_TIMEOUT)
-        .timeout_write(HTTP_IO_TIMEOUT)
-        .build()
+/// The process-wide HTTP agent, with connect/read/write timeouts so no request can hang the
+/// install. Shared so consecutive downloads reuse connections instead of re-handshaking
+/// TCP/TLS per request.
+fn http_agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout_connect(HTTP_CONNECT_TIMEOUT)
+            .timeout_read(HTTP_IO_TIMEOUT)
+            .timeout_write(HTTP_IO_TIMEOUT)
+            .build()
+    })
 }
 
 /// GETs `url` with bounded retries: transport errors (DNS, connect, reset, timeout) and 5xx
@@ -176,7 +181,7 @@ fn http_error(url: &str, err: ureq::Error) -> anyhow::Error {
 
 fn download_into(url: &str, base_dir: &Path, destination: &Path) -> Result<()> {
     if url.starts_with("http://") || url.starts_with("https://") {
-        let response = http_get(&http_agent(), url).map_err(|err| http_error(url, *err))?;
+        let response = http_get(http_agent(), url).map_err(|err| http_error(url, *err))?;
         let total: Option<u64> = response
             .header("Content-Length")
             .and_then(|v| v.parse().ok());
