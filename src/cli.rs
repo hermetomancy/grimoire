@@ -56,6 +56,11 @@ pub enum Command {
     /// Demote explicitly installed packages to dependency status, making them eligible for
     /// `grm autoremove` once nothing else requires them.
     Unrequest(PackageArg),
+    /// Restore the package set a lockfile records: install every requested package at its
+    /// pinned version and hash, restore requested/held intent, and sweep anything the lock
+    /// does not account for. Tomes must already be configured (and, for git tomes, synced at
+    /// the lock's pinned commits).
+    Restore(RestoreArgs),
     /// Remove every orphaned dependency: packages installed only as dependencies (never
     /// requested by name, not held) that no installed package still requires.
     #[command(visible_alias = "ar")]
@@ -213,6 +218,13 @@ pub struct PackageArg {
     /// Names of the installed packages to operate on.
     #[arg(num_args = 1..)]
     pub packages: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct RestoreArgs {
+    /// Lockfile to restore from. Defaults to the install root's `state/grimoire.lock.nuon`.
+    #[arg(long)]
+    pub lockfile: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args)]

@@ -610,3 +610,87 @@ fn install_locked_reproduces_pinned_version() {
         "locked install of unpinned package",
     );
 }
+
+#[test]
+fn restore_reproduces_locked_set_on_a_fresh_root() {
+    let triple = target_triple();
+    let tome = TempDir::new().unwrap();
+    let tome_path = tome.path();
+    let dist = tome_path.join("dist");
+    let entries = vec![
+        dep_archive_entry(
+            &dist,
+            "app",
+            "0.1.0",
+            &triple,
+            "[\"lib\"]",
+            "cafef00dcafef00d-app",
+        ),
+        dep_archive_entry(&dist, "lib", "0.1.0", &triple, "[]", "cafef00dcafef00d-lib"),
+    ];
+    write_dep_tome(tome_path, "restcore", &entries);
+
+    // Source machine: install app (lib pulled in as a dep), hold lib, save the lockfile.
+    let source_root = TempDir::new().unwrap();
+    let source_root = source_root.path();
+    assert_success(
+        &run(
+            source_root,
+            &["tome", "add", tome_path.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add (source)",
+    );
+    assert_success(
+        &run(source_root, &["tome", "update", "restcore"]),
+        "tome update (source)",
+    );
+    assert_success(&run(source_root, &["install", "app"]), "install app");
+    assert_success(&run(source_root, &["hold", "lib"]), "hold lib");
+    let lock_text =
+        fs::read_to_string(source_root.join("state").join("grimoire.lock.nuon")).unwrap();
+    assert!(
+        lock_text.contains("requested")
+            && lock_text.contains("held")
+            && lock_text.contains("store_hash"),
+        "lock must record restore metadata: {lock_text}"
+    );
+    let saved_lock = tome_path.join("saved.lock.nuon");
+    fs::write(&saved_lock, &lock_text).unwrap();
+
+    // Fresh machine: configure the same tome, then restore from the saved lock alone.
+    let fresh_root = TempDir::new().unwrap();
+    let fresh_root = fresh_root.path();
+    assert_success(
+        &run(
+            fresh_root,
+            &["tome", "add", tome_path.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add (fresh)",
+    );
+    assert_success(
+        &run(fresh_root, &["tome", "update", "restcore"]),
+        "tome update (fresh)",
+    );
+    let restore = run(
+        fresh_root,
+        &["restore", "--lockfile", saved_lock.to_str().unwrap()],
+    );
+    assert_success(&restore, "restore from saved lock");
+
+    let list = stdout(&run(fresh_root, &["list"]));
+    assert!(
+        list.contains("app\t0.1.0") && list.contains("lib\t0.1.0"),
+        "restore must reproduce the recorded packages: {list}"
+    );
+    let app_state = state_text(fresh_root, "app");
+    assert!(
+        app_state.contains("requested: true"),
+        "app must be restored as requested: {app_state}"
+    );
+    let lib_state = state_text(fresh_root, "lib");
+    assert!(
+        lib_state.contains("requested: false") && lib_state.contains("held: true"),
+        "lib must be restored as a held dependency: {lib_state}"
+    );
+    assert_eq!(stdout(&run_shim(fresh_root, "app")).trim(), "app-0.1.0");
+}

@@ -140,7 +140,8 @@ impl PackageState {
 
 /// The reproducible install snapshot written to `grimoire.lock.nuon`. Built from the recorded
 /// installed package state and configured tome state, so it can be regenerated deterministically
-/// after any install or removal. Write-only for now (Grimoire emits it; nothing reads it back).
+/// after any install or removal. Read back by `install --locked` (pins) and `grm restore`
+/// (full blueprint: roots, holds, content addresses, tome commits).
 pub struct LockFile {
     pub target: String,
     pub tomes: Vec<TomeState>,
@@ -244,6 +245,15 @@ impl LockFile {
             "archive_hash",
             Value::string(&package.archive_hash, Span::unknown()),
         );
+        // The content address and install-reason flags make the lock a restorable blueprint:
+        // `grm restore` needs to know the roots (requested), the holds, and the exact recipe
+        // identity (store_hash folds in the rune, sources, and build environment).
+        record.push(
+            "store_hash",
+            Value::string(&package.store_hash, Span::unknown()),
+        );
+        record.push("requested", Value::bool(package.requested, Span::unknown()));
+        record.push("held", Value::bool(package.held, Span::unknown()));
         record.push("source_hashes", string_map_value(&package.source_hashes));
         record.push("runtime_deps", string_list_value(&package.runtime_deps));
         record.push("build_deps", string_list_value(&package.build_deps));

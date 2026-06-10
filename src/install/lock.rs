@@ -19,12 +19,25 @@ use crate::{
 };
 
 /// One package as recorded in `grimoire.lock.nuon`: enough to pin a reproducible reinstall to the
-/// exact version and verified archive hash that was last installed.
+/// exact version, verified archive hash, and content address that was last installed, and to
+/// restore the user's install-reason and hold intent.
 #[derive(Debug, Clone)]
 pub struct LockedPackage {
     pub name: String,
     pub version: Version,
     pub archive_hash: String,
+    /// The content address recorded at lock time; `None` for hand-written locks that omit it.
+    pub store_hash: Option<String>,
+    pub requested: bool,
+    pub held: bool,
+}
+
+/// One tome as recorded in the lockfile: the commit the catalog was checked out at, when the
+/// tome had one (local-path tomes do not).
+#[derive(Debug, Clone)]
+pub struct LockedTome {
+    pub name: String,
+    pub commit: Option<String>,
 }
 
 /// Path of the install snapshot lockfile, kept under install-root state alongside the other
@@ -56,15 +69,13 @@ pub fn rebuild() -> Result<()> {
 /// yet, so callers can distinguish "nothing locked" from a parse failure. The lockfile is inert
 /// data read through the shared NUON layer (AGENTS.md §4).
 pub fn read_locked_packages() -> Result<Option<Vec<LockedPackage>>> {
-    let path = lock_path()?;
-    if !path.exists() {
-        return Ok(None);
-    }
+    read_locked_packages_from(&lock_path()?)
+}
 
-    let value =
-        nuon_io::read_nuon(&path).with_context(|| format!("read lockfile {}", path.display()))?;
-    let Value::Record { val, .. } = &value else {
-        bail!("lockfile root must be a record");
+/// Like [`read_locked_packages`], for an explicit lockfile path (`grm restore --lockfile`).
+pub fn read_locked_packages_from(path: &std::path::Path) -> Result<Option<Vec<LockedPackage>>> {
+    let Some(val) = read_lock_root(path)? else {
+        return Ok(None);
     };
     let Some(Value::List { vals, .. }) = val.get("packages") else {
         bail!("lockfile is missing a `packages` list");
@@ -80,13 +91,58 @@ pub fn read_locked_packages() -> Result<Option<Vec<LockedPackage>>> {
         let version = parse_version_relaxed(&version_raw)
             .with_context(|| format!("lockfile version `{version_raw}` for `{name}`"))?;
         let archive_hash = lock_field_string(val, "archive_hash")?;
+        let store_hash = match val.get("store_hash") {
+            Some(Value::String { val, .. }) if !val.is_empty() => Some(val.clone()),
+            _ => None,
+        };
         packages.push(LockedPackage {
             name,
             version,
             archive_hash,
+            store_hash,
+            requested: lock_field_bool(val, "requested"),
+            held: lock_field_bool(val, "held"),
         });
     }
     Ok(Some(packages))
+}
+
+/// Reads the recorded tomes (name + pinned commit) from a lockfile.
+pub fn read_locked_tomes_from(path: &std::path::Path) -> Result<Option<Vec<LockedTome>>> {
+    let Some(val) = read_lock_root(path)? else {
+        return Ok(None);
+    };
+    // A minimal or hand-written lock may omit the list entirely; nothing to enforce then.
+    let Some(Value::List { vals, .. }) = val.get("tomes") else {
+        return Ok(Some(Vec::new()));
+    };
+    let mut tomes = Vec::new();
+    for entry in vals {
+        let Value::Record { val, .. } = entry else {
+            bail!("lockfile tome entry must be a record");
+        };
+        let commit = match val.get("source_commit") {
+            Some(Value::String { val, .. }) if !val.is_empty() => Some(val.clone()),
+            _ => None,
+        };
+        tomes.push(LockedTome {
+            name: lock_field_string(val, "name")?,
+            commit,
+        });
+    }
+    Ok(Some(tomes))
+}
+
+fn read_lock_root(path: &std::path::Path) -> Result<Option<Record>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let value =
+        nuon_io::read_nuon(path).with_context(|| format!("read lockfile {}", path.display()))?;
+    let Value::Record { val, .. } = value else {
+        bail!("lockfile root must be a record");
+    };
+    Ok(Some((*val).clone()))
 }
 
 fn lock_field_string(record: &Record, field: &str) -> Result<String> {
@@ -95,4 +151,8 @@ fn lock_field_string(record: &Record, field: &str) -> Result<String> {
         Some(_) => bail!("lockfile field `{field}` must be a string"),
         None => bail!("lockfile package entry is missing field `{field}`"),
     }
+}
+
+fn lock_field_bool(record: &Record, field: &str) -> bool {
+    matches!(record.get(field), Some(Value::Bool { val: true, .. }))
 }

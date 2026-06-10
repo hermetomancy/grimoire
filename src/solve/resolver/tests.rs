@@ -246,6 +246,7 @@ fn pins_constrain_resolution_to_locked_version() {
     pins.insert(
         "app".to_owned(),
         Pin {
+            store_hash: None,
             version: parse_version_relaxed("1.0.0").unwrap(),
             archive_hash: String::new(),
         },

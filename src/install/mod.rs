@@ -99,6 +99,7 @@ pub fn install(args: InstallArgs) -> Result<()> {
     }
 
     let pins = if args.locked {
+        enforce_locked_tome_commits(&lock::lock_path()?)?;
         Some(load_pins()?)
     } else {
         None
@@ -164,10 +165,125 @@ fn load_pins() -> Result<solve::Pins> {
                 solve::Pin {
                     version: pkg.version,
                     archive_hash: pkg.archive_hash,
+                    store_hash: pkg.store_hash,
                 },
             )
         })
         .collect())
+}
+
+/// Restores the package set a lockfile records: installs every `requested` package under the
+/// lock's pins, restores `requested`/`held` intent for everything the lock describes, then
+/// sweeps orphans — converging the install root on exactly the recorded set.
+pub fn restore(args: crate::cli::RestoreArgs) -> Result<()> {
+    if let Some(msg) = paths::fixed_store_setup_instructions() {
+        bail!("{msg}");
+    }
+    let lock_file = match &args.lockfile {
+        Some(path) => path.clone(),
+        None => lock::lock_path()?,
+    };
+    let packages = lock::read_locked_packages_from(&lock_file)?
+        .with_context(|| format!("no lockfile at {}", lock_file.display()))?;
+    enforce_locked_tome_commits(&lock_file)?;
+
+    let pins: solve::Pins = packages
+        .iter()
+        .map(|pkg| {
+            (
+                pkg.name.clone(),
+                solve::Pin {
+                    version: pkg.version.clone(),
+                    archive_hash: pkg.archive_hash.clone(),
+                    store_hash: pkg.store_hash.clone(),
+                },
+            )
+        })
+        .collect();
+    let requested: Vec<String> = packages
+        .iter()
+        .filter(|pkg| pkg.requested)
+        .map(|pkg| pkg.name.clone())
+        .collect();
+    if requested.is_empty() {
+        bail!(
+            "lockfile {} records no requested packages to restore (locks written before \
+             install-reason tracking cannot drive a restore)",
+            lock_file.display()
+        );
+    }
+
+    // Reuse an installed package only when it already matches its pin, like `--locked`.
+    let mut installed = installed_versions()?;
+    installed.retain(|name, version| pins.get(name).is_some_and(|pin| &pin.version == version));
+    let mut installer = Installer::new(installed, Some(pins));
+    for name in &requested {
+        installer
+            .install_named(name)
+            .with_context(|| format!("restore `{name}`"))?;
+    }
+
+    // Restore the recorded intent for every locked package that is now installed, then sweep
+    // whatever the lock does not account for as a dependency.
+    let states = installed_states()?;
+    for pkg in &packages {
+        if states.iter().any(|state| state.name == pkg.name) {
+            set_requested(&pkg.name, pkg.requested, false)?;
+            set_hold(&pkg.name, pkg.held, false)?;
+        }
+    }
+    let seeds: Vec<String> = installed_states()?
+        .iter()
+        .filter(|state| !state.requested && !state.held)
+        .map(|state| state.name.clone())
+        .collect();
+    autoremove_orphans(seeds)?;
+
+    installer.finalize()?;
+    installer.report_notes();
+    report(&format!(
+        "restored {} requested package(s) from {}",
+        requested.len(),
+        lock_file.display()
+    ));
+    Ok(())
+}
+
+/// Refuses a locked operation when a tome's cache has moved off the commit the lock records.
+/// Without this, a moved ref silently changes the candidate universe `--locked` resolves
+/// against. Tomes without a recorded commit (local-path tomes) are skipped.
+fn enforce_locked_tome_commits(lock_file: &std::path::Path) -> Result<()> {
+    let Some(tomes) = lock::read_locked_tomes_from(lock_file)? else {
+        return Ok(());
+    };
+    for locked in tomes {
+        let Some(pinned) = locked.commit else {
+            continue;
+        };
+        let cache = crate::catalog::sync_common::cache_path("tomes", &locked.name)?;
+        let actual = if cache.exists() {
+            crate::tome::git::head_commit(&cache)?
+        } else {
+            None
+        };
+        verify_pinned_tome_commit(&locked.name, &pinned, actual.as_deref())?;
+    }
+    Ok(())
+}
+
+fn verify_pinned_tome_commit(name: &str, pinned: &str, actual: Option<&str>) -> Result<()> {
+    match actual {
+        Some(actual) if actual == pinned => Ok(()),
+        Some(actual) => bail!(
+            "tome `{name}` is at commit {actual} but the lockfile pins {pinned}; the catalog \
+             moved since the lock was written. Re-sync the tome at the pinned commit, or run a \
+             normal install to refresh the lock"
+        ),
+        None => bail!(
+            "tome `{name}` has no synced commit but the lockfile pins {pinned}; run \
+             `grm tome update {name}` first"
+        ),
+    }
 }
 
 fn require_store_hash(step: &PlanStep) -> Result<&str> {
@@ -247,5 +363,27 @@ fn describe_origin(step: &PlanStep) -> String {
         (Some(sub), None) => format!("binary archive {}", sub.entry.archive),
         (None, Some(rune)) => format!("source rune {}", rune.display()),
         (None, None) => "unavailable".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verify_pinned_tome_commit;
+
+    #[test]
+    fn pinned_commit_matching_head_is_accepted() {
+        assert!(verify_pinned_tome_commit("core", "abc123", Some("abc123")).is_ok());
+    }
+
+    #[test]
+    fn moved_ref_is_refused() {
+        let err = verify_pinned_tome_commit("core", "abc123", Some("def456")).unwrap_err();
+        assert!(err.to_string().contains("the catalog moved"), "{err}");
+    }
+
+    #[test]
+    fn missing_commit_is_refused() {
+        let err = verify_pinned_tome_commit("core", "abc123", None).unwrap_err();
+        assert!(err.to_string().contains("no synced commit"), "{err}");
     }
 }
