@@ -132,6 +132,18 @@ pub(crate) fn link_package_into_generation(
 /// the store and the profiles directory sit on different filesystems (`EXDEV`), where both
 /// cloning and hard-linking are impossible.
 pub(crate) fn clone_or_hard_link(src: &Path, dst: &Path) -> Result<()> {
+    // A symlink is reproduced as a symlink. Cloning or hard-linking would either follow it
+    // (a reflink materializes the *target* as a regular file) or pin the link inode, and
+    // both lose the validated relative-link semantics archives guarantee.
+    let metadata =
+        fs::symlink_metadata(src).with_context(|| format!("stat link source {}", src.display()))?;
+    if metadata.file_type().is_symlink() {
+        let target = fs::read_link(src)?;
+        std::os::unix::fs::symlink(&target, dst).with_context(|| {
+            format!("recreate symlink {} -> {}", dst.display(), target.display())
+        })?;
+        return Ok(());
+    }
     if let Err(e) = try_cow_clone(src, dst) {
         if !is_cow_unsupported(&e) {
             return Err(e);
@@ -207,13 +219,20 @@ pub(crate) fn try_cow_clone(src: &Path, dst: &Path) -> Result<()> {
     if rc == 0 {
         Ok(())
     } else {
-        Err(std::io::Error::last_os_error().into())
+        let err = std::io::Error::last_os_error();
+        // The OpenOptions above already created an empty `dst`; remove it, or the
+        // hard-link fallback fails with EEXIST on filesystems without reflink support.
+        drop(dst_file);
+        let _ = fs::remove_file(dst);
+        Err(err.into())
     }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub(crate) fn try_cow_clone(_src: &Path, _dst: &Path) -> Result<()> {
-    bail!("CoW cloning not supported on this platform")
+    // ENOTSUP as a real io::Error so `is_cow_unsupported` recognizes it and the caller
+    // falls back to a hard link — a bare anyhow string here made every FreeBSD link fail.
+    Err(std::io::Error::from_raw_os_error(libc::ENOTSUP).into())
 }
 
 /// Recursively hard-links files from `src` into `dst`, preserving directory structure.
