@@ -1,0 +1,471 @@
+//! Building packages from source runes: extraction, build contracts, failure surfacing.
+
+mod support;
+
+use std::fs;
+
+use support::*;
+use tempfile::TempDir;
+
+#[test]
+fn build_respects_musl_target() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let out = TempDir::new().unwrap();
+    let out = out.path();
+
+    let rune_path = root.join("test.rn");
+    fs::write(
+        &rune_path,
+        "export const package = { name: 'testpkg' version: '0.1.0' }\n\nexport def build [ctx] {\n  echo $ctx.target | save ($ctx.package_dir | path join 'target.txt')\n}\n",
+    ).unwrap();
+
+    let build = run(
+        root,
+        &[
+            "build",
+            rune_path.to_str().unwrap(),
+            &format!("--output={}", out.display()),
+            "--target",
+            "linux-x86_64-musl",
+            "--bootstrap",
+        ],
+    );
+    assert_success(&build, "build with musl target");
+
+    let archive = out.join("testpkg-0.1.0-linux-x86_64-musl.tar.zst");
+    assert!(archive.exists(), "musl archive should exist: {archive:?}");
+
+    let target_text = archive_member_text(&archive, "target.txt");
+    assert_eq!(
+        target_text.trim(),
+        "linux-x86_64-musl",
+        "build context target"
+    );
+}
+
+#[test]
+fn example_tome_checksummed_source() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let add = run(root, &["tome", "add", "./tome-example", "--ref", "main"]);
+    assert_success(&add, "tome add example");
+
+    // `bundle` fetches and verifies a checksummed source before building from it.
+    let install = run(root, &["install", "bundle"]);
+    assert_success(&install, "install bundle");
+
+    let bundle = run_shim(root, "bundle");
+    assert_success(&bundle, "run bundle");
+    assert_eq!(
+        stdout(&bundle).trim(),
+        "grimoire example payload",
+        "bundle output reflects the verified source"
+    );
+}
+
+#[test]
+fn source_tar_zst_is_extracted_into_build_context() {
+    source_archive_is_extracted_into_build_context("payload.tar.zst", TestArchiveKind::TarZst);
+}
+
+#[test]
+fn source_tar_gz_is_extracted_into_build_context() {
+    source_archive_is_extracted_into_build_context("payload.tar.gz", TestArchiveKind::TarGz);
+}
+
+#[test]
+fn source_tar_xz_is_extracted_into_build_context() {
+    source_archive_is_extracted_into_build_context("payload.tar.xz", TestArchiveKind::TarXz);
+}
+
+#[test]
+fn source_build_supports_configure_make_install_contract() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    let sources = tome.join("sources");
+    fs::create_dir_all(&runes).unwrap();
+    fs::create_dir_all(&sources).unwrap();
+    let dist = tome.join("dist");
+    fs::create_dir_all(&dist).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'realbuild'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+
+    let source_archive = runes.join("realpkg-1.0.0.tar.zst");
+    let mut builder = open_archive(&source_archive);
+    append_file(
+        &mut builder,
+        "realpkg-1.0.0/message.txt",
+        b"built from source\n",
+        0o644,
+    );
+    append_file(
+        &mut builder,
+        "realpkg-1.0.0/configure",
+        br#"#!/usr/bin/env sh
+set -eu
+prefix=
+source_dir=${SOURCE_DIR:-.}
+for arg in "$@"; do
+  case "$arg" in
+    --prefix=*) prefix=${arg#--prefix=} ;;
+  esac
+done
+if [ -z "$prefix" ]; then
+  echo "missing --prefix" >&2
+  exit 2
+fi
+printf '%s\n' "$prefix" > configured-prefix.txt
+{
+  printf '%s\n' '#!/usr/bin/env sh'
+  printf '%s\n' 'set -eu'
+  printf '%s\n' "IFS= read -r message < '$source_dir/message.txt'"
+  printf '%s\n' 'printf "%s\n" "$message" > built-message.txt'
+} > build.sh
+{
+  printf '%s\n' '#!/usr/bin/env sh'
+  printf '%s\n' 'set -eu'
+  printf '%s\n' 'destdir=$1'
+  printf '%s\n' 'IFS= read -r message < built-message.txt'
+  printf '%s\n' 'IFS= read -r configured < configured-prefix.txt'
+  printf '%s\n' '{'
+  printf '%s\n' "  printf '%s\n' '#!/usr/bin/env sh'"
+  printf '%s\n' "  printf \"printf '%%s\\\\n' '%s via %s'\\n\" \"\$message\" \"\$configured\""
+  printf '%s\n' '} > "$destdir$configured/realpkg"'
+} > install.sh
+"#,
+        0o755,
+    );
+    finish_archive(builder);
+    let source_hash = sha256_file(&source_archive);
+
+    let minimake_archive_name = format!("minimake-0.1.0-{}.tar.zst", target_triple());
+    let minimake_archive = dist.join(&minimake_archive_name);
+    let mut builder = open_archive(&minimake_archive);
+    let minimake_metadata = format!(
+        "{{format: 1, name: \"minimake\", version: \"0.1.0\", target: \"{}\", store_path: \"{}\", bins: {{default: {{make: \"bin/make\"}}}}}}\n",
+        target_triple(),
+        fake_store_basename("minimake", "0.1.0")
+    );
+    append_file(
+        &mut builder,
+        ".grimoire/package.nuon",
+        minimake_metadata.as_bytes(),
+        0o644,
+    );
+    append_file(
+        &mut builder,
+        "bin/make",
+        b"#!/usr/bin/env sh\nset -eu\ntarget=${1:-all}\ncase \"$target\" in\n  all) sh ./build.sh ;;\n  install) destdir=\"\"; for arg in \"$@\"; do case \"$arg\" in DESTDIR=*) destdir=${arg#DESTDIR=} ;; esac; done; if [ -z \"$destdir\" ]; then echo 'missing DESTDIR' >&2; exit 2; fi; sh ./install.sh \"$destdir\" ;;\n  *) echo \"unsupported target: $target\" >&2; exit 2 ;;\nesac\n",
+        0o755,
+    );
+    finish_archive(builder);
+    let minimake_hash = sha256_file(&minimake_archive);
+    fs::write(
+        dist.join("index.nuon"),
+        format!(
+            "{{\n  format: 2,\n    entries: {{\n    \"cafef00dcafef00d\": {{ name: \"minimake\", version: \"0.1.0\", target: \"{}\", archive: \"{minimake_archive_name}\", archive_hash: \"{minimake_hash}\", runtime_deps: []}}\n  }}\n}}\n",
+            target_triple()
+        ),
+    )
+    .unwrap();
+
+    fs::write(
+        runes.join("realpkg.rn"),
+        format!(
+            "export const package = {{\n  name: 'realpkg'\n  version: '1.0.0'\n  sources: {{ main: {{ url: 'realpkg-1.0.0.tar.zst', sha256: '{source_hash}' }} }}\n  deps: {{ build: {{ default: ['minimake'] }}, runtime: [] }}\n  bins: {{default: {{ realpkg: 'realpkg' }}}}\n}}\n\nexport def build [ctx] {{\n  let source_dir = ($ctx.sources.main.dir | path join 'realpkg-1.0.0')\n  let build_dir = ($ctx.package_dir | path join 'build')\n  let staged_prefix = ($ctx.package_dir | path join ($ctx.prefix | str replace -r '^/' ''))\n  mkdir $build_dir\n  mkdir $staged_prefix\n  let result = (sh -c $\"cd '($build_dir)' && SOURCE_DIR='($source_dir)' '($source_dir)/configure' --prefix='($ctx.prefix)' && make && make install DESTDIR='($ctx.package_dir)'\" | complete)\n  if $result.exit_code != 0 {{\n    error make {{ msg: $result.stderr }}\n  }}\n}}\n"
+        ),
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "add real build tome");
+    let install = run(root, &["install", "realpkg"]);
+    assert_success(&install, "install configure/make style source package");
+
+    let built_archive = root
+        .join("cache")
+        .join("builds")
+        .join(format!("realpkg-1.0.0-{}.tar.zst", target_triple()));
+    let package_metadata = archive_member_text(&built_archive, ".grimoire/package.nuon");
+    assert!(
+        package_metadata.contains("store_path"),
+        "built archive metadata should record its final store path: {package_metadata}"
+    );
+    assert!(
+        package_metadata.contains("-realpkg-1.0.0")
+            && !package_metadata.contains("packages/realpkg"),
+        "store path should be the content-addressed store basename, not a packages/ dir: {package_metadata}"
+    );
+
+    let output = run_shim(root, "realpkg");
+    assert_success(&output, "run realpkg");
+    let line = stdout(&output);
+    assert!(
+        line.starts_with("built from source via "),
+        "realpkg output should reflect configured source build: {line}"
+    );
+    assert!(
+        line.contains("/store/") && line.trim_end().ends_with("-realpkg-1.0.0"),
+        "ctx.prefix should point at the final store path, not the temporary staging dir: {line}"
+    );
+    assert!(
+        !line.trim_end().ends_with("/package"),
+        "ctx.prefix should not leak the temporary staging package dir: {line}"
+    );
+}
+
+#[test]
+fn source_build_failure_surfaces_diagnostic_and_output_tail() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::create_dir_all(tome.join("dist")).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'brokentome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+
+    // A build whose external command writes a recognizable error to stderr and exits non-zero —
+    // as the build's *final* statement. This must abort the build (surfacing the exit code and the
+    // output tail), not silently succeed and pack a broken archive. Regression test for a failing
+    // trailing external being swallowed because the result was never drained / exit-checked.
+    fs::write(
+        runes.join("brokenpkg.rn"),
+        "export const package = {\n  name: 'brokenpkg'\n  version: '1.0.0'\n  sources: {}\n  deps: { build: {}, runtime: [] }\n \n}\n\nexport def build [ctx] {\n  sh -c \"echo 'configure: error: no acceptable C compiler found in $PATH' >&2; exit 1\"\n}\n",
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "add broken build tome");
+
+    let install = run(root, &["install", "brokenpkg"]);
+    // The Nushell diagnostic names the exit code instead of the opaque default message...
+    assert_failure_contains(
+        &install,
+        "external command exited with code 1",
+        "build failure reports the exit code",
+    );
+    // ...and the build's own stderr (the real cause) is carried up in the output tail.
+    assert_failure_contains(
+        &install,
+        "no acceptable C compiler found",
+        "build failure surfaces the underlying build output",
+    );
+}
+
+#[test]
+fn build_install_list_remove() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let out = TempDir::new().unwrap();
+    let out = out.path();
+
+    let build = run(
+        root,
+        &[
+            "build",
+            "./tome-example/runes/hello.rn",
+            "--output",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert_success(&build, "build hello");
+
+    let archive = out.join(format!("hello-0.1.0-{}.tar.zst", target_triple()));
+    assert!(archive.exists(), "built archive should exist");
+
+    let install = run(root, &["install", archive.to_str().unwrap()]);
+    assert_success(&install, "install built archive");
+
+    let state = fs::read_to_string(root.join("state").join("packages").join("hello.nuon")).unwrap();
+    let expected = format!("archive_hash: \"{}\"", sha256_file(&archive));
+    assert!(state.contains(&expected), "installed archive hash: {state}");
+
+    let hello = run_shim(root, "hello");
+    assert_success(&hello, "run installed hello");
+    assert_eq!(
+        stdout(&hello).trim(),
+        "hello from grimoire",
+        "installed shim output"
+    );
+
+    let list = run(root, &["list"]);
+    assert_success(&list, "list installed packages");
+    assert!(
+        stdout(&list).contains("hello"),
+        "list includes package name"
+    );
+
+    let remove = run(root, &["remove", "hello"]);
+    assert_success(&remove, "remove installed package");
+    assert!(
+        !root
+            .join("profiles")
+            .join("current")
+            .join("bin")
+            .join("hello")
+            .exists(),
+        "removed shim should be gone"
+    );
+    assert!(
+        !store_has_package(root, "hello"),
+        "removed store dir should be gone"
+    );
+}
+
+#[test]
+fn build_fetches_and_verifies_sources() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let out = TempDir::new().unwrap();
+    let out = out.path();
+    let src = TempDir::new().unwrap();
+    let src = src.path();
+
+    // A local source artifact resolved relative to the rune directory; no network needed.
+    let payload = src.join("payload.txt");
+    fs::write(&payload, b"verified source payload\n").unwrap();
+    let payload_hash = sha256_file(&payload);
+
+    let rune = src.join("srctool.rn");
+    let rune_src = format!(
+        "export const package = {{\n  name: 'srctool'\n  version: '0.1.0'\n  sources: {{ main: {{ url: 'payload.txt', sha256: '{payload_hash}' }} }}\n  bins: {{default: {{ srctool: 'bin/srctool' }}}}\n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  cp $ctx.sources.main.path ($ctx.package_dir | path join 'bin' 'srctool')\n}}\n"
+    );
+    fs::write(&rune, rune_src).unwrap();
+
+    let build = run(
+        root,
+        &[
+            "build",
+            rune.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert_success(&build, "build with verified source");
+    let hex = payload_hash.strip_prefix("sha256:").unwrap();
+    assert!(
+        root.join("cache").join("sources").join(hex).exists(),
+        "verified source should be cached by hash"
+    );
+
+    // A wrong checksum is a hard failure before the build runs.
+    let bad_rune = src.join("badsrc.rn");
+    let bad_src = "export const package = {\n  name: 'badsrc'\n  version: '0.1.0'\n  sources: { main: { url: 'payload.txt', sha256: 'sha256:0000000000000000000000000000000000000000000000000000000000000000' } }\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  cp $ctx.sources.main.path ($ctx.package_dir | path join 'bin' 'badsrc')\n}\n";
+    fs::write(&bad_rune, bad_src).unwrap();
+    let bad = run(
+        root,
+        &[
+            "build",
+            bad_rune.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert_failure_contains(&bad, "hash mismatch", "reject mismatched source checksum");
+}
+
+#[test]
+fn direct_source_install_preserves_runtime_deps() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let src = TempDir::new().unwrap();
+    let src = src.path();
+    let runes = src.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        src.join("tome.rn"),
+        "export const tome = {\n  name: 'directdeps'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+
+    fs::write(
+        runes.join("dep.rn"),
+        "export const package = {\n  name: 'dep'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'dep\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'dep')\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("app.rn"),
+        "export const package = {\n  name: 'app'\n  version: '0.1.0'\n  deps: { runtime: ['dep'], build: {} }\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'app\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'app')\n}\n",
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &["tome", "add", src.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "add direct deps tome");
+
+    let install = run(root, &["install", runes.join("app.rn").to_str().unwrap()]);
+    assert_success(&install, "install direct source app");
+    assert!(
+        root.join("state")
+            .join("packages")
+            .join("dep.nuon")
+            .exists(),
+        "runtime dep from embedded archive metadata should be installed"
+    );
+}
+
+#[test]
+fn locked_source_install_rejects_rebuilt_hash_drift() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let src = TempDir::new().unwrap();
+    let src = src.path();
+
+    let rune = src.join("locksrc.rn");
+    fs::write(
+        &rune,
+        "export const package = {\n  name: 'locksrc'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'v1\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'locksrc')\n}\n",
+    )
+    .unwrap();
+
+    let install = run(root, &["install", rune.to_str().unwrap()]);
+    assert_success(&install, "initial source install");
+    let lock_path = root.join("state").join("grimoire.lock.nuon");
+    let locked = fs::read_to_string(&lock_path).expect("lockfile after source install");
+
+    let remove = run(root, &["remove", "locksrc"]);
+    assert_success(&remove, "remove source package");
+    fs::write(&lock_path, locked).unwrap();
+
+    fs::write(
+        &rune,
+        "export const package = {\n  name: 'locksrc'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'v2\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'locksrc')\n}\n",
+    )
+    .unwrap();
+
+    let locked_install = run(root, &["install", rune.to_str().unwrap(), "--locked"]);
+    assert_failure_contains(
+        &locked_install,
+        "hash mismatch",
+        "locked source install rejects changed same-version source",
+    );
+    assert!(
+        !root
+            .join("state")
+            .join("packages")
+            .join("locksrc.nuon")
+            .exists(),
+        "failed locked source install should not write package state"
+    );
+}

@@ -43,8 +43,8 @@ in-process and reads/writes NUON data.
 6. **File size limits: 500 lines soft, 800 hard.** Past 500, look for a seam to split along; a
    change that would cross 800 must split the file first, into a directory module per rule 4.
    Do not dodge the limit by compressing code or stripping comments — it exists to force
-   scoping, not brevity. `tests/smoke.rs` is exempt until the `tests/support/` split lands
-   (TODO.md); new test helpers still go in focused files.
+   scoping, not brevity. Integration tests follow the same limits: themed files under
+   `tests/`, shared helpers in `tests/support/`.
 7. **One module, one concern.** A module's name should predict its contents. Logic shared by
    two modules moves to a common home — never copy-paste it or reach into a sibling's private
    helpers. Split oversized files along responsibilities (parsing vs. orchestration vs. IO),
@@ -164,8 +164,9 @@ depends on a POSIX userland at `/usr/bin` and `/bin`. Default target triples:
 
 1. New behavior ships with tests. Bug fixes ship with a regression test.
 2. Pure logic is covered by Rust unit tests colocated with the code.
-3. End-to-end flows are covered by integration tests in `tests/smoke.rs` that drive the built
-   binary against local fake tomes and hand-built `.tar.zst` archives. Tests run fully offline.
+3. End-to-end flows are covered by themed integration tests under `tests/` (shared helpers in
+   `tests/support/`) that drive the built binary against local fake tomes and hand-built
+   `.tar.zst` archives. Tests run fully offline.
 4. Every security invariant from §10 has a test proving the unsafe input is rejected.
 
 Run before considering work done (skippable only for changes touching nothing but `.rn` runes
