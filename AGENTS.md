@@ -208,3 +208,7 @@ next to it — and the code probably wants a better name.
    remaining-work list — keep it honest.
 3. **Update AGENTS.md when the rules change.** New invariants and conventions are documented
    here immediately. AGENTS.md is a living document, not a fossil.
+4. **Keep docs/rune-authoring.md in lockstep with the code.** It is the authoring contract:
+   any change to the `package` schema (`src/model/package.rs` parsing), the `ctx` record or
+   build environment (`src/nu/runtime/`), or the build-return handling updates the reference
+   in the same commit. A stale field table is worse than none — authors trust it verbatim.
