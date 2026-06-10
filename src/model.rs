@@ -46,6 +46,11 @@ pub struct PackageMetadata {
     /// Library base names (e.g. "foo" for libfoo.so) discovered at build time.
     #[serde(default)]
     pub libs: Vec<String>,
+    /// User-facing post-install notes ("add yourself to the docker group"), declared
+    /// statically in the rune's `package` const or returned dynamically by its `build`
+    /// function. Printed once after install and replayable via `grm info`.
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 /// A declared source artifact for a source build. Every source must carry a checksum so
@@ -137,6 +142,9 @@ pub struct PackageState {
     /// Library base names (e.g. "foo" for libfoo.so) discovered at build time.
     #[serde(default)]
     pub libs: Vec<String>,
+    /// Post-install notes carried over from the package metadata, replayed by `grm info`.
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 /// A binary package repository index (`index.nuon`): the set of pre-built archives a tome's
@@ -184,6 +192,10 @@ pub struct TomeState {
     /// refused. See `src/signing.rs`.
     #[serde(default)]
     pub signer_pubkeys: Vec<String>,
+    /// The highest news item id (filename) already shown to the user; items sorting above it
+    /// are printed on the next `grm tome update` / `grm tome news`.
+    #[serde(default)]
+    pub last_seen_news: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -349,6 +361,7 @@ impl PackageMetadata {
         let targets = optional_string_list(&record, "targets")?;
         let provides = optional_string_list(&record, "provides")?;
         let libs = optional_string_list(&record, "libs")?;
+        let notes = optional_string_list(&record, "notes")?;
 
         Ok(Self {
             name,
@@ -364,6 +377,7 @@ impl PackageMetadata {
             build_flags,
             provides,
             libs,
+            notes,
         })
     }
 
@@ -381,6 +395,11 @@ impl PackageMetadata {
                 .entry(target_key.clone())
                 .or_default()
                 .extend(inner.clone());
+        }
+        for note in &manifest.notes {
+            if !self.notes.contains(note) {
+                self.notes.push(note.clone());
+            }
         }
     }
 
@@ -416,6 +435,7 @@ impl PackageMetadata {
         }
         record.push("provides", string_list_value(&self.provides));
         record.push("libs", string_list_value(&self.libs));
+        record.push("notes", string_list_value(&self.notes));
 
         let mut sources = Record::new();
         for (name, source) in &self.sources {
@@ -467,6 +487,8 @@ impl PackageMetadata {
 #[derive(Debug, Clone, Default)]
 pub struct BuildManifest {
     pub bins: BTreeMap<String, BTreeMap<String, String>>,
+    /// User-facing post-install notes the build discovered (merged into the package notes).
+    pub notes: Vec<String>,
 }
 
 impl BuildManifest {
@@ -476,7 +498,8 @@ impl BuildManifest {
             Some(value) => parse_target_conditional_bins(value, "build manifest field `bins`")?,
             None => BTreeMap::new(),
         };
-        Ok(Self { bins })
+        let notes = optional_string_list(&record, "notes")?;
+        Ok(Self { bins, notes })
     }
 }
 
@@ -653,6 +676,7 @@ impl PackageState {
         let requested = optional_bool(&record, "requested")?.unwrap_or(false);
         let provides = optional_string_list(&record, "provides")?;
         let libs = optional_string_list(&record, "libs")?;
+        let notes = optional_string_list(&record, "notes")?;
 
         Ok(Self {
             name,
@@ -669,6 +693,7 @@ impl PackageState {
             requested,
             provides,
             libs,
+            notes,
         })
     }
 
@@ -707,6 +732,7 @@ impl PackageState {
         record.push("requested", Value::bool(self.requested, Span::unknown()));
         record.push("provides", string_list_value(&self.provides));
         record.push("libs", string_list_value(&self.libs));
+        record.push("notes", string_list_value(&self.notes));
         Value::record(record, Span::unknown())
     }
 }
@@ -1121,6 +1147,7 @@ impl TomeState {
                 Some(value) => Some(TomeManifest::from_value(value.clone())?),
             },
             signer_pubkeys: optional_string_list(&record, "signer_pubkeys")?,
+            last_seen_news: optional_string(&record, "last_seen_news")?,
         })
     }
 
@@ -1143,6 +1170,12 @@ impl TomeState {
         }
         if !self.signer_pubkeys.is_empty() {
             record.push("signer_pubkeys", string_list_value(&self.signer_pubkeys));
+        }
+        if let Some(last_seen_news) = &self.last_seen_news {
+            record.push(
+                "last_seen_news",
+                Value::string(last_seen_news, Span::unknown()),
+            );
         }
         Value::record(record, Span::unknown())
     }
@@ -1971,6 +2004,7 @@ mod tests {
             build_flags: BTreeMap::new(),
             provides: Vec::new(),
             libs: Vec::new(),
+            notes: Vec::new(),
         };
 
         let resolved: Vec<_> = meta.bins_for("linux-x86_64-musl").into_keys().collect();

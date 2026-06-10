@@ -14,6 +14,7 @@ use std::{
 };
 
 pub(crate) mod git;
+pub(crate) mod news;
 
 use crate::{
     archive,
@@ -68,6 +69,7 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
         checked_commit: None,
         tome: None,
         signer_pubkeys: args.signer,
+        last_seen_news: None,
     };
     nuon_io::write_nuon(&state_path, &state.to_value())?;
     report(&format!("added tome {name}"));
@@ -724,6 +726,16 @@ fn sync_tome_cache(tome: &TomeState) -> Result<String> {
             Ok(commit)
         },
     )?;
+    // The very first sync after `tome add` marks the existing news backlog as seen without
+    // printing it; later syncs surface only what arrived since. `checked_ref` is recorded on
+    // every successful sync (commits are absent for local tomes), so its absence in the state
+    // we were called with means this sync was the first. News problems must not fail the sync
+    // itself — the cache and state are already committed.
+    let first_sync = tome.checked_ref.is_none();
+    let cache_path = sync_common::cache_path(TomeState::SUBDIR, &tome.name)?;
+    if let Err(e) = news::surface_after_sync(&tome.name, &cache_path, first_sync) {
+        report(&format!("warning: could not surface tome news: {e}"));
+    }
     Ok(sync_report_line(
         &tome.name,
         &tome.ref_name,
@@ -749,6 +761,7 @@ fn validate_local_tome_if_available(name: &str, url: &str) -> Result<()> {
         checked_commit: None,
         tome: None,
         signer_pubkeys: Vec::new(),
+        last_seen_news: None,
     };
     validate_tome_cache(&tome, source, &manifest, &EmbeddedNuRuntime)
 }
