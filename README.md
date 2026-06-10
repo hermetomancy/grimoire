@@ -25,8 +25,10 @@ falls back to source builds when needed.
 its own work.
 - **Managed build dependencies.** Source builds install declared build dependencies and cache
 them store-only for later builds.
-- **Reproducible state.** Lockfiles record installed packages, versions, hashes, dependencies,
-tome commits, and addenda.
+- **Reproducible state.** The lockfile records packages, versions, archive hashes, content
+addresses, install reasons, holds, and tome commits; `grm restore` rebuilds the recorded set
+on any install root, and `--locked` operations refuse to resolve against a tome that moved
+off its pinned commit.
 - **Trustable binaries.** Tome indexes can be minisign-signed and TOFU-pinned, so an index
 signature authenticates every archive hash it publishes.
 - **Generations and rollback.** Every install/remove/upgrade creates a new generation;

@@ -13,6 +13,10 @@ use crate::{build::toolchain, model::IndexEntry, store::closure, util::paths};
 pub struct Pin {
     pub version: Version,
     pub archive_hash: String,
+    /// The locked content address, when the lockfile recorded one. Checked against the
+    /// computed store hash before realization so recipe/source/build-env drift fails loudly
+    /// *before* anything is fetched or built.
+    pub store_hash: Option<String>,
 }
 
 /// Lockfile pins keyed by package name. When supplied to [`resolve`], every package in the graph

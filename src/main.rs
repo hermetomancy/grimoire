@@ -75,6 +75,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Hold(args) => install::hold(args),
         Command::Unhold(args) => install::unhold(args),
         Command::Unrequest(args) => install::unrequest(args),
+        Command::Restore(args) => install::restore(args),
         Command::Orphans => install::orphans(),
         Command::Files(args) => cmd::files::files(args),
         Command::Owns(args) => cmd::files::owns(args),
@@ -152,6 +153,7 @@ fn mutates_install_root(command: &Command) -> bool {
         | Command::Hold(_)
         | Command::Unhold(_)
         | Command::Unrequest(_)
+        | Command::Restore(_)
         | Command::Autoremove
         | Command::Rollback
         | Command::Switch(_)

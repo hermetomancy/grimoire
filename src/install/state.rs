@@ -39,7 +39,7 @@ pub fn hold(args: PackageArg) -> Result<()> {
         bail!("specify at least one package to hold");
     }
     for package in &args.packages {
-        set_hold(package, true)?;
+        set_hold(package, true, true)?;
     }
     Ok(())
 }
@@ -49,12 +49,12 @@ pub fn unhold(args: PackageArg) -> Result<()> {
         bail!("specify at least one package to unhold");
     }
     for package in &args.packages {
-        set_hold(package, false)?;
+        set_hold(package, false, true)?;
     }
     Ok(())
 }
 
-pub(crate) fn set_hold(name: &str, held: bool) -> Result<()> {
+pub(crate) fn set_hold(name: &str, held: bool, announce: bool) -> Result<()> {
     let root = paths::install_root()?;
     let state_path = root
         .join("state")
@@ -65,18 +65,24 @@ pub(crate) fn set_hold(name: &str, held: bool) -> Result<()> {
     }
     let mut state = PackageState::from_value(nuon_io::read_nuon(&state_path)?)?;
     if state.held == held {
-        report(&format!(
-            "{name} is already {}",
-            if held { "held" } else { "not held" }
-        ));
+        if announce {
+            report(&format!(
+                "{name} is already {}",
+                if held { "held" } else { "not held" }
+            ));
+        }
         return Ok(());
     }
     state.held = held;
     nuon_io::write_nuon(&state_path, &state.to_value())?;
-    report(&format!(
-        "{name} {}",
-        if held { "held" } else { "released" }
-    ));
+    // The lock records holds, so a flag change must refresh it like any other state change.
+    lock::rebuild()?;
+    if announce {
+        report(&format!(
+            "{name} {}",
+            if held { "held" } else { "released" }
+        ));
+    }
     Ok(())
 }
 
@@ -109,6 +115,8 @@ pub(crate) fn set_requested(name: &str, requested: bool, announce: bool) -> Resu
     }
     state.requested = requested;
     nuon_io::write_nuon(&state_path, &state.to_value())?;
+    // The lock records install reasons, so a flag change must refresh it.
+    lock::rebuild()?;
     if announce {
         report(&format!(
             "{} marked as {}",

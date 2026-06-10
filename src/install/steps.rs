@@ -150,6 +150,22 @@ impl Installer {
     /// Runtime dependencies are separate, earlier steps in the plan, so they are already
     /// installed by the time a step runs.
     fn execute_step(&mut self, step: PlanStep) -> Result<()> {
+        // A pinned content address is the lock's recipe identity: it folds in the rune,
+        // sources, dependency closure, and build environment. Drift fails here, before any
+        // fetch or build, with a message that names what the lock expected.
+        if let (Some(pins), Some(computed)) = (&self.pins, step.store_hash.as_deref()) {
+            if let Some(pinned) = pins
+                .get(&step.name)
+                .and_then(|pin| pin.store_hash.as_deref())
+            {
+                if pinned != computed {
+                    bail!(
+                        "store hash for `{}` drifted from the lock (recipe, sources, or build                          environment changed): locked {pinned}, computed {computed}",
+                        step.name
+                    );
+                }
+            }
+        }
         let installed = self
             .realize_step(&step)
             .with_context(|| format!("install `{}` {}", step.name, step.version))?;
