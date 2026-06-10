@@ -52,8 +52,10 @@ export def build [ctx] {
 | `ctx.store_path` | string | Alias for `ctx.prefix`. |
 | `ctx.work_dir` | string | Scratch directory for build artifacts. Use for out-of-tree builds. |
 | `ctx.target` | string | Target triple (e.g. `linux-x86_64-musl`). |
-| `ctx.sources.<name>.dir` | string | Extracted source directory for the named source. Always use `.dir`, not `.path` (which is the raw archive). |
-| `ctx.sources.<name>.path` | string | Raw archive path in the cache. Rarely needed. |
+| `ctx.nproc` | int | Host parallelism for `-j`/`--parallel` flags (falls back to 4 when undetectable). |
+| `ctx.sources.<name>.dir` | string | Extracted directory for an archive source — use this for tarballs. `null` for non-archive sources (patches, single files). |
+| `ctx.sources.<name>.path` | string | The raw verified file in the cache. Use for non-archive sources (e.g. `patch -p1 -i ($ctx.sources.fix.path)`). |
+| `ctx.sources.<name>.url` / `.sha256` | string | The declared origin and pinned hash, for runes that need to reference them. |
 | `ctx.build_flags` | record | Key-value flags from the rune metadata. Use for feature toggles. |
 | `ctx.env.PATH` | string | The managed build PATH (AGENTS.md §5). |
 | `ctx.env.GRIMOIRE_VERBOSITY` | string | `"quiet"`, `"normal"`, or `"verbose"`. |
