@@ -1,75 +1,21 @@
 # Grimoire TODO
 
 This file tracks the remaining work before Grimoire is ready for a stable
-release. Once every item below is done, this file should be deleted.
+release, plus the planned Grimoire-OS work that follows it. Once every item
+in **Remaining** is done and the **Planned** items have graduated into real
+work, this file should be deleted.
 
 
 ## Remaining
 
-### 1. `deps.features` + FHS compat layer
-
-Add a new dependency category `deps.features` for packages that provide
-execution-time capabilities rather than direct binaries on PATH.
-
-- `src/model.rs`: add `features: Vec<Dependency>` to `Deps`, `PackageState`,
-  and `IndexEntry`; update `parse_deps` and serialization.
-- `src/install.rs`: resolve and install `features` deps alongside runtime
-  deps (store-only is fine).
-- `src/profile.rs`: when linking a package with `features` deps into a
-  generation, create wrapper scripts in `gen-N/bin/` instead of hard-linking
-  the binaries directly. The wrapper invokes `grm fhs-run` with the FHS tree
-  store path and the real binary store path.
-- New `src/fhs.rs`: implement `grm fhs-run <tree> <binary> [args...]` using
-  `unshare(CLONE_NEWNS)` + recursive bind mounts. No external dependencies,
-  no root required on normal Linux kernels.
-- New `src/cli.rs` subcommand: `grm fhs-run`.
-- New `tome-core/runes/toolchain-wrappers.rn`: compiler toolchain wrapper scripts that
-  symlinks glibc and core libraries from other core packages into a staging
-  directory.
-
-This satisfies the design doc's "make-or-break" foreign-binary compat
-requirement.
-
-### 2. Release engineering
+### 1. Release engineering
 
 - Multi-OS CI matrix (Linux, macOS, FreeBSD) + MSRV job.
 - Signed release archives for supported targets.
 - `grm self-update`.
 - `CHANGELOG.md`.
 
-### 3. Boot integration
-
-On a Grimoire-as-primary-distro system, the bootloader should list
-generations so a broken kernel or init can roll back at boot time.
-
-- Design a bootloader config fragment (systemd-boot, GRUB, etc.) that points
-  each entry at a different generation's kernel + initrd.
-- Add a `grm boot-update` command that regenerates the bootloader menu from
-  the generation registry.
-- Decide GC policy: boot entries are additional GC roots.
-
-Only relevant when Grimoire is the sole package manager.
-
-### 4. System config (`/etc`) management
-
-The design doc says `/etc` is handled conventionally, like a traditional
-distro. This is intentionally lightweight — no full NixOS-style etc
-overlay — but we still need:
-
-- Document the convention: Grimoire does not manage `/etc`.
-- Optional: a minimal `grm etc-track` helper that records which package
-  installed which `/etc` file and warns on conflicts. Treat as future work.
-
-### 5. System-level `/usr/bin`
-
-When Grimoire is the sole PM, `/usr/bin` should be a symlink or bind mount
-pointing to the active generation's `bin/`. Current user-local
-`~/.grimoire/profiles/current/bin` is correct for secondary PM use.
-
-- Add `grm setup --system` or similar that creates `/usr/bin -> /grm/profiles/current/bin`.
-- Require root for this step only; day-to-day use stays unprivileged.
-
-### 6. Semantic rollback: activation restores state
+### 2. Semantic rollback: activation restores state
 
 Today `grm rollback`/`grm switch` only repoint the `profiles/current`
 symlink; `state/packages/` still describes the set rolled back *from*. So
@@ -95,7 +41,7 @@ activating a generation restores the full package state it was built from.
   then install does not resurrect rolled-back packages; gc preserves the
   rollback target; crash-window behavior of the state restore.
 
-### 7. Restore-able generations: lockfile as a blueprint
+### 3. Restore-able generations: lockfile as a blueprint
 
 Any Grimoire generation should be reconstructable on a fresh install root
 from its lockfile alone. Today the lockfile is only a resolution constraint:
@@ -116,12 +62,72 @@ caches currently hold, and cannot reproduce locally built archives.
 - Source-built packages: pin rune identity (tome + rune sha256) so a locked
   source build is rebuilt from the same recipe; fail loudly when the
   pinned rune/archive is unavailable anywhere.
-- Per-generation lockfiles fall out of item 6's state snapshots: restoring
+- Per-generation lockfiles fall out of item 2's state snapshots: restoring
   generation N = `grm restore` against N's snapshot lock.
 - Update the README "Reproducible state" claim to match whatever lands.
 - Tests: restore onto an empty root reproduces packages, flags, and
   versions byte-for-byte against state files; moved tome ref under
   `--locked` still resolves the pinned set.
+
+## Planned: Grimoire OS
+
+Work that only matters when Grimoire is the operating system's sole package
+manager — a Grimoire-based distribution. None of it blocks a stable release
+of Grimoire as a standalone/secondary package manager.
+
+### 1. `deps.features` + FHS compat layer
+
+Add a new dependency category `deps.features` for packages that provide
+execution-time capabilities rather than direct binaries on PATH.
+
+- `src/model.rs`: add `features: Vec<Dependency>` to `Deps`, `PackageState`,
+  and `IndexEntry`; update `parse_deps` and serialization.
+- `src/install.rs`: resolve and install `features` deps alongside runtime
+  deps (store-only is fine).
+- `src/profile.rs`: when linking a package with `features` deps into a
+  generation, create wrapper scripts in `gen-N/bin/` instead of hard-linking
+  the binaries directly. The wrapper invokes `grm fhs-run` with the FHS tree
+  store path and the real binary store path.
+- New `src/fhs.rs`: implement `grm fhs-run <tree> <binary> [args...]` using
+  `unshare(CLONE_NEWNS)` + recursive bind mounts. No external dependencies,
+  no root required on normal Linux kernels.
+- New `src/cli.rs` subcommand: `grm fhs-run`.
+- New `tome-core/runes/toolchain-wrappers.rn`: compiler toolchain wrapper scripts that
+  symlinks glibc and core libraries from other core packages into a staging
+  directory.
+
+This satisfies the design doc's "make-or-break" foreign-binary compat
+requirement.
+
+### 2. Boot integration
+
+On a Grimoire-as-primary-distro system, the bootloader should list
+generations so a broken kernel or init can roll back at boot time.
+
+- Design a bootloader config fragment (systemd-boot, GRUB, etc.) that points
+  each entry at a different generation's kernel + initrd.
+- Add a `grm boot-update` command that regenerates the bootloader menu from
+  the generation registry.
+- Decide GC policy: boot entries are additional GC roots.
+
+### 3. System config (`/etc`) management
+
+The design doc says `/etc` is handled conventionally, like a traditional
+distro. This is intentionally lightweight — no full NixOS-style etc
+overlay — but we still need:
+
+- Document the convention: Grimoire does not manage `/etc`.
+- Optional: a minimal `grm etc-track` helper that records which package
+  installed which `/etc` file and warns on conflicts. Treat as future work.
+
+### 4. System-level `/usr/bin`
+
+When Grimoire is the sole PM, `/usr/bin` should be a symlink or bind mount
+pointing to the active generation's `bin/`. Current user-local
+`~/.grimoire/profiles/current/bin` is correct for secondary PM use.
+
+- Add `grm setup --system` or similar that creates `/usr/bin -> /grm/profiles/current/bin`.
+- Require root for this step only; day-to-day use stays unprivileged.
 
 ## Completed
 
