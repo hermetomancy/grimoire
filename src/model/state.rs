@@ -100,6 +100,7 @@ impl PackageState {
 
     pub fn to_value(&self) -> Value {
         let mut record = Record::new();
+        record.push("format", Value::int(1, Span::unknown()));
         record.push("name", Value::string(&self.name, Span::unknown()));
         record.push("version", Value::string(&self.version, Span::unknown()));
         match &self.target {

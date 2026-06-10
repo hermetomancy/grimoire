@@ -10,10 +10,14 @@ work, this file should be deleted.
 
 ### 1. Release engineering
 
-- Multi-OS CI matrix (Linux, macOS, FreeBSD) + MSRV job.
+- ~~Multi-OS CI matrix (Linux, macOS, FreeBSD) + MSRV job.~~ Done:
+  `.github/workflows/ci.yml` (lint, ubuntu/macos test matrix, MSRV check,
+  FreeBSD suite in a nested VM).
 - Signed release archives for supported targets.
 - `grm self-update`.
 - `CHANGELOG.md`.
+- Release-blocking job that runs `grm tome build --all` against tome-core
+  on each platform once bootstrap lands.
 
 ## Planned: Grimoire OS
 

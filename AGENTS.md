@@ -150,6 +150,9 @@ These must never be regressed:
    root/admin. Never write outside the install root.
 5. **Rune/addendum execution is the trust boundary.** Addendums patch data only. Do not let
    addendum data trigger execution.
+6. **Index documents travel over https only.** The index is the trust root for binary
+   installs (archives are checksum-verified *against it*), so it must not be fetchable over
+   a MitM-able transport. Loopback hosts are exempt for local binhosts and offline tests.
 
 ## 11. Platform support
 
