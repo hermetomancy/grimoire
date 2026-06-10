@@ -19,10 +19,10 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
-struct TomePackage {
+pub(crate) struct TomePackage {
     tome: String,
     rune: PathBuf,
-    metadata: PackageMetadata,
+    pub(crate) metadata: PackageMetadata,
 }
 
 pub fn search(args: QueryArg) -> Result<()> {
@@ -185,7 +185,7 @@ fn print_upgrade_plan(to_upgrade: &[(String, Version, Version)]) {
     }
 }
 
-fn tome_packages() -> Result<Vec<TomePackage>> {
+pub(crate) fn tome_packages() -> Result<Vec<TomePackage>> {
     let _runtime = EmbeddedNuRuntime;
     let mut packages = Vec::new();
 

@@ -14,6 +14,7 @@ mod cli;
 mod closure;
 mod doctor;
 mod fetch;
+mod files;
 mod fs_util;
 mod index;
 mod install;
@@ -82,6 +83,9 @@ fn run(cli: Cli) -> Result<()> {
         Command::Unhold(args) => install::unhold(args),
         Command::Unrequest(args) => install::unrequest(args),
         Command::Orphans => install::orphans(),
+        Command::Files(args) => files::files(args),
+        Command::Owns(args) => files::owns(args),
+        Command::Provides(args) => files::provides(args),
         Command::Autoremove => install::autoremove(),
         Command::Rollback => {
             let id = profile::rollback()?;
@@ -170,6 +174,9 @@ fn mutates_install_root(command: &Command) -> bool {
         Command::Build(_) => true,
         Command::List
         | Command::Orphans
+        | Command::Files(_)
+        | Command::Owns(_)
+        | Command::Provides(_)
         | Command::Doctor
         | Command::Search(_)
         | Command::Info(_)

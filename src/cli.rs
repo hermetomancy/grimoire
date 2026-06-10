@@ -74,6 +74,12 @@ pub enum Command {
     Info(PackageArg),
     /// List the orphaned dependencies `grm autoremove` would remove, without removing them.
     Orphans,
+    /// List the files an installed package placed in the store.
+    Files(PackageArg),
+    /// Show which installed package owns a file (a store path or a profile path).
+    Owns(OwnsArgs),
+    /// Show which packages provide a command or capability, installed or available.
+    Provides(ProvidesArgs),
 
     // -----------------------------------------------------------------------
     // Profiles
@@ -202,6 +208,19 @@ pub struct PackageArg {
     /// Names of the installed packages to operate on.
     #[arg(num_args = 1..)]
     pub packages: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct OwnsArgs {
+    /// File path to resolve to its owning package. Profile paths are followed through the
+    /// `current` symlink; store paths are matched directly.
+    pub path: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct ProvidesArgs {
+    /// Package name, command name, or capability to look up providers for.
+    pub name: String,
 }
 
 #[derive(Debug, Args)]

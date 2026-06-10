@@ -116,6 +116,12 @@ impl CapabilityIndex {
     }
 }
 
+/// The package names that provide `capability`, from published tome indexes and runes. The
+/// read-only seam `grm provides` uses; [`CapabilityIndex`] itself stays private to the solver.
+pub fn capability_providers(capability: &str) -> Result<Vec<String>> {
+    Ok(CapabilityIndex::build()?.providers(capability))
+}
+
 /// A package pinned by the lockfile: the exact version and archive hash last installed. Used by
 /// `install --locked` to constrain resolution to the recorded reproducible set.
 #[derive(Clone)]
