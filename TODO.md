@@ -13,7 +13,11 @@ work, this file should be deleted.
 - ~~Multi-OS CI matrix (Linux, macOS, FreeBSD) + MSRV job.~~ Done:
   `.github/workflows/ci.yml` (lint, ubuntu/macos test matrix, MSRV check,
   FreeBSD suite in a nested VM).
-- Signed release archives for supported targets.
+- ~~Signed release archives for supported targets.~~ Done:
+  `.github/workflows/release.yml` (tag-triggered five-target builds,
+  SHA256SUMS + minisign, GitHub release). Before the first tag: generate the
+  release keypair (`minisign -GW`), add `MINISIGN_SECRET_KEY` to repo
+  secrets, and publish the public key in the README.
 - `grm self-update`.
 - `CHANGELOG.md`.
 - Release-blocking job that runs `grm tome build --all` against tome-core
