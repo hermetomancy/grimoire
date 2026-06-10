@@ -113,6 +113,10 @@ pub(crate) fn unix_now() -> u64 {
 pub(crate) fn write_generation_metadata(gen_dir: &Path, generation: &Generation) -> Result<()> {
     let mut record = nu_protocol::Record::new();
     record.push(
+        "format",
+        nu_protocol::Value::int(1, nu_protocol::Span::unknown()),
+    );
+    record.push(
         "id",
         nu_protocol::Value::int(generation.id as i64, nu_protocol::Span::unknown()),
     );
@@ -161,9 +165,11 @@ pub(crate) fn read_registry() -> Result<Vec<Generation>> {
         return Ok(Vec::new());
     }
     let value = nuon_io::read_nuon(&path)?;
-    let nu_protocol::Value::List { vals, .. } = value else {
-        bail!("generations registry is not a list");
+    let record = crate::model::expect_record(value, "generations registry")?;
+    let Some(nu_protocol::Value::List { vals, .. }) = record.get("generations") else {
+        bail!("generations registry is missing a `generations` list");
     };
+    let vals = vals.clone();
     let mut generations = Vec::with_capacity(vals.len());
     for val in vals {
         let record = crate::model::expect_record(val, "generation registry entry")?;
@@ -202,18 +208,24 @@ pub(crate) fn write_registry(generations: &[Generation]) -> Result<()> {
             nu_protocol::Value::record(record, span)
         })
         .collect();
-    let value = nu_protocol::Value::list(items, span);
-    nuon_io::write_nuon(&path, &value)
+    let mut root = nu_protocol::Record::new();
+    root.push("format", nu_protocol::Value::int(1, span));
+    root.push("generations", nu_protocol::Value::list(items, span));
+    nuon_io::write_nuon(&path, &nu_protocol::Value::record(root, span))
 }
 
 /// Writes the full installed-package state into the generation directory as `state.nuon`.
 /// This snapshot is what lets activation restore state: `gen.nuon` records only names and
 /// store paths, which cannot reconstruct bins, deps, flags, or requested/held intent.
 pub(super) fn write_state_snapshot(gen_dir: &Path, states: &[PackageState]) -> Result<()> {
+    let span = nu_protocol::Span::unknown();
     let values: Vec<nu_protocol::Value> = states.iter().map(|s| s.to_value()).collect();
+    let mut root = nu_protocol::Record::new();
+    root.push("format", nu_protocol::Value::int(1, span));
+    root.push("packages", nu_protocol::Value::list(values, span));
     nuon_io::write_nuon(
         &gen_dir.join("state.nuon"),
-        &nu_protocol::Value::list(values, nu_protocol::Span::unknown()),
+        &nu_protocol::Value::record(root, span),
     )
     .with_context(|| format!("write state snapshot for {}", gen_dir.display()))
 }
@@ -225,9 +237,14 @@ pub(crate) fn read_state_snapshot(gen_dir: &Path) -> Result<Option<Vec<PackageSt
         return Ok(None);
     }
     let value = nuon_io::read_nuon(&path)?;
-    let nu_protocol::Value::List { vals, .. } = value else {
-        bail!("state snapshot {} is not a list", path.display());
+    let record = crate::model::expect_record(value, "state snapshot")?;
+    let Some(nu_protocol::Value::List { vals, .. }) = record.get("packages") else {
+        bail!(
+            "state snapshot {} is missing a `packages` list",
+            path.display()
+        );
     };
+    let vals = vals.clone();
     let states = vals
         .into_iter()
         .map(PackageState::from_value)

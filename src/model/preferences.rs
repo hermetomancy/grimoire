@@ -7,7 +7,11 @@ use anyhow::{Context, Result};
 use nu_protocol::{Record, Span, Value};
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
-use crate::{model::expect_string_map, nu::nuon_io, util::paths};
+use crate::{
+    model::{expect_record, expect_string_map},
+    nu::nuon_io,
+    util::paths,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct Preferences {
@@ -17,15 +21,22 @@ pub struct Preferences {
 
 impl Preferences {
     pub fn from_value(value: Value) -> Result<Self> {
-        let providers = expect_string_map(&value, "preferences")?;
+        let record = expect_record(value, "preferences")?;
+        let providers = match record.get("providers") {
+            Some(value) => expect_string_map(value, "preferences field `providers`")?,
+            None => BTreeMap::new(),
+        };
         Ok(Self { providers })
     }
 
     pub fn to_value(&self) -> Value {
-        let mut record = Record::new();
+        let mut providers = Record::new();
         for (capability, package) in &self.providers {
-            record.push(capability, Value::string(package, Span::unknown()));
+            providers.push(capability, Value::string(package, Span::unknown()));
         }
+        let mut record = Record::new();
+        record.push("format", Value::int(1, Span::unknown()));
+        record.push("providers", Value::record(providers, Span::unknown()));
         Value::record(record, Span::unknown())
     }
 

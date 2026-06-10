@@ -107,14 +107,14 @@ pub fn fetch_verified(
     Ok(cached)
 }
 
-/// Fetches a text document (a package index) over `http(s)`. Returns `None` on a 404 so a tome
+/// Fetches a text document (a package index) over `https`. Returns `None` on a 404 so a tome
 /// whose host has not published an index yet is treated as offering no binaries, mirroring a
 /// missing local `index.nuon`. The index is the trust root: archives it lists are checksum-
-/// verified against it, so the document itself is fetched over the transport without a hash.
+/// verified against it, so the document itself is fetched over the transport without a hash —
+/// which is exactly why plain `http` is refused (a MitM index controls every archive hash).
+/// Loopback addresses are exempt for local development and tests.
 pub fn http_get_text(url: &str) -> Result<Option<String>> {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        bail!("expected an http(s) URL, got `{url}`");
-    }
+    require_https_for_index(url)?;
     status(&format!("fetching index ({url})"));
     match http_get(http_agent(), url) {
         Ok(response) => Ok(Some(
@@ -125,6 +125,29 @@ pub fn http_get_text(url: &str) -> Result<Option<String>> {
         Err(err) if matches!(*err, ureq::Error::Status(404, _)) => Ok(None),
         Err(err) => Err(http_error(url, *err)),
     }
+}
+
+/// The index is fetched without a content hash, so its transport must be authenticated:
+/// `https` only, with loopback hosts exempt (local binhosts and offline tests).
+fn require_https_for_index(url: &str) -> Result<()> {
+    if url.starts_with("https://") {
+        return Ok(());
+    }
+    let Some(rest) = url.strip_prefix("http://") else {
+        bail!("expected an http(s) URL, got `{url}`");
+    };
+    let authority = rest.split('/').next().unwrap_or("");
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        bracketed.split(']').next().unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    if matches!(host, "localhost" | "127.0.0.1" | "::1") {
+        return Ok(());
+    }
+    bail!(
+        "refusing to fetch a package index over plain http: `{url}`. The index is the trust          root for binary installs; serve it over https (plain http is permitted only for          loopback addresses)"
+    )
 }
 
 /// The process-wide HTTP agent, with connect/read/write timeouts so no request can hang the
@@ -259,4 +282,32 @@ fn cache_name(sha256: &str) -> String {
 
 fn hash_matches(path: &Path, expected: &str) -> Result<bool> {
     Ok(archive::verify_hash(&archive::archive_hash(path)?, expected).is_ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_https_for_index;
+
+    #[test]
+    fn https_and_loopback_indexes_are_allowed() {
+        for url in [
+            "https://example.com/index.nuon",
+            "http://127.0.0.1:8080/index.nuon",
+            "http://localhost/index.nuon",
+            "http://[::1]:8080/index.nuon",
+        ] {
+            assert!(require_https_for_index(url).is_ok(), "{url}");
+        }
+    }
+
+    #[test]
+    fn plain_http_indexes_are_refused() {
+        for url in [
+            "http://example.com/index.nuon",
+            "http://127.0.0.1.evil.com/index.nuon",
+            "ftp://example.com/index.nuon",
+        ] {
+            assert!(require_https_for_index(url).is_err(), "{url}");
+        }
+    }
 }

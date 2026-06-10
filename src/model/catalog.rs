@@ -156,6 +156,7 @@ impl TomeState {
 
     pub fn to_value(&self) -> Value {
         let mut record = Record::new();
+        record.push("format", Value::int(1, Span::unknown()));
         record.push("name", Value::string(&self.name, Span::unknown()));
         record.push("url", Value::string(&self.url, Span::unknown()));
         record.push("ref", Value::string(&self.ref_name, Span::unknown()));
