@@ -162,9 +162,12 @@ for bootstrap. Removes the need for `host_tool_dirs()`.
 
 ### Source tree reorganization
 
-The `src/` root has become a flat dumping ground. `model.rs` is nearly 2,000
-lines, `install.rs` is 1,350+, and there are ~20 modules at the top level.
-Navigation is painful and cohesion is low.
+The `src/` root has become a flat dumping ground. Navigation is painful and
+cohesion is low. AGENTS.md §3.6 now codifies the limits (500 lines soft, 800
+hard); current violators of the hard limit: `model.rs` (~2,000), `install.rs`
+(~1,600), `solve.rs` (~1,050), `tome/mod.rs` (~1,000), `nu/runtime.rs` (~840),
+plus `tests/smoke.rs` (~5,800, exempt until the `tests/support/` split).
+`profile.rs` (~780) and `build.rs` (~660) are past the soft limit.
 
 - **Split `model.rs`** into a `src/model/` directory with one file per
   concern: `package.rs`, `deps.rs`, `catalog.rs`, `manifest.rs`, `index.rs`,
@@ -174,14 +177,19 @@ Navigation is painful and cohesion is low.
   and `root.rs`.
 - **Split `solve.rs`** into `src/solve/` with `index.rs`, `resolver.rs`,
   `capabilities.rs`, and `plan.rs`.
+- **Split `tome/mod.rs`** into `add.rs`/`update.rs` (catalog lifecycle),
+  `build.rs` (rune→archive publishing), and `verify.rs` (signature seams),
+  alongside the existing `git.rs` and `news.rs`.
+- **Split `nu/runtime.rs`** into metadata reading vs. build execution vs.
+  environment assembly.
 - **Group related leaf modules** under directories:
   - `src/archive/` — `pack.rs`, `unpack.rs`, `validate.rs` (split from
     current monolithic `archive/mod.rs` and `archive/pack.rs`)
   - `src/fs/` or `src/util/` — `fs_util.rs`, `paths.rs`, `time_util.rs`
 - **Move test helpers out of `tests/smoke.rs`** into a `tests/support/`
-  directory so the integration test file stops approaching 5,000 lines.
-- Target: no file >500 lines except `tests/smoke.rs` itself, and no more than
-  ~10 modules at `src/` root level.
+  directory so the integration test file stops growing unbounded.
+- Target: every file within AGENTS.md §3.6 limits (≤500 preferred, 800 hard)
+  and no more than ~10 modules at `src/` root level.
 
 ### 6. Security and correctness audit fixes (post-subagent review)
 

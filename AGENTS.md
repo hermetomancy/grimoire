@@ -46,6 +46,19 @@ Grimoire does not shell out for its own machinery.
 3. Follow DRY, but do not invent abstractions for a single caller.
 4. Modularise aggressively. Group related modules under folders with a clear root.
 5. Keep surfaces minimal and intentional. Do not add `pub` just for cross-module convenience.
+6. **File size limits: 500 lines soft, 800 lines hard.** A source file past 500 lines is a
+   standing invitation to find a seam and split it; a change that would push a file past 800
+   lines must split the file first — into a directory module (`src/foo/` with focused
+   submodules and a thin `mod.rs` or re-export root), per rule 4. Do not dodge the limit by
+   compressing code or stripping comments; the limit exists to force scoping, not brevity.
+   `tests/smoke.rs` is temporarily exempt until the planned `tests/support/` split lands
+   (see TODO.md); new test helpers still go in focused files, not appended there.
+7. **One module, one concern.** A module's name should predict everything in it; anything it
+   wouldn't predict belongs elsewhere. Shared logic used by two modules moves to a common
+   home (its own module or the more fundamental of the two) — never copy-paste it, and never
+   reach into a sibling's internals to borrow a private helper. When splitting an oversized
+   file, split along responsibilities (parsing vs. orchestration vs. IO), not along line
+   counts.
 
 ## 4. Data formats: the .rn / .nuon contract
 
