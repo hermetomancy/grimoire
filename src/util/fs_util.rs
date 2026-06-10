@@ -7,7 +7,14 @@ use std::{fs, path::Path};
 /// Symlinks are rejected with a message that includes `label` (e.g. "addendum" or "tome").
 pub fn copy_dir_all(source: &Path, destination: &Path, label: &str) -> Result<()> {
     fs::create_dir_all(destination)?;
-    for entry in walkdir::WalkDir::new(source).sort_by_file_name() {
+    // `.git` is excluded: a checked-out submodule's `.git` is a pointer *file* whose
+    // relative gitdir breaks when copied, and a cache copy is not a repository anyway —
+    // `head_commit` on a local catalog cache must consistently see "no repo".
+    for entry in walkdir::WalkDir::new(source)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|e| e.file_name() != ".git")
+    {
         let entry = entry?;
         let path = entry.path();
         if path == source {
