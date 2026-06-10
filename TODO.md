@@ -239,8 +239,6 @@ Remaining:
   `model/catalog.rs` (~540), `install/mod.rs` (~540).
 - **Split `src/archive/`** into `pack.rs`, `unpack.rs`, `validate.rs` (from
   the current monolithic `archive/mod.rs` and `archive/pack.rs`).
-- **Move test helpers out of `tests/smoke.rs`** into a `tests/support/`
-  directory so the integration test file stops growing unbounded.
 
 ### 6. Security and correctness audit fixes (post-subagent review)
 
