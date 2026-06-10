@@ -22,6 +22,37 @@ pub fn remove(args: PackageArg) -> Result<()> {
         bail!("specify at least one package to remove");
     }
 
+    // Refuse to break installed packages: a removal target that something outside the
+    // removal set still requires (by name, bin, or capability) is an error naming the
+    // dependents. The whole named set leaves together, so removing a package alongside
+    // its last dependent is fine.
+    let states = installed_states()?;
+    let removal_set: HashSet<&str> = args.packages.iter().map(String::as_str).collect();
+    for package in &args.packages {
+        let Some(target) = states.iter().find(|state| state.name == *package) else {
+            continue; // remove_one reports "not installed" with the right message
+        };
+        let dependents: Vec<&str> = states
+            .iter()
+            .filter(|other| other.name != target.name && !removal_set.contains(other.name.as_str()))
+            .filter(|other| {
+                other.runtime_deps.iter().any(|dep| {
+                    dep == &target.name
+                        || target.bins.contains_key(dep)
+                        || target.provides.iter().any(|p| p == dep)
+                })
+            })
+            .map(|state| state.name.as_str())
+            .collect();
+        if !dependents.is_empty() {
+            bail!(
+                "cannot remove `{package}`: still required by {}. Remove the dependents \
+                 first (or in the same command) to proceed",
+                dependents.join(", ")
+            );
+        }
+    }
+
     let mut all_runtime_deps = Vec::new();
     for package in &args.packages {
         let removed = remove_one(package)?;
