@@ -31,6 +31,9 @@ tome commits, and addenda.
 signature authenticates every archive hash it publishes.
 - **Generations and rollback.** Every install/remove/upgrade creates a new generation;
 `grm rollback` switches back instantly without rebuilding.
+- **Distro-citizen tooling.** Install-reason tracking with orphan cleanup (`grm orphans`,
+`grm autoremove`), file-ownership queries (`grm files`, `grm owns`, `grm provides`), preferred
+providers for contested commands (`grm prefer awk gawk`), post-install notes, and tome news.
 
 ## Positioning
 
@@ -40,6 +43,7 @@ signature authenticates every archive hash it publishes.
 | Recipe authoring | imperative Nushell `build` function | **Portage / Pacman** (PKGBUILD/ebuild) |
 | Build-time customization | `build_flags` | **Portage USE flags** |
 | Catalogs / overlays | tomes + addenda | **AUR / overlays** |
+| Contested commands | `grm prefer` | **update-alternatives / eselect** |
 | Build / trust | host-toolchain builds, signed binhost | **Pacman / Gentoo binhost** |
 
 ## Install
@@ -61,11 +65,22 @@ grm search hello
 grm info hello
 grm install hello
 
-# Upgrade, hold, clean up
+# Upgrade, hold, roll back
 grm upgrade
 grm hold hello
 grm unhold hello
+grm rollback
+
+# Ask questions
+grm files hello                       # what did this package install?
+grm owns ~/.grimoire/profiles/current/bin/hello   # what installed this file?
+grm provides awk                      # who can provide this command?
+grm prefer awk gawk                   # pick the provider when several can
+
+# Clean up
 grm remove hello
+grm orphans                           # list dependencies nothing needs anymore
+grm autoremove                        # remove them
 grm clean
 ```
 
@@ -85,11 +100,13 @@ grm tome build --all --path ./mytome
 ```
 
 `grm tome build` writes `.tar.zst` archives into `dist/` and records them in `dist/index.nuon`.
-Publish by uploading `dist/` to a static host and pointing `tome.rn` at it.
+Publish by uploading `dist/` to a static host and pointing `tome.rn` at it. A tome may also ship
+announcements as `news/*.md`; `grm tome update` shows new items once and `grm tome news` re-reads
+them.
 
-## Rune Build Context
+## Writing Runes
 
-A rune exports package metadata and a `build` function:
+A rune exports package metadata and a `build` function written in native Nushell:
 
 ```nu
 export const package = {
@@ -109,26 +126,17 @@ export const package = {
 }
 
 export def build [ctx] {
-  let src = ($ctx.sources.main.dir | path join "widget-1.2.3")
-  sh -c $"
-    set -eu
-    cd '($src)'
-    ./configure --prefix='($ctx.prefix)'
-    make
-    make install DESTDIR='($ctx.package_dir)'
-  "
+  cd ($ctx.sources.main.dir | path join "widget-1.2.3")
+  ./configure --prefix=($ctx.prefix)
+  make -j($ctx.nproc)
+  make install DESTDIR=($ctx.package_dir)
 }
 ```
 
-Build context fields:
-
-- `ctx.sources.<name>.path` / `.dir`: verified source artifact and extraction directory
-- `ctx.package_dir`: staging root, used as `DESTDIR`
-- `ctx.prefix` / `ctx.store_path`: final store path (`/grm/store/<hash>-<name>-<version>`)
-- `ctx.env.PATH`: build dependency `bin/` directories plus the POSIX ambient PATH and host compiler
-boundary
-- `ctx.target`: current target triple
-- `ctx.build_flags`: key/value build options after addenda are applied
+The build stages into `ctx.package_dir`, configures against the final store prefix
+(`ctx.prefix`), and runs in a sandboxed environment where only declared dependencies are
+discoverable. See [docs/rune-authoring.md](docs/rune-authoring.md) for the full reference:
+the `ctx` record, install conventions, platform conditionals, and post-install notes.
 
 ## Store Layout
 
@@ -187,16 +195,17 @@ grm addendum remove <name>
 
 Grimoire's design eliminates many traditional package-manager risks by construction:
 everything is user-local, checksum-verified, optionally index-signed, and installed without
-arbitrary root execution. Remaining risks are documented in the design notes in
-`docs/design/` and the agent guidelines in `AGENTS.md`.
+arbitrary root execution. The binding security invariants are documented in
+[AGENTS.md §10](AGENTS.md).
 
 Report implementation bugs in verification, extraction, or privilege boundaries privately via
 GitHub's vulnerability reporting tab.
 
 ## Further Reading
 
-- [Remaining work](TODO.md)
+- [Rune authoring reference](docs/rune-authoring.md)
 - [Agent guidelines](AGENTS.md)
+- [Remaining work](TODO.md)
 
 ## License
 
