@@ -216,26 +216,20 @@ for bootstrap. Removes the need for `host_tool_dirs()`.
 
 ### Source tree reorganization
 
-The `src/` root has become a flat dumping ground. Navigation is painful and
-cohesion is low. AGENTS.md §3.6 now codifies the limits (500 lines soft, 800
-hard); current violators of the hard limit: `model.rs` (~2,000), `install.rs`
-(~1,600), `solve.rs` (~1,050), `tome/mod.rs` (~1,000), `nu/runtime.rs` (~840),
-plus `tests/smoke.rs` (~5,800, exempt until the `tests/support/` split).
-`profile.rs` (~780) and `build.rs` (~660) are past the soft limit.
+AGENTS.md §3.6 codifies the limits (500 lines soft, 800 hard). **Done:** the
+hard violators are split into directory modules with re-export roots —
+`src/model/` (package/deps/state/index/catalog/value), `src/install/`
+(realize/build_deps/state/orphans/transaction), `src/solve/`
+(capabilities/candidates/plan/resolver), `src/tome/`
+(authoring/publish/sync/verify + git/news), `src/nu/runtime/` (env/eval),
+and `src/profile/` (generations/gc/linking). Every `src/` file is now under
+the hard limit.
 
-- **Split `model.rs`** into a `src/model/` directory with one file per
-  concern: `package.rs`, `deps.rs`, `catalog.rs`, `manifest.rs`, `index.rs`,
-  `source.rs`, etc. Keep `src/model.rs` as a thin `pub use` re-export root.
-- **Split `install.rs`** into `src/install/` with `plan.rs`, `transaction.rs`,
-  `store.rs` (rename from the current `install_store_only` logic), `orphans.rs`,
-  and `root.rs`.
-- **Split `solve.rs`** into `src/solve/` with `index.rs`, `resolver.rs`,
-  `capabilities.rs`, and `plan.rs`.
-- **Split `tome/mod.rs`** into `add.rs`/`update.rs` (catalog lifecycle),
-  `build.rs` (rune→archive publishing), and `verify.rs` (signature seams),
-  alongside the existing `git.rs` and `news.rs`.
-- **Split `nu/runtime.rs`** into metadata reading vs. build execution vs.
-  environment assembly.
+Remaining:
+
+- **Soft-limit residents** (split when next touched, per §3.6):
+  `solve/resolver.rs` (~690, ~380 of it tests), `build.rs` (~660),
+  `model/catalog.rs` (~540), `install/mod.rs` (~540).
 - **Group related leaf modules** under directories:
   - `src/archive/` — `pack.rs`, `unpack.rs`, `validate.rs` (split from
     current monolithic `archive/mod.rs` and `archive/pack.rs`)
