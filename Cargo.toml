@@ -27,13 +27,13 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"
-clap = { version = "4.6.1", features = ["derive", "env"] }
+clap = { version = "4.6.1", features = ["derive"] }
 clap_complete = "4.6"
 clap_mangen = "0.3"
 dirs = "6"
 fs4 = "0.13"
 flate2 = "1"
-gix = { version = "0.84.0", features = ["blocking-network-client", "blocking-http-transport-reqwest-rust-tls"] }
+gix = { version = "0.84.0", default-features = false, features = ["blocking-network-client", "blocking-http-transport-reqwest-rust-tls", "worktree-mutation", "sha1"] }
 indicatif = "0.17"
 libc = "0.2"
 minisign-verify = "0.2"
