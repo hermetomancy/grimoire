@@ -469,3 +469,31 @@ fn locked_source_install_rejects_rebuilt_hash_drift() {
         "failed locked source install should not write package state"
     );
 }
+
+#[test]
+fn platform_filtered_sources_are_skipped_for_other_targets() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    // The other-platform source points at a file that does not exist: the build can only
+    // succeed if the platform filter prevents Grimoire from ever trying to fetch it.
+    let other_os = if std::env::consts::OS == "linux" {
+        "macos"
+    } else {
+        "linux"
+    };
+    let rune_dir = TempDir::new().unwrap();
+    let rune = rune_dir.path().join("splitsrc.rn");
+    fs::write(
+        &rune,
+        format!(
+            "export const package = {{\n  name: 'splitsrc'\n  version: '0.1.0'\n  fixed_output: true\n  sources: {{\n    other: {{ url: 'does-not-exist.tar.zst', sha256: 'sha256:{}', platform: '{other_os}-*' }}\n  }}\n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'splitsrc\\\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'splitsrc')\n}}\n",
+            "0".repeat(64)
+        ),
+    )
+    .unwrap();
+
+    let install = run(root, &["install", rune.to_str().unwrap()]);
+    assert_success(&install, "install with a filtered-out source");
+    assert_eq!(stdout(&run_shim(root, "splitsrc")).trim(), "splitsrc");
+}

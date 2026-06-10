@@ -226,8 +226,12 @@ pub fn build_package_with_env(
 
     status(&format!("checking sources ({package})"));
     let rune_dir = rune.parent().unwrap_or_else(|| Path::new("."));
-    let sources = fetch::fetch_sources(&metadata.sources, rune_dir, &paths::source_cache_dir()?)
-        .with_context(|| format!("fetch sources for {}", rune.display()))?;
+    let sources = fetch::fetch_sources(
+        &metadata.sources_for(&env.target),
+        rune_dir,
+        &paths::source_cache_dir()?,
+    )
+    .with_context(|| format!("fetch sources for {}", rune.display()))?;
 
     let final_prefix = paths::store_path(store_hash, &metadata.name, &metadata.version)?;
 

@@ -56,6 +56,11 @@ pub struct PackageMetadata {
 pub struct Source {
     pub url: String,
     pub sha256: String,
+    /// Optional platform glob (same syntax as dependency brackets, e.g. `macos-*`,
+    /// `linux-x86_64-musl`). The source is fetched and hashed only for matching targets —
+    /// how a fixed-output package pins different prebuilt artifacts per platform.
+    #[serde(default)]
+    pub platform: Option<String>,
 }
 
 impl PackageMetadata {
@@ -121,6 +126,23 @@ impl PackageMetadata {
         resolve_target_conditional(&self.bins, target)
     }
 
+    /// The declared sources that apply to `target`: platform-filtered sources whose glob does
+    /// not match are excluded, exactly like platform-conditional deps. This filtered view is
+    /// what gets fetched *and* what the store hash covers, so per-platform artifacts do not
+    /// perturb other platforms' content addresses.
+    pub fn sources_for(&self, target: &str) -> BTreeMap<String, Source> {
+        self.sources
+            .iter()
+            .filter(|(_, source)| {
+                source
+                    .platform
+                    .as_deref()
+                    .is_none_or(|pattern| dep_matches_platform(pattern, target))
+            })
+            .map(|(name, source)| (name.clone(), source.clone()))
+            .collect()
+    }
+
     /// Merge a build manifest into this metadata's `bins`. The manifest's entries override
     /// existing entries for the same target key.
     pub fn merge_build_manifest(&mut self, manifest: &BuildManifest) {
@@ -176,6 +198,9 @@ impl PackageMetadata {
             let mut entry = Record::new();
             entry.push("url", Value::string(&source.url, Span::unknown()));
             entry.push("sha256", Value::string(&source.sha256, Span::unknown()));
+            if let Some(platform) = &source.platform {
+                entry.push("platform", Value::string(platform, Span::unknown()));
+            }
             sources.push(name, Value::record(entry, Span::unknown()));
         }
         record.push("sources", Value::record(sources, Span::unknown()));
@@ -322,7 +347,15 @@ pub(crate) fn parse_sources(value: &Value) -> Result<BTreeMap<String, Source>> {
         let url = required_field_string(source, &format!("source `{name}`"), "url")?;
         let sha256 = required_field_string(source, &format!("source `{name}`"), "sha256")?;
         validate_sha256(&sha256, &format!("source `{name}` sha256"))?;
-        out.insert(name.clone(), Source { url, sha256 });
+        let platform = optional_string(source, "platform")?;
+        out.insert(
+            name.clone(),
+            Source {
+                url,
+                sha256,
+                platform,
+            },
+        );
     }
     Ok(out)
 }
@@ -330,6 +363,47 @@ pub(crate) fn parse_sources(value: &Value) -> Result<BTreeMap<String, Source>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sources_for_filters_by_platform_glob() {
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            "everywhere".to_owned(),
+            Source {
+                url: "https://example.com/all.tar.gz".to_owned(),
+                sha256: "sha256:aaa".to_owned(),
+                platform: None,
+            },
+        );
+        sources.insert(
+            "mac-only".to_owned(),
+            Source {
+                url: "https://example.com/mac.tar.xz".to_owned(),
+                sha256: "sha256:bbb".to_owned(),
+                platform: Some("macos-*".to_owned()),
+            },
+        );
+        let metadata = PackageMetadata {
+            name: "stage0".to_owned(),
+            version: "1.0.0".to_owned(),
+            target: None,
+            store_path: None,
+            targets: Vec::new(),
+            fixed_output: true,
+            summary: None,
+            bins: BTreeMap::new(),
+            sources,
+            deps: Deps::default(),
+            build_flags: BTreeMap::new(),
+            provides: Vec::new(),
+            libs: Vec::new(),
+            notes: Vec::new(),
+        };
+        let mac = metadata.sources_for("macos-aarch64-darwin");
+        assert!(mac.contains_key("everywhere") && mac.contains_key("mac-only"));
+        let linux = metadata.sources_for("linux-x86_64-musl");
+        assert!(linux.contains_key("everywhere") && !linux.contains_key("mac-only"));
+    }
 
     #[test]
     fn bins_for_merges_default_os_and_target() {

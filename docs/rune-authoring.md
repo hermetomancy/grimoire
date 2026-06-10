@@ -94,6 +94,25 @@ systems. If `nproc` is absent, omit the flag and let the build system default.
 **Out-of-tree builds:** use `ctx.work_dir` for build artifacts when the build system supports
 it (CMake, Meson). This keeps the source tree clean and avoids packing build artifacts.
 
+## Platform-conditional sources
+
+A source may carry a `platform` glob (same syntax as dependency brackets); it is fetched and
+hashed only for matching targets. This is how a fixed-output package pins different prebuilt
+artifacts per platform — see `tome-core/runes/rust.rn` for the canonical example:
+
+```rn
+sources: {
+  "macos-aarch64-darwin": {
+    url: "https://example.com/tool-aarch64-apple-darwin.tar.xz"
+    sha256: "sha256:..."
+    platform: "macos-aarch64-darwin"
+  }
+}
+```
+
+Each target's store hash covers exactly its own filtered source set, so updating one
+platform's artifact does not perturb the others' content addresses.
+
 ## Platform conditionals
 
 Use `ctx.target` for platform-specific logic; prefer prefix matching over exact triples:
