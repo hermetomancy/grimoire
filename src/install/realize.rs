@@ -106,7 +106,7 @@ pub(crate) fn install_store_only(
         "extracting into transaction ({})",
         transaction.path().display()
     ));
-    extract_archive(&safe_archive, &staging_dir)?;
+    archive::extract_archive(&safe_archive, &staging_dir)?;
 
     status("validating extracted files");
     validate_bins(&metadata, &paths::target_triple(), &staging_dir)?;
@@ -224,40 +224,6 @@ pub(crate) fn resolve_store_dir(
 /// be nested *under* a symlink (which would let extraction write through the link). Hard links
 /// are still rejected outright. With these guarantees the subsequent `unpack` into a fresh
 /// staging directory cannot be lured outside the destination.
-pub(crate) fn extract_archive(path: &Path, destination: &Path) -> Result<()> {
-    let file = File::open(path)?;
-    let decoder = zstd::stream::read::Decoder::new(file)?;
-    let mut archive = tar::Archive::new(decoder);
-    archive.unpack(destination)?;
-    sanitize_permissions(destination)
-        .with_context(|| format!("sanitize permissions in {}", destination.display()))?;
-    Ok(())
-}
-
-/// Strips setuid, setgid, and sticky bits from every regular file under `dir`.
-pub(crate) fn sanitize_permissions(dir: &Path) -> Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.is_file() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = metadata.permissions();
-                let mode = perms.mode();
-                if mode & 0o7000 != 0 {
-                    perms.set_mode(mode & !0o7000);
-                    fs::set_permissions(&path, perms)?;
-                }
-            }
-        } else if metadata.is_dir() {
-            sanitize_permissions(&path)?;
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn validate_bins(
     metadata: &PackageMetadata,
     target: &str,
