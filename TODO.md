@@ -175,6 +175,48 @@ caches currently hold, and cannot reproduce locally built archives.
 - AGENTS.md updated to reflect current architecture (rune authoring, PATH
   order, platform-conditional deps, multi-package CLI, project hygiene).
 
+### Source tree reorganization
+
+- Hard-limit violators split into directory modules with re-export roots:
+  `src/model/`, `src/install/`, `src/solve/`, `src/tome/`, `src/nu/runtime/`,
+  `src/profile/`, `src/archive/` (hash root + pack/unpack/validate, with
+  extraction moved home from install). Soft-limit residents split too
+  (resolver tests, build sources/output, addendum catalog, installer steps).
+- Root regrouped from ~30 modules to 14: `src/cmd/`, `src/util/`,
+  `src/store/` (+closure), `src/build/` (+toolchain), `src/catalog/`
+  (sync_common, addendum, signing); `lock` → `install/`, `preferences` →
+  `model/`, tests-only `index.rs` folded into `model/index.rs`.
+- `tests/smoke.rs` (5,761 lines) split into ten themed integration crates
+  with shared helpers in `tests/support/`; AGENTS.md §3.6 exemption retired.
+- Every file in the repository is within the §3.6 limits (500 soft/800 hard).
+
+### Security and correctness audit fixes (post-subagent review)
+
+- **Cross-filesystem generations** — `clone_or_hard_link` falls back to a
+  plain file copy on `EXDEV` when CoW clone and hard link are both impossible.
+- **Streaming pack** — `pack::append_file` streams from disk instead of
+  buffering whole files.
+- **Spinner vs. panic** — a panic hook tears the live spinner down before the
+  panic report prints. (The audited "process hang" was a misdiagnosis — a
+  non-main thread never keeps a Rust process alive — but the garbled-stderr
+  race was real.)
+- **Rune `provides` capabilities** — `record_capabilities_from_rune` harvests
+  declared `provides` like index entries do.
+- **Deterministic publish order** — `rune_names_ordered` uses an ordered
+  ready-set for every node, not just seeds.
+- **Shared HTTP agent** — downloads reuse one process-wide agent.
+- **Fewer archive passes** — staging hashes during the copy and captures
+  embedded metadata during path validation (five reads → three).
+- **Destdir prefix hardening** — `relative_destdir_prefix` rejects `..` and
+  Windows prefixes instead of silently stripping them.
+- **`find_dep_state`** no longer allocates per `provides` lookup.
+- **Doctor checks added** — whitespace install root, broken
+  `profiles/current` symlink, corrupt state files, contested bins without a
+  preference, stale `.grimoire-old` backups.
+- **By design, now documented:** `append_dir`'s fixed `0o755` matches the
+  fixed file modes — archives must be byte-identical across builders, so
+  host umask must not leak in.
+
 ### Security and correctness audit fixes (high impact)
 
 - **Archive TOCTOU** — `install_store_only` now copies the archive into its
@@ -214,72 +256,6 @@ supported target. Current status:
 Add `cmake` and `python3` to `core` so no non-POSIX host tools are required
 for bootstrap. Removes the need for `host_tool_dirs()`.
 
-### Source tree reorganization
-
-AGENTS.md §3.6 codifies the limits (500 lines soft, 800 hard). **Done:** the
-hard violators are split into directory modules with re-export roots —
-`src/model/` (package/deps/state/index/catalog/value), `src/install/`
-(realize/build_deps/state/orphans/transaction), `src/solve/`
-(capabilities/candidates/plan/resolver), `src/tome/`
-(authoring/publish/sync/verify + git/news), `src/nu/runtime/` (env/eval),
-and `src/profile/` (generations/gc/linking). Every `src/` file is now under
-the hard limit.
-
-The root is regrouped too: `src/cmd/` (thin CLI handlers: clean, doctor,
-files, man, prefer, query, setup), `src/util/` (fs_util, paths,
-process_lock, progress, time_util), `src/store/` (+closure), `src/build/`
-(+toolchain), `src/catalog/` (sync_common, addendum, signing), `lock` →
-`src/install/`, `preferences` → `src/model/`, and the tests-only `index.rs`
-folded into `model/index.rs` — 14 modules at the root, down from ~30.
-
-Remaining:
-
-- **Soft-limit residents** (split when next touched, per §3.6):
-  `solve/resolver.rs` (~690, ~380 of it tests), `build/mod.rs` (~660),
-  `model/catalog.rs` (~540), `install/mod.rs` (~540).
-- **Split `src/archive/`** into `pack.rs`, `unpack.rs`, `validate.rs` (from
-  the current monolithic `archive/mod.rs` and `archive/pack.rs`).
-
-### 6. Security and correctness audit fixes (post-subagent review)
-
-Items identified during the comprehensive subagent audit that remain unfixed.
-
-#### Medium impact
-
-- **Profile generation hard links fail across filesystems**  
-  `src/profile.rs:473-475` / `src/profile.rs:589` — `clone_or_hard_link` tries CoW clone, then hard link. If `/grm/store` and `/grm/profiles` are on separate mounts, both fail and `create_generation` bails with no fallback to file copy.
-
-- **`archive/pack.rs::append_file` loads entire files into memory**  
-  `src/archive/pack.rs:178-181` — `read_to_end` buffers the whole file. Large debug info or static libraries could cause OOM during `grm tome build`.
-
-- **Progress spinner thread leak on panic**  
-  `src/progress.rs:178-193` — The spinner thread is not a daemon. If the main thread panics, the process hangs indefinitely because the spinner thread keeps the process alive.
-
-- **`CapabilityIndex` only harvests capabilities from `bins`, not `provides`**  
-  `src/solve.rs:97-111` — Index entries can declare non-binary capabilities via `provides`, but source runes cannot because `record_capabilities_from_rune` only looks at `bins_for(target)`.
-
-#### Low impact
-
-- **`archive/pack.rs::append_dir` hardcodes `0o755`**  
-  Directory permissions from the build are lost.
-
-- **`archive/pack.rs::relative_destdir_prefix` silently strips `..`**  
-  `RootDir`, `Prefix`, and `ParentDir` components are all dropped silently.
-
-- **`find_dep_state` allocates `String` for `provides` lookup**  
-  Minor allocation on every orphan check.
-
-- **`rune_names_ordered` only sorts initial seed nodes**  
-  Nodes that become ready later are appended in insertion order.
-
-- **`fetch.rs` creates a new HTTP agent per request**  
-  Wastes TCP/TLS handshakes.
-
-- **`install_store_only` reads the archive 3 times**  
-  Hash verification, path validation, metadata inspection, and extraction each open the archive independently.
-
-- **`doctor.rs` missing health checks**  
-  Doesn't detect broken `profiles/current` symlink, whitespace in install root, stale `.grimoire-old` backups, corrupt state files, or duplicate bin collisions.
 
 ## Deletion criteria
 

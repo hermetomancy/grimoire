@@ -7,23 +7,24 @@
 
 pub(crate) mod toolchain;
 
+mod output;
+mod sources;
+
+use output::*;
+use sources::*;
+
 use anyhow::{Context, Result, bail};
-use flate2::read::GzDecoder;
 use std::{
     collections::BTreeMap,
-    fs::{self, File},
-    io::Read,
+    fs,
     path::{Path, PathBuf},
 };
-use xz2::read::XzDecoder;
 
 use crate::{
-    archive,
     archive::pack,
     catalog::addendum,
     cli::BuildArgs,
-    fetch::{self, FetchedSource},
-    install,
+    fetch, install,
     nu::runtime::{BuildDirs, BuildEnv, EmbeddedNuRuntime},
     tome,
     util::paths,
@@ -307,125 +308,6 @@ pub fn build_package_with_env(
     })
 }
 
-/// Scan a built package directory for executable files in standard directories.
-/// Returns a map of command name → relative path (e.g. "hello" → "bin/hello").
-fn discover_bins(package_dir: &Path) -> BTreeMap<String, String> {
-    let mut bins = BTreeMap::new();
-    for subdir in ["bin", "sbin", "libexec"] {
-        let dir = package_dir.join(subdir);
-        if !dir.is_dir() {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let Ok(meta) = entry.metadata() else {
-                continue;
-            };
-            let is_exec = {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    meta.permissions().mode() & 0o111 != 0
-                }
-                #[cfg(not(unix))]
-                {
-                    true
-                }
-            };
-            if !is_exec {
-                continue;
-            }
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                bins.insert(name.to_owned(), format!("{subdir}/{name}"));
-            }
-        }
-    }
-    bins
-}
-
-/// Scan a built package directory for library files in standard directories.
-/// Returns a sorted list of library base names (e.g. "foo" for libfoo.so).
-fn discover_libs(package_dir: &Path) -> Vec<String> {
-    let mut libs = Vec::new();
-    for subdir in ["lib", "lib64"] {
-        let dir = package_dir.join(subdir);
-        if !dir.is_dir() {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            let Some(base) = name.strip_prefix("lib") else {
-                continue;
-            };
-            let base = if let Some(stripped) = base.strip_suffix(".a") {
-                stripped
-            } else if let Some(stripped) = base.strip_suffix(".dylib") {
-                stripped
-            } else if let Some(idx) = base.find(".so") {
-                &base[..idx]
-            } else {
-                continue;
-            };
-            if !base.is_empty() {
-                libs.push(base.to_owned());
-            }
-        }
-    }
-    libs.sort();
-    libs.dedup();
-    libs
-}
-
-/// Ensure every file in `bin/`, `sbin/`, and `libexec/` is executable.
-/// Build scripts that use Nushell's `save` command create files without the
-/// executable bit; this fixes them before packing so auto-discovery finds them.
-fn fix_bin_permissions(package_dir: &Path) -> Result<()> {
-    for subdir in ["bin", "sbin", "libexec"] {
-        let dir = package_dir.join(subdir);
-        if !dir.is_dir() {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = entry
-                    .metadata()
-                    .with_context(|| format!("read metadata for {}", path.display()))?
-                    .permissions();
-                if perms.mode() & 0o111 == 0 {
-                    perms.set_mode(perms.mode() | 0o755);
-                    std::fs::set_permissions(&path, perms)
-                        .with_context(|| format!("chmod +x {}", path.display()))?;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn tome_name_for_rune(rune: &Path) -> Result<Option<String>> {
     let rune = rune
         .canonicalize()
@@ -440,90 +322,6 @@ pub(crate) fn tome_name_for_rune(rune: &Path) -> Result<Option<String>> {
         }
     }
     Ok(None)
-}
-
-fn prepare_sources(
-    sources: BTreeMap<String, FetchedSource>,
-    work_dir: &Path,
-) -> Result<BTreeMap<String, FetchedSource>> {
-    let sources_dir = work_dir.join("sources");
-    let mut prepared = BTreeMap::new();
-    for (name, mut source) in sources {
-        if let Some(kind) = source_archive_kind(&source.url) {
-            let destination = sources_dir.join(&name);
-            std::fs::create_dir_all(&destination)?;
-            extract_source_archive(&source.path, &destination, kind)
-                .with_context(|| format!("extract source `{name}`"))?;
-            source.extracted_dir = Some(destination);
-        }
-        prepared.insert(name, source);
-    }
-    Ok(prepared)
-}
-
-#[derive(Debug, Clone, Copy)]
-#[allow(clippy::enum_variant_names)] // all source archives are tarballs; the prefix is meaningful
-enum SourceArchiveKind {
-    TarGz,
-    TarXz,
-    TarZst,
-}
-
-fn source_archive_kind(url: &str) -> Option<SourceArchiveKind> {
-    let normalized = url
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(url)
-        .to_ascii_lowercase();
-    if normalized.ends_with(".tar.zst") || normalized.ends_with(".tzst") {
-        return Some(SourceArchiveKind::TarZst);
-    }
-    if normalized.ends_with(".tar.gz") || normalized.ends_with(".tgz") {
-        return Some(SourceArchiveKind::TarGz);
-    }
-    if normalized.ends_with(".tar.xz") || normalized.ends_with(".txz") {
-        return Some(SourceArchiveKind::TarXz);
-    }
-    None
-}
-
-fn extract_source_archive(path: &Path, destination: &Path, kind: SourceArchiveKind) -> Result<()> {
-    // Copy into the private build directory before reading so a local attacker cannot swap
-    // the shared cache file between validation and extraction (AGENTS.md §10).
-    let safe = destination.with_extension("grimoire-tmp");
-    fs::copy(path, &safe)
-        .with_context(|| format!("copy source archive to temp {}", safe.display()))?;
-    let result = extract_source_archive_inner(&safe, destination, kind);
-    let _ = fs::remove_file(&safe);
-    result
-}
-
-fn extract_source_archive_inner(
-    path: &Path,
-    destination: &Path,
-    kind: SourceArchiveKind,
-) -> Result<()> {
-    let mut tar = tar::Archive::new(source_archive_reader(path, kind)?);
-    archive::validate_tar_entries(&mut tar)
-        .with_context(|| format!("validate source archive {}", path.display()))?;
-
-    let mut tar = tar::Archive::new(source_archive_reader(path, kind)?);
-    tar.unpack(destination)
-        .with_context(|| format!("unpack source archive into {}", destination.display()))?;
-    Ok(())
-}
-
-fn source_archive_reader(path: &Path, kind: SourceArchiveKind) -> Result<Box<dyn Read>> {
-    let file =
-        File::open(path).with_context(|| format!("open source archive {}", path.display()))?;
-    match kind {
-        SourceArchiveKind::TarGz => Ok(Box::new(GzDecoder::new(file))),
-        SourceArchiveKind::TarXz => Ok(Box::new(XzDecoder::new(file))),
-        SourceArchiveKind::TarZst => Ok(Box::new(
-            zstd::stream::read::Decoder::new(file)
-                .with_context(|| format!("decode zstd source archive {}", path.display()))?,
-        )),
-    }
 }
 
 pub fn resolve_rune(package: &str) -> Result<PathBuf> {
@@ -622,40 +420,5 @@ mod tests {
         assert_eq!(get("LD"), Some("ld"));
         assert_eq!(get("CFLAGS"), Some("-static"));
         assert_eq!(get("LDFLAGS"), Some("-static"));
-    }
-
-    #[test]
-    fn discover_libs_handles_various_names() {
-        let temp = tempfile::tempdir().unwrap();
-        let lib_dir = temp.path().join("lib");
-        fs::create_dir(&lib_dir).unwrap();
-
-        // Standard names
-        File::create(lib_dir.join("libfoo.so")).unwrap();
-        File::create(lib_dir.join("libfoo.so.1")).unwrap();
-        File::create(lib_dir.join("libfoo.so.1.2.3")).unwrap();
-        File::create(lib_dir.join("libbar.a")).unwrap();
-        File::create(lib_dir.join("libbaz.dylib")).unwrap();
-
-        // Version-in-base-name (must NOT be mangled)
-        File::create(lib_dir.join("libfoo-1.2.so")).unwrap();
-
-        let libs = discover_libs(temp.path());
-        assert!(
-            libs.contains(&"foo".to_string()),
-            "foo should be discovered"
-        );
-        assert!(
-            libs.contains(&"bar".to_string()),
-            "bar should be discovered"
-        );
-        assert!(
-            libs.contains(&"baz".to_string()),
-            "baz should be discovered"
-        );
-        assert!(
-            libs.contains(&"foo-1.2".to_string()),
-            "foo-1.2 should preserve version in base name"
-        );
     }
 }
