@@ -92,6 +92,9 @@ impl CapabilityIndex {
                 providers.push(metadata.name.clone());
             }
         }
+        // A rune can also declare non-binary capabilities via `provides`, exactly like a
+        // published index entry; harvest them so source-only packages resolve the same way.
+        Self::record_provides(&metadata.name, &metadata.provides, map);
     }
 
     pub(crate) fn providers(&self, capability: &str) -> Vec<String> {
@@ -103,4 +106,47 @@ impl CapabilityIndex {
 /// read-only seam `grm provides` uses; [`CapabilityIndex`] itself stays private to the solver.
 pub fn capability_providers(capability: &str) -> Result<Vec<String>> {
     Ok(CapabilityIndex::build()?.providers(capability))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::PackageMetadata;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn rune_capabilities_include_bins_and_provides() {
+        let mut bins = BTreeMap::new();
+        bins.insert(
+            "default".to_owned(),
+            BTreeMap::from([
+                ("gawk".to_owned(), "bin/gawk".to_owned()),
+                ("awk".to_owned(), "bin/gawk".to_owned()),
+            ]),
+        );
+        let metadata = PackageMetadata {
+            name: "gawk".to_owned(),
+            version: "5.3.0".to_owned(),
+            target: None,
+            store_path: None,
+            targets: Vec::new(),
+            fixed_output: false,
+            summary: None,
+            bins,
+            sources: BTreeMap::new(),
+            deps: Default::default(),
+            build_flags: BTreeMap::new(),
+            provides: vec!["text-processor".to_owned()],
+            libs: Vec::new(),
+            notes: Vec::new(),
+        };
+        let mut map = HashMap::new();
+        CapabilityIndex::record_capabilities_from_rune(&metadata, "linux-x86_64-musl", &mut map);
+        assert_eq!(map.get("awk"), Some(&vec!["gawk".to_owned()]));
+        assert_eq!(map.get("text-processor"), Some(&vec!["gawk".to_owned()]));
+        assert!(
+            !map.contains_key("gawk"),
+            "self-named bin must not be a capability"
+        );
+    }
 }
