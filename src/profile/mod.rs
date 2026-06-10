@@ -86,9 +86,13 @@ pub fn current_generation_id() -> Result<Option<u64>> {
 }
 
 /// Creates a new generation from the given package states and atomically activates it.
+///
+/// This is the install/remove/upgrade path: `state/packages/` is already the authoritative
+/// source the generation was built from, so activation only flips the symlink — no snapshot
+/// restore is needed (or wanted; it would pointlessly rewrite every state file).
 pub fn rebuild_and_activate(states: &[PackageState]) -> Result<u64> {
     let id = create_generation(states)?;
-    activate_generation(id)?;
+    switch_symlink(id)?;
     Ok(id)
 }
 
@@ -133,6 +137,9 @@ pub fn create_generation(states: &[PackageState]) -> Result<u64> {
         store_paths: states.iter().map(|s| s.store_path.clone()).collect(),
     };
     write_generation_metadata(&gen_dir, &generation)?;
+    // The full state snapshot is what makes activation *semantic*: rollback/switch restore
+    // `state/packages/` from it, so the rolled-back-to generation really is the system state.
+    write_state_snapshot(&gen_dir, states)?;
 
     let mut registry = read_registry().unwrap_or_default();
     registry.push(generation);
@@ -146,16 +153,40 @@ pub fn create_generation(states: &[PackageState]) -> Result<u64> {
     Ok(next_id)
 }
 
-/// Atomically switches the active profile to the given generation.
+/// Semantically activates a generation: restores `state/packages/` and the lockfile from the
+/// generation's state snapshot, then atomically flips the `current` symlink. After this, the
+/// activated generation *is* the system state — queries report its packages and the next
+/// mutating command builds on it instead of silently resurrecting the abandoned set.
+///
+/// The state restore lands before the symlink flip: the flip is the user-visible commit
+/// point, and a crash between the two leaves state describing the target generation — which
+/// the next mutating command or `grm switch` converges, and `grm doctor` flags.
 pub fn activate_generation(id: u64) -> Result<()> {
     let gen_dir = generation_dir(id)?;
     if !gen_dir.exists() {
         bail!("generation {id} does not exist");
     }
-    if current_generation_id()? == Some(id) {
+    let already_active = current_generation_id()? == Some(id);
+    if !restore_state_snapshot(&gen_dir)? {
+        report(&format!(
+            "warning: generation {id} has no state snapshot (created by an older grimoire); \
+             switching the profile view only"
+        ));
+    }
+    if already_active {
+        // Re-activating the current generation is the repair path for an interrupted
+        // activation: the state restore above converges state with the symlink.
         report(&format!("generation {id} is already active"));
         return Ok(());
     }
+    switch_symlink(id)
+}
+
+/// Atomically repoints `profiles/current` at the given generation. The low-level half of
+/// activation: callers are responsible for state/  staying in sync (see
+/// [`activate_generation`] and [`rebuild_and_activate`]).
+fn switch_symlink(id: u64) -> Result<()> {
+    let gen_dir = generation_dir(id)?;
     let current = current_profile_link()?;
     let parent = current
         .parent()

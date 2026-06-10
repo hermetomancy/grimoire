@@ -205,3 +205,77 @@ pub(crate) fn write_registry(generations: &[Generation]) -> Result<()> {
     let value = nu_protocol::Value::list(items, span);
     nuon_io::write_nuon(&path, &value)
 }
+
+/// Writes the full installed-package state into the generation directory as `state.nuon`.
+/// This snapshot is what lets activation restore state: `gen.nuon` records only names and
+/// store paths, which cannot reconstruct bins, deps, flags, or requested/held intent.
+pub(super) fn write_state_snapshot(gen_dir: &Path, states: &[PackageState]) -> Result<()> {
+    let values: Vec<nu_protocol::Value> = states.iter().map(|s| s.to_value()).collect();
+    nuon_io::write_nuon(
+        &gen_dir.join("state.nuon"),
+        &nu_protocol::Value::list(values, nu_protocol::Span::unknown()),
+    )
+    .with_context(|| format!("write state snapshot for {}", gen_dir.display()))
+}
+
+/// Reads a generation's state snapshot; `None` when the generation predates snapshots.
+pub(crate) fn read_state_snapshot(gen_dir: &Path) -> Result<Option<Vec<PackageState>>> {
+    let path = gen_dir.join("state.nuon");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let value = nuon_io::read_nuon(&path)?;
+    let nu_protocol::Value::List { vals, .. } = value else {
+        bail!("state snapshot {} is not a list", path.display());
+    };
+    let states = vals
+        .into_iter()
+        .map(PackageState::from_value)
+        .collect::<Result<Vec<_>>>()
+        .with_context(|| format!("parse state snapshot {}", path.display()))?;
+    Ok(Some(states))
+}
+
+/// Restores `state/packages/` and the lockfile from a generation's snapshot. Returns `false`
+/// (and restores nothing) when the generation has no snapshot.
+///
+/// The replacement is staged into a sibling directory and committed with two renames: the
+/// old state moves aside, the staged state moves in, then the backup is dropped. A crash
+/// mid-swap leaves either the old or the new state directory in place — never a blend —
+/// with the `.packages-old` backup detectable by `grm doctor`.
+pub(super) fn restore_state_snapshot(gen_dir: &Path) -> Result<bool> {
+    let Some(states) = read_state_snapshot(gen_dir)? else {
+        return Ok(false);
+    };
+
+    let state_root = paths::install_root()?.join("state");
+    let packages_dir = state_root.join("packages");
+    let staging = state_root.join(".packages-staging");
+    let backup = state_root.join(".packages-old");
+    if staging.exists() {
+        fs::remove_dir_all(&staging)?;
+    }
+    if backup.exists() {
+        fs::remove_dir_all(&backup)?;
+    }
+    fs::create_dir_all(&staging)?;
+    for state in &states {
+        nuon_io::write_nuon(
+            &staging.join(format!("{}.nuon", state.name)),
+            &state.to_value(),
+        )?;
+    }
+
+    if packages_dir.exists() {
+        fs::rename(&packages_dir, &backup)
+            .with_context(|| format!("move aside {}", packages_dir.display()))?;
+    }
+    fs::rename(&staging, &packages_dir)
+        .with_context(|| format!("promote restored state to {}", packages_dir.display()))?;
+    let _ = fs::remove_dir_all(&backup);
+
+    // The lockfile is derived from state; rebuild it so it describes the activated set.
+    crate::install::lock::rebuild()
+        .context("rebuild lockfile from the activated generation's state")?;
+    Ok(true)
+}

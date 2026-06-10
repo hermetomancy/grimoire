@@ -25,6 +25,16 @@ pub fn gc(keep: usize) -> Result<()> {
     let mut to_retain: BTreeSet<u64> = generations.iter().take(keep).map(|g| g.id).collect();
     if let Some(current_id) = current {
         to_retain.insert(current_id);
+        // Always keep the rollback target too: with `--keep 1` the previous generation would
+        // otherwise be collected and the next `grm rollback` would have nowhere to go.
+        if let Some(previous) = generations
+            .iter()
+            .map(|g| g.id)
+            .filter(|id| *id < current_id)
+            .max()
+        {
+            to_retain.insert(previous);
+        }
     }
 
     let freed_generations = delete_old_generations(&generations, &to_retain, current)?;

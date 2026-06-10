@@ -130,6 +130,13 @@ Grimoire has no database. Durability is explicit transaction directories plus at
 4. Installed package version directories are immutable once promoted. Upgrades create new version
    directories.
 5. Local state is inspectable NUON under the install root. No databases.
+6. **Activation is semantic.** Every generation embeds a full `state.nuon` snapshot of the
+   package state it was built from. `grm switch`/`grm rollback` restore `state/packages/`
+   and the lockfile from that snapshot *before* flipping the `current` symlink, so the
+   active generation and the recorded state always describe the same world — rolling back
+   really rolls back, and the next mutating command builds on the activated set instead of
+   resurrecting the abandoned one. Re-activating the current generation is the repair path
+   for an interrupted activation; `grm doctor` flags divergence.
 
 ## 10. Security invariants
 
