@@ -195,6 +195,27 @@ cmake --build build
 cmake --install build --prefix ($ctx.package_dir)
 ```
 
+## The command subset
+
+Runes target a **defined subset** of Nushell, not whatever a full nu install ships. The core
+language (`let`, `mut`, `if`, `for`, `match`, `def`, `do`, `try`, `error make`, `describe`,
+operators, string interpolation, closures) comes from `nu-cmd-lang`; on top of it Grimoire
+registers exactly these commands (`src/nu/commands/`):
+
+| Family | Commands |
+|---|---|
+| system | external invocation (bare or `^cmd`), `complete` |
+| filesystem | `mkdir`, `save` (verbatim; `--force`/`--append`), `open` (always raw), `rm` (`-r`/`-f`), `cp` (`-r`), `ls` (name/type/size), `cd` |
+| path | `path join`, `path exists`, `path type`, `path basename`, `path dirname` |
+| strings | `str starts-with`, `str ends-with`, `str trim`, `str replace` (`-r` regex, `-a` all) |
+| filters | `get`, `merge`, `columns`, `lines`, `first`, `is-empty` |
+
+Anything not listed does not exist in the rune engine — `from json`, `http get`, `where`,
+`each`, and the rest of nushell's surface are deliberately absent. This keeps rune behavior
+stable across Nushell upgrades and the dependency tree small. If a rune genuinely needs a
+missing command, it is added to `src/nu/commands/` and to this table in the same commit
+(AGENTS.md §15.4) — or the build step uses an external tool instead.
+
 ## Build script patterns
 
 **No `sh -c`.** Rune `build` functions are native Nushell. Use Nushell's own control flow,

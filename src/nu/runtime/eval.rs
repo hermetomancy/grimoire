@@ -58,7 +58,7 @@ pub(crate) fn eval_nu_source(
 ) -> Result<Option<Value>> {
     let _working_dir = WorkingDirectoryGuard::enter(cwd)?;
     let mut engine_state =
-        nu_command::add_shell_command_context(nu_cmd_lang::create_default_context());
+        crate::nu::commands::add_rune_command_context(nu_cmd_lang::create_default_context());
     engine_state.add_env_var(
         "PWD".to_string(),
         Value::string(cwd.display().to_string(), nu_protocol::Span::unknown()),

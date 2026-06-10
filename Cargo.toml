@@ -40,14 +40,16 @@ minisign-verify = "0.2"
 owo-colors = "4"
 os_pipe = "1.2"
 nu-cmd-lang = "0.113.1"
-nu-command = { version = "0.113.1", default-features = false, features = ["os"] }
 nu-engine = { version = "0.113.1", features = ["os"] }
+nu-glob = "0.113.1"
+nu-path = "0.113.1"
 nu-parser = "0.113.1"
 nu-protocol = { version = "0.113.1", features = ["os"] }
+nu-system = "0.113.1"
 nuon = "0.113.1"
+regex = "1"
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
-hex = "0.4"
 sha2 = "0.10"
 tar = "0.4"
 tempfile = "3"
@@ -59,7 +61,6 @@ zstd = "0.13"
 
 [dev-dependencies]
 fs4 = "0.13"
-hex = "0.4"
 minisign = "0.9"
 sha2 = "0.10"
 tar = "0.4"
