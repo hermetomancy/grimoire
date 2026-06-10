@@ -3,7 +3,7 @@
 //! [`install`] resolves a package and its dependencies through the solver, then realizes each
 //! step — fetching and verifying a binary archive or building a rune from source — into the
 //! install root. Every install stages into a transaction directory and promotes with atomic
-//! renames, rolling back the active profile and state on failure (AGENTS.md §4). `--locked` constrains
+//! renames, rolling back the active profile and state on failure (AGENTS.md §9). `--locked` constrains
 //! resolution to the lockfile's recorded versions and hashes for a reproducible reinstall.
 
 use anyhow::{Context, Result, bail};
@@ -1254,7 +1254,7 @@ fn resolve_store_dir(
     Ok((paths::store_root()?.join(basename), hash.to_string()))
 }
 
-/// Validates every archive member *before* extraction (AGENTS.md §5.2–§5.3): member paths must
+/// Validates every archive member *before* extraction (AGENTS.md §10.2–§10.3): member paths must
 /// stay inside the extraction root; symlinks are allowed only when their target also resolves
 /// within the package (so a link can never point outside the install prefix), and no member may
 /// be nested *under* a symlink (which would let extraction write through the link). Hard links

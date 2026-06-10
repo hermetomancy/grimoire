@@ -52,7 +52,7 @@ pub fn rebuild() -> Result<()> {
 
 /// Reads the recorded packages from `grimoire.lock.nuon`. Returns `None` when no lockfile exists
 /// yet, so callers can distinguish "nothing locked" from a parse failure. The lockfile is inert
-/// data read through the shared NUON layer (AGENTS.md §3).
+/// data read through the shared NUON layer (AGENTS.md §4).
 pub fn read_locked_packages() -> Result<Option<Vec<LockedPackage>>> {
     let path = lock_path()?;
     if !path.exists() {

@@ -2,7 +2,7 @@
 //!
 //! The [`RuneRuntime`] trait exposes reading package/tome metadata and executing a rune's `build`
 //! function against a prepared context; [`EmbeddedNuRuntime`] is the in-process implementation.
-//! Runes are evaluated, not shelled out to — the engine is embedded (AGENTS.md §1a).
+//! Runes are evaluated, not shelled out to — the engine is embedded (AGENTS.md §1).
 
 use anyhow::{Context, Result, anyhow};
 use nu_protocol::{
@@ -154,7 +154,7 @@ impl EmbeddedNuRuntime {
 }
 
 /// Builds the inert `ctx` record passed to a rune's `build` function. Source paths are the
-/// already-fetched, checksum-verified cache locations (AGENTS.md §5.1).
+/// already-fetched, checksum-verified cache locations (AGENTS.md §10.1).
 #[allow(clippy::too_many_arguments)]
 fn build_context(
     package_dir: &Path,

@@ -40,7 +40,7 @@ fn core_userland_tools() -> &'static [&'static str] {
 }
 
 /// Reports Grimoire's environment and validates local state. Health results (counts, the
-/// environment summary) go to stdout; per-item problems go to stderr (AGENTS.md §7). A clean
+/// environment summary) go to stdout; per-item problems go to stderr (AGENTS.md §12.1). A clean
 /// run reports zero problems; problems are diagnostics, not a hard error.
 pub fn doctor() -> Result<()> {
     let root = paths::install_root().context("resolve install root")?;

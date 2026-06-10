@@ -2,7 +2,7 @@
 //!
 //! Hashing and the [`verify_hash`] checkpoint enforce "verify before trust", and
 //! [`validate_archive_member_path`] rejects unsafe member paths before extraction (AGENTS.md
-//! §5.2–§5.3). The [`pack`] submodule produces the `.tar.zst` package archives source builds emit.
+//! §10.2–§10.3). The [`pack`] submodule produces the `.tar.zst` package archives source builds emit.
 
 pub mod pack;
 
@@ -64,7 +64,7 @@ pub fn validate_archive_member_path(path: &Path) -> bool {
 /// directory that contains the link and must resolve to a path *within* the package root: absolute
 /// targets, Windows-style paths, and any `..` sequence that would climb above the root are
 /// rejected. This keeps preserved symlinks self-contained and relocatable, and guarantees
-/// extraction can never be lured outside the destination through a link (AGENTS.md §5.3).
+/// extraction can never be lured outside the destination through a link (AGENTS.md §10.3).
 pub fn validate_symlink_target(link: &Path, target: &Path) -> bool {
     let text = target.to_string_lossy();
     if text.is_empty()
@@ -96,7 +96,7 @@ pub fn validate_symlink_target(link: &Path, target: &Path) -> bool {
 
 /// Validates every member path in a `.tar.zst` archive before extraction.
 /// Rejects traversal, absolute paths, Windows-style paths, hard links,
-/// escaping symlinks, and members nested under symlinks (AGENTS.md §5.2–§5.3).
+/// escaping symlinks, and members nested under symlinks (AGENTS.md §10.2–§10.3).
 pub fn validate_archive_paths(path: &Path) -> Result<()> {
     let file = File::open(path)?;
     let decoder = zstd::stream::read::Decoder::new(file)?;

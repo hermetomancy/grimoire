@@ -3,7 +3,7 @@
 //! Everything funnels through [`fetch_verified`], the single download-and-trust gate: an artifact
 //! is fetched (over HTTP with timeouts and bounded retries, or copied for local/`file://` paths)
 //! into a content-addressed cache and checked against its expected hash *before* it is returned
-//! (AGENTS.md §5.1). [`http_get_text`] fetches an index document, treating a 404 as "no index".
+//! (AGENTS.md §10.1). [`http_get_text`] fetches an index document, treating a 404 as "no index".
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::{
@@ -43,7 +43,7 @@ pub struct FetchedSource {
 /// Fetches and verifies every declared source. Each artifact is downloaded (or copied,
 /// for local/`file://` sources) into `cache_dir`, then checked against its `sha256` before
 /// it is offered to the build. A mismatch is a hard failure — nothing is trusted unverified
-/// (AGENTS.md §5.1). `base_dir` is the directory relative local source paths resolve against.
+/// (AGENTS.md §10.1). `base_dir` is the directory relative local source paths resolve against.
 pub fn fetch_sources(
     sources: &BTreeMap<String, Source>,
     base_dir: &Path,
@@ -73,7 +73,7 @@ pub fn fetch_sources(
 
 /// Fetches `location` (an `http(s)` URL or a path relative to `base_dir`) into `cache_dir`,
 /// keyed by its expected hash, and verifies it before returning the cached path. This is the
-/// single download-and-trust gate shared by source artifacts and binary archives (§5.1).
+/// single download-and-trust gate shared by source artifacts and binary archives (§10.1).
 pub fn fetch_verified(
     location: &str,
     base_dir: &Path,
