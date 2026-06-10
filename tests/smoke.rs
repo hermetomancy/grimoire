@@ -3133,6 +3133,113 @@ fn orphans_lists_and_autoremove_reclaims() {
 }
 
 #[test]
+fn files_owns_and_provides_resolve_package_contents() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let dist = tome.join("dist");
+
+    let entries = vec![
+        dep_archive_entry(
+            &dist,
+            "app",
+            "0.1.0",
+            &triple,
+            "[\"lib\"]",
+            "cafef00dcafef00d-app",
+        ),
+        dep_archive_entry(&dist, "lib", "0.1.0", &triple, "[]", "cafef00dcafef00d-lib"),
+    ];
+    write_dep_tome(tome, "filescore", &entries);
+    // A source rune whose bin name differs from the package name: a capability (`ex`)
+    // resolvable through `grm provides` while the package is still only available.
+    fs::write(
+        tome.join("runes").join("gex.rn"),
+        "export const package = {\n  name: 'gex'\n  version: '0.3.0'\n  bins: {default: {ex: 'bin/ex'}}\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'ex\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'ex')\n}\n",
+    )
+    .unwrap();
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add filescore",
+    );
+    assert_success(&run(root, &["tome", "update", "filescore"]), "tome update");
+    assert_success(&run(root, &["install", "app"]), "install app");
+
+    // files: relative paths of everything the package staged into the store.
+    let files = run(root, &["files", "app"]);
+    assert_success(&files, "files app");
+    let listed = stdout(&files);
+    assert!(
+        listed.contains("bin/app") && listed.contains(".grimoire/package.nuon"),
+        "files should list the package contents: {listed}"
+    );
+    assert_failure_contains(
+        &run(root, &["files", "nosuchpkg"]),
+        "is not installed",
+        "files for unknown package",
+    );
+
+    // owns: a profile bin path (through the `current` symlink) and a raw store path.
+    let profile_bin = root
+        .join("profiles")
+        .join("current")
+        .join("bin")
+        .join("app");
+    let owns = run(root, &["owns", profile_bin.to_str().unwrap()]);
+    assert_success(&owns, "owns profile bin");
+    assert!(
+        stdout(&owns).contains("app\t0.1.0"),
+        "profile bin should resolve to app: {}",
+        stdout(&owns)
+    );
+
+    let store_file = installed_store_dir(root, "lib").unwrap().join("bin/lib");
+    let owns_store = run(root, &["owns", store_file.to_str().unwrap()]);
+    assert_success(&owns_store, "owns store path");
+    assert!(
+        stdout(&owns_store).contains("lib\t0.1.0"),
+        "store path should resolve to lib: {}",
+        stdout(&owns_store)
+    );
+
+    let foreign = root.join("not-owned.txt");
+    fs::write(&foreign, "hello").unwrap();
+    assert_failure_contains(
+        &run(root, &["owns", foreign.to_str().unwrap()]),
+        "is not owned by any installed package",
+        "owns on a foreign path",
+    );
+
+    // provides: installed packages report `installed`, rune-only capabilities `available`.
+    let provides_app = run(root, &["provides", "app"]);
+    assert_success(&provides_app, "provides app");
+    assert!(
+        stdout(&provides_app).contains("app\t0.1.0\tinstalled"),
+        "installed package should be marked installed: {}",
+        stdout(&provides_app)
+    );
+
+    let provides_ex = run(root, &["provides", "ex"]);
+    assert_success(&provides_ex, "provides ex");
+    assert!(
+        stdout(&provides_ex).contains("gex\t0.3.0\tavailable"),
+        "capability from an uninstalled rune should be available: {}",
+        stdout(&provides_ex)
+    );
+
+    assert_failure_contains(
+        &run(root, &["provides", "nothing-has-this"]),
+        "nothing provides",
+        "provides with no providers",
+    );
+}
+
+#[test]
 fn completions_and_man_render_from_cli_definition() {
     let root = TempDir::new().unwrap();
     let root = root.path();
