@@ -19,6 +19,18 @@ work, this file should be deleted.
 - Release-blocking job that runs `grm tome build --all` against tome-core
   on each platform once bootstrap lands.
 
+## Deferred decisions
+
+Not release-blocking, but decide before the catalog grows past core:
+
+- **Version ordering beyond semver.** Every comparison goes through
+  `semver::Version`; real upstreams ship `1.1.1w`, `2024.07.02`, `9.0p1`.
+  Either adopt a permissive ordering (pacman-style vercmp) or codify
+  "normalize the version, keep the real one in the URL" as the convention.
+- **`conflicts`/`replaces` metadata.** Package renames and mutually
+  exclusive packages have no mechanism (`grm prefer` covers contested bins
+  only). Retrofitting after a public catalog exists is painful.
+
 ## Planned: Grimoire OS
 
 Work that only matters when Grimoire is the operating system's sole package

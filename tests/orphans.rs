@@ -400,3 +400,65 @@ fn orphans_lists_and_autoremove_reclaims() {
         "reclaimed bins must leave the active generation"
     );
 }
+
+#[test]
+fn remove_refuses_to_break_dependents() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let dist = tome.join("dist");
+
+    let entries = vec![
+        dep_archive_entry(
+            &dist,
+            "app",
+            "0.1.0",
+            &triple,
+            "[\"lib\"]",
+            "cafef00dcafef00d-app",
+        ),
+        dep_archive_entry(&dist, "lib", "0.1.0", &triple, "[]", "cafef00dcafef00d-lib"),
+    ];
+    write_dep_tome(tome, "guardcore", &entries);
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add guardcore",
+    );
+    assert_success(&run(root, &["tome", "update", "guardcore"]), "tome update");
+    assert_success(&run(root, &["install", "app"]), "install app");
+
+    // Removing a package something still depends on must fail, naming the dependent.
+    let remove_lib = run(root, &["remove", "lib"]);
+    assert_failure_contains(&remove_lib, "still required by app", "remove a needed dep");
+    assert!(
+        root.join("state")
+            .join("packages")
+            .join("lib.nuon")
+            .exists(),
+        "lib must remain installed after the refused removal"
+    );
+
+    // Removing the dependent and the dependency together is allowed.
+    assert_success(
+        &run(root, &["remove", "app", "lib"]),
+        "remove the set together",
+    );
+    assert!(
+        !root
+            .join("state")
+            .join("packages")
+            .join("app.nuon")
+            .exists()
+            && !root
+                .join("state")
+                .join("packages")
+                .join("lib.nuon")
+                .exists(),
+        "both packages gone after joint removal"
+    );
+}

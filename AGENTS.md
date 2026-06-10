@@ -124,9 +124,13 @@ Grimoire has no database. Durability is explicit transaction directories plus at
 1. Never mutate an installed package directory or state file in place. Stage, then promote.
 2. An operation either fully completes or leaves the previous state intact. Because state is
    promoted via atomic `rename`, a failure partway through leaves the old state untouched.
-3. Mutating package commands are command-atomic. `grm install a b c`, `grm remove x y`, upgrades,
-   and any dependency/autoremove work they trigger either commit the whole requested state change
-   (store paths, package state, lockfile, and active generation) or commit none of it.
+3. The **active generation** is command-atomic: `grm install a b c`, `grm remove x y`, and
+   upgrades activate a new generation only after every requested package landed — a failure
+   partway leaves the user-visible profile untouched. Per-package work commits as it
+   completes, so a failed multi-package command can leave already-completed packages in the
+   store and state as *store-only residue*: never linked into a generation, marked
+   `requested: false`, and reclaimed by `grm autoremove`. Do not claim stronger atomicity
+   than this.
 4. Installed package version directories are immutable once promoted. Upgrades create new version
    directories.
 5. Local state is inspectable NUON under the install root. No databases.
