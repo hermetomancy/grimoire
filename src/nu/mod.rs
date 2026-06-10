@@ -4,5 +4,6 @@
 //! package/tome definitions and runs build steps in-process (AGENTS.md §4). Everything else in
 //! the crate works with the typed `model` values these produce, never the engine directly.
 
+pub(crate) mod commands;
 pub mod nuon_io;
 pub mod runtime;
