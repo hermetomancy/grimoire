@@ -34,12 +34,17 @@ pub fn store_hash_for_metadata(
     build_env: &str,
 ) -> String {
     if metadata.fixed_output {
-        fixed_output_hash(&metadata.name, &metadata.version, &metadata.sources, target)
+        fixed_output_hash(
+            &metadata.name,
+            &metadata.version,
+            &metadata.sources_for(target),
+            target,
+        )
     } else {
         compiled_hash(
             &metadata.name,
             &metadata.version,
-            &metadata.sources,
+            &metadata.sources_for(target),
             &hash_bytes(rune_bytes),
             dep_store_hashes,
             &metadata.build_flags,
@@ -178,6 +183,7 @@ mod tests {
                 Source {
                     url: "https://example.com/src.tar.gz".to_string(),
                     sha256: "sha256:abc123".to_string(),
+                    platform: None,
                 },
             )]),
             deps: Deps::default(),
