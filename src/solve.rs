@@ -20,7 +20,9 @@ use crate::{
     archive, build, closure,
     model::{Dependency, IndexEntry, PackageIndex, parse_version_relaxed},
     nu::runtime::EmbeddedNuRuntime,
-    paths, tome, toolchain,
+    paths,
+    preferences::Preferences,
+    progress, tome, toolchain,
 };
 
 /// Maps capability names (e.g. "awk", "sh") to the package names that provide them.
@@ -225,7 +227,8 @@ pub fn resolve(
     let source = TomeCandidates {
         target: paths::target_triple(),
     };
-    resolve_with(roots, installed, pins, &source)
+    let preferences = Preferences::load().unwrap_or_default();
+    resolve_with(roots, installed, pins, &source, &preferences.providers)
 }
 
 /// Resolution core, parameterized over where candidate versions come from so it can be exercised
@@ -237,6 +240,7 @@ fn resolve_with(
     installed: &BTreeMap<String, Version>,
     pins: Option<&Pins>,
     source: &dyn CandidateSource,
+    preferences: &BTreeMap<String, String>,
 ) -> Result<Plan> {
     let capabilities = CapabilityIndex::build().unwrap_or_else(|_| CapabilityIndex {
         map: HashMap::new(),
@@ -247,6 +251,7 @@ fn resolve_with(
         source,
         candidates: HashMap::new(),
         capabilities,
+        preferences,
     };
     let mut chosen: BTreeMap<String, ChosenNode> = BTreeMap::new();
     // All roots are resolved as one worklist so backtracking can revise an early choice when a
@@ -312,6 +317,8 @@ struct Resolver<'a> {
     source: &'a dyn CandidateSource,
     candidates: HashMap<String, Vec<Candidate>>,
     capabilities: CapabilityIndex,
+    /// `grm prefer` choices: capability name -> preferred provider package.
+    preferences: &'a BTreeMap<String, String>,
 }
 
 impl Resolver<'_> {
@@ -329,6 +336,24 @@ impl Resolver<'_> {
         if providers.is_empty() {
             return dep.clone();
         }
+        // A `grm prefer` choice wins over everything: it is explicit user intent. If the
+        // preferred package cannot satisfy the version requirement, resolution fails loudly
+        // downstream instead of silently substituting a different provider. Only a *stale*
+        // preference — the named package no longer provides the capability at all — warns and
+        // falls through to the default selection.
+        if let Some(preferred) = self.preferences.get(&dep.name) {
+            if providers.contains(preferred) {
+                return Dependency {
+                    name: preferred.clone(),
+                    req: dep.req.clone(),
+                    platform: dep.platform.clone(),
+                };
+            }
+            progress::report(&format!(
+                "preference for `{}` names `{preferred}`, which no longer provides it; ignoring",
+                dep.name
+            ));
+        }
         // Prefer an already-installed provider that satisfies the version constraint.
         for provider in &providers {
             if let Some(version) = self.installed.get(provider) {
@@ -341,8 +366,8 @@ impl Resolver<'_> {
                 }
             }
         }
-        // No installed provider matches; use the first available one.
-        // TODO: prompt user when multiple uninstalled providers exist.
+        // No installed provider matches; use the first available one. With multiple uninstalled
+        // providers the pick is arbitrary — `grm prefer <capability> <package>` decides it.
         Dependency {
             name: providers[0].clone(),
             req: dep.req.clone(),
@@ -686,12 +711,81 @@ mod tests {
 
     fn plan(roots: &[Dependency], src: &FakeCandidates) -> Result<Vec<(String, String)>> {
         let installed = BTreeMap::new();
-        let plan = resolve_with(roots, &installed, None, src)?;
+        let plan = resolve_with(roots, &installed, None, src, &BTreeMap::new())?;
         Ok(plan
             .steps
             .into_iter()
             .map(|step| (step.name, step.version.to_string()))
             .collect())
+    }
+
+    /// Expands `dep_name` against a synthetic capability index (capability -> providers),
+    /// an installed set, and `grm prefer` choices, bypassing the on-disk tome index.
+    fn expand(
+        dep_name: &str,
+        providers: &[&str],
+        installed: &BTreeMap<String, Version>,
+        preferences: &BTreeMap<String, String>,
+    ) -> String {
+        let src = source(&[]);
+        let capabilities = CapabilityIndex {
+            map: HashMap::from([(
+                dep_name.to_owned(),
+                providers.iter().map(|p| p.to_string()).collect(),
+            )]),
+        };
+        let mut resolver = Resolver {
+            installed,
+            pins: None,
+            source: &src,
+            candidates: HashMap::new(),
+            capabilities,
+            preferences,
+        };
+        resolver.expand_capability(&dep(dep_name, ">=1.0")).name
+    }
+
+    #[test]
+    fn preference_overrides_default_capability_provider() {
+        let installed = BTreeMap::new();
+        let preferences = BTreeMap::from([("awk".to_owned(), "gawk".to_owned())]);
+        assert_eq!(
+            expand("awk", &["mawk", "gawk"], &installed, &preferences),
+            "gawk"
+        );
+    }
+
+    #[test]
+    fn preference_overrides_installed_provider() {
+        // mawk is installed and satisfies the req, but the user prefers gawk — explicit
+        // intent wins over the reuse-what-is-installed default.
+        let installed = BTreeMap::from([("mawk".to_owned(), Version::new(1, 0, 0))]);
+        let preferences = BTreeMap::from([("awk".to_owned(), "gawk".to_owned())]);
+        assert_eq!(
+            expand("awk", &["mawk", "gawk"], &installed, &preferences),
+            "gawk"
+        );
+    }
+
+    #[test]
+    fn stale_preference_falls_back_to_default_provider() {
+        // The preferred package no longer provides the capability at all: warn and fall
+        // through to the first provider rather than failing the resolve.
+        let installed = BTreeMap::new();
+        let preferences = BTreeMap::from([("awk".to_owned(), "nawk".to_owned())]);
+        assert_eq!(
+            expand("awk", &["mawk", "gawk"], &installed, &preferences),
+            "mawk"
+        );
+    }
+
+    #[test]
+    fn no_preference_keeps_installed_provider_first() {
+        let installed = BTreeMap::from([("gawk".to_owned(), Version::new(1, 0, 0))]);
+        assert_eq!(
+            expand("awk", &["mawk", "gawk"], &installed, &BTreeMap::new()),
+            "gawk"
+        );
     }
 
     #[test]
@@ -787,7 +881,14 @@ mod tests {
         let src = source(&[("lib", vec![cand("1.0.0", &[]), cand("1.1.0", &[])])]);
         let mut installed = BTreeMap::new();
         installed.insert("lib".to_owned(), parse_version_relaxed("1.0.0").unwrap());
-        let resolved = resolve_with(&[dep("lib", ">=1.0")], &installed, None, &src).expect("plan");
+        let resolved = resolve_with(
+            &[dep("lib", ">=1.0")],
+            &installed,
+            None,
+            &src,
+            &BTreeMap::new(),
+        )
+        .expect("plan");
         assert!(
             resolved.steps.is_empty(),
             "installed satisfying version should produce no step"
@@ -817,8 +918,14 @@ mod tests {
                 archive_hash: String::new(),
             },
         );
-        let resolved =
-            resolve_with(&[dep("app", ">=1.0")], &installed, Some(&pins), &src).expect("plan");
+        let resolved = resolve_with(
+            &[dep("app", ">=1.0")],
+            &installed,
+            Some(&pins),
+            &src,
+            &BTreeMap::new(),
+        )
+        .expect("plan");
         assert_eq!(
             resolved
                 .steps
@@ -834,7 +941,13 @@ mod tests {
         let src = source(&[("app", vec![cand("1.0.0", &[])])]);
         let installed = BTreeMap::new();
         let pins = Pins::new();
-        let err = match resolve_with(&[dep("app", ">=1.0")], &installed, Some(&pins), &src) {
+        let err = match resolve_with(
+            &[dep("app", ">=1.0")],
+            &installed,
+            Some(&pins),
+            &src,
+            &BTreeMap::new(),
+        ) {
             Ok(_) => panic!("expected unpinned package to be rejected"),
             Err(err) => err,
         };

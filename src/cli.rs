@@ -60,6 +60,11 @@ pub enum Command {
     /// requested by name, not held) that no installed package still requires.
     #[command(visible_alias = "ar")]
     Autoremove,
+    /// Choose which package provides a contested capability or bin (e.g. `grm prefer awk gawk`).
+    /// With no arguments, lists preferences and currently contested capabilities. Note that
+    /// `install --locked` still pins concrete providers from the lockfile; a changed preference
+    /// cannot override a locked install.
+    Prefer(PreferArgs),
 
     // -----------------------------------------------------------------------
     // Query
@@ -208,6 +213,17 @@ pub struct PackageArg {
     /// Names of the installed packages to operate on.
     #[arg(num_args = 1..)]
     pub packages: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct PreferArgs {
+    /// Capability or bin name to set the preferred provider for. Omit to list preferences.
+    pub capability: Option<String>,
+    /// Package that should provide the capability.
+    pub package: Option<String>,
+    /// Clear the preference for the capability instead of setting one.
+    #[arg(long)]
+    pub unset: bool,
 }
 
 #[derive(Debug, Args)]

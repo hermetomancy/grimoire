@@ -23,6 +23,8 @@ mod man;
 mod model;
 mod nu;
 mod paths;
+mod prefer;
+mod preferences;
 mod process_lock;
 mod profile;
 mod progress;
@@ -87,6 +89,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Owns(args) => files::owns(args),
         Command::Provides(args) => files::provides(args),
         Command::Autoremove => install::autoremove(),
+        Command::Prefer(args) => prefer::prefer(args),
         Command::Rollback => {
             let id = profile::rollback()?;
             println!("rolled back to generation {id}");
@@ -150,6 +153,8 @@ fn mutates_install_root(command: &Command) -> bool {
         // another `grm` holds the lock.
         Command::Install(args) => !args.dry_run,
         Command::Upgrade(args) => !args.dry_run,
+        // Bare `grm prefer` only lists; setting or unsetting mutates state and may relink.
+        Command::Prefer(args) => args.capability.is_some(),
         Command::Remove(_)
         | Command::Clean
         | Command::Hold(_)
