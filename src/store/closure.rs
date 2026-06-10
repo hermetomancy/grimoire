@@ -12,7 +12,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::{build, paths, store, toolchain};
+use crate::{build, build::toolchain, store, util::paths};
 
 /// Computes the content address (store hash) of the package named `name`, resolving its runtime
 /// dependency closure to store hashes.

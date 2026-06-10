@@ -11,9 +11,11 @@ use std::{
 
 use crate::{
     cli::{OwnsArgs, PackageArg, ProvidesArgs},
+    cmd::query,
     install,
     model::PackageState,
-    paths, query, solve,
+    solve,
+    util::paths,
 };
 
 /// Lists every file an installed package placed in the store, as paths relative to its store

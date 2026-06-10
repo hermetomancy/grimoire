@@ -9,14 +9,16 @@ use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
 use crate::{
+    catalog::signing,
+    catalog::sync_common,
     cli::{TomeAddArgs, TomeRemoveArgs, TomeUpdateArgs},
     model::{
         AddendumManifest, AddendumState, Catalog, PackageMetadata, validate_tome_name,
         validate_tome_ref, validate_tome_url,
     },
     nu::nuon_io,
-    progress::{report, status},
-    signing, sync_common, tome,
+    tome,
+    util::progress::{report, status},
 };
 
 const MANIFEST: &str = "addendum.nuon";

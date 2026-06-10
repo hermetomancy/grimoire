@@ -14,8 +14,8 @@ use std::{collections::BTreeSet, fs, path::PathBuf};
 
 use crate::{
     model::PackageState,
-    paths,
-    progress::{report, status, success},
+    util::paths,
+    util::progress::{report, status, success},
 };
 
 mod gc;

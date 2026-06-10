@@ -5,7 +5,9 @@
 
 use anyhow::{Context, Result};
 
-use crate::{install, lock, paths, profile, sync_common, tome, toolchain};
+use crate::{
+    build::toolchain, catalog::sync_common, install, install::lock, profile, tome, util::paths,
+};
 
 const CORE_USERLAND_TOOLS_LINUX: &[&str] = &[
     "linux-headers",

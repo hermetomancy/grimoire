@@ -8,7 +8,9 @@ use std::{
     path::PathBuf,
 };
 
-use crate::{cli::PackageArg, model::PackageState, nu::nuon_io, paths, profile, progress::report};
+use crate::{
+    cli::PackageArg, model::PackageState, nu::nuon_io, profile, util::paths, util::progress::report,
+};
 
 use super::*;
 

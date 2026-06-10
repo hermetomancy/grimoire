@@ -15,8 +15,8 @@ use crate::{
     install,
     model::{IndexEntry, PackageIndex, validate_package_name},
     nu::{nuon_io, runtime::EmbeddedNuRuntime},
-    paths,
-    progress::{report, status},
+    util::paths,
+    util::progress::{report, status},
 };
 
 /// Builds a tome's rune into a `.tar.zst` inside the tome's git-untracked publish directory
@@ -274,7 +274,7 @@ pub(crate) fn read_archive_index_entry(path: &Path) -> Result<(String, IndexEntr
         anyhow::anyhow!("archive {} is missing .grimoire/rune.rn", path.display())
     })?;
 
-    let store_hash = crate::closure::store_hash_for_rune_bytes(&rune_bytes, &metadata)
+    let store_hash = crate::store::closure::store_hash_for_rune_bytes(&rune_bytes, &metadata)
         .with_context(|| format!("compute store hash for {}", path.display()))?;
 
     let archive_hash = crate::archive::archive_hash(path)

@@ -13,8 +13,8 @@ use std::{
 use walkdir::WalkDir;
 
 use crate::{
-    paths,
-    progress::{report, status},
+    util::paths,
+    util::progress::{report, status},
 };
 
 pub fn clean() -> Result<()> {

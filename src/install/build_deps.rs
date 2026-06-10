@@ -7,7 +7,8 @@ use std::{collections::HashSet, path::PathBuf};
 use crate::{
     build, fetch,
     model::{Dependency, PackageState},
-    paths, solve,
+    solve,
+    util::paths,
 };
 
 use super::*;
@@ -66,7 +67,7 @@ pub(crate) fn ensure_build_deps_installed_inner(
                 Some(&sub.store_hash),
             )
         } else if let Some(rune) = &step.rune {
-            let store_hash = crate::closure::store_hash_for_rune(rune)
+            let store_hash = crate::store::closure::store_hash_for_rune(rune)
                 .with_context(|| format!("cannot compute store hash for `{}`", step.name))?;
             let metadata =
                 build::read_rune_metadata(rune, build::tome_name_for_rune(rune)?.as_deref())?;

@@ -15,7 +15,9 @@ use crate::{
     install,
     model::{PackageMetadata, PackageState, parse_version_relaxed},
     nu::runtime::EmbeddedNuRuntime,
-    paths, progress, solve, tome,
+    solve, tome,
+    util::paths,
+    util::progress,
 };
 
 #[derive(Debug, Clone)]

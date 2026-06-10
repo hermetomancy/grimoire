@@ -7,7 +7,7 @@
 use anyhow::{Context, Result, bail};
 use std::{env, fs, os::unix::ffi::OsStrExt, path::Path};
 
-use crate::paths;
+use crate::util::paths;
 
 pub fn setup() -> Result<()> {
     if env::var_os("GRIMOIRE_ROOT").is_some() {

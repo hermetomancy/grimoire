@@ -225,19 +225,22 @@ hard violators are split into directory modules with re-export roots —
 and `src/profile/` (generations/gc/linking). Every `src/` file is now under
 the hard limit.
 
+The root is regrouped too: `src/cmd/` (thin CLI handlers: clean, doctor,
+files, man, prefer, query, setup), `src/util/` (fs_util, paths,
+process_lock, progress, time_util), `src/store/` (+closure), `src/build/`
+(+toolchain), `src/catalog/` (sync_common, addendum, signing), `lock` →
+`src/install/`, `preferences` → `src/model/`, and the tests-only `index.rs`
+folded into `model/index.rs` — 14 modules at the root, down from ~30.
+
 Remaining:
 
 - **Soft-limit residents** (split when next touched, per §3.6):
-  `solve/resolver.rs` (~690, ~380 of it tests), `build.rs` (~660),
+  `solve/resolver.rs` (~690, ~380 of it tests), `build/mod.rs` (~660),
   `model/catalog.rs` (~540), `install/mod.rs` (~540).
-- **Group related leaf modules** under directories:
-  - `src/archive/` — `pack.rs`, `unpack.rs`, `validate.rs` (split from
-    current monolithic `archive/mod.rs` and `archive/pack.rs`)
-  - `src/fs/` or `src/util/` — `fs_util.rs`, `paths.rs`, `time_util.rs`
+- **Split `src/archive/`** into `pack.rs`, `unpack.rs`, `validate.rs` (from
+  the current monolithic `archive/mod.rs` and `archive/pack.rs`).
 - **Move test helpers out of `tests/smoke.rs`** into a `tests/support/`
   directory so the integration test file stops growing unbounded.
-- Target: every file within AGENTS.md §3.6 limits (≤500 preferred, 800 hard)
-  and no more than ~10 modules at `src/` root level.
 
 ### 6. Security and correctness audit fixes (post-subagent review)
 

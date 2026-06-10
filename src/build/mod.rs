@@ -5,6 +5,8 @@
 //! with embedded metadata. The output is the same archive shape a prebuilt download produces, so
 //! installs behave identically whether a package came from source or a binary repo.
 
+pub(crate) mod toolchain;
+
 use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
 use std::{
@@ -16,15 +18,16 @@ use std::{
 use xz2::read::XzDecoder;
 
 use crate::{
-    addendum, archive,
+    archive,
     archive::pack,
+    catalog::addendum,
     cli::BuildArgs,
     fetch::{self, FetchedSource},
     install,
     nu::runtime::{BuildDirs, BuildEnv, EmbeddedNuRuntime},
-    paths,
-    progress::{report, status},
-    tome, toolchain,
+    tome,
+    util::paths,
+    util::progress::{report, status},
 };
 
 /// Core packages whose `bin/` directories are always prepended to build PATH.
@@ -165,7 +168,7 @@ pub fn build_package(
     let rune = resolve_rune(package)?;
     tome::verify_rune(&rune).with_context(|| format!("verify rune signature for {package}"))?;
     let target = target.map_or_else(paths::target_triple, |t| t.to_string());
-    let store_hash = crate::closure::store_hash_for_rune_with_target(&rune, &target)?;
+    let store_hash = crate::store::closure::store_hash_for_rune_with_target(&rune, &target)?;
     let metadata = EmbeddedNuRuntime.package_metadata(&rune)?;
     let build_deps = metadata.deps.build_for(&target);
 

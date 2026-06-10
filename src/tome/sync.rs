@@ -8,11 +8,11 @@ use std::{
 };
 
 use crate::{
+    catalog::sync_common,
     cli::{TomeAddArgs, TomeRemoveArgs, TomeUpdateArgs},
     model::{Catalog, TomeState, validate_tome_name, validate_tome_ref, validate_tome_url},
     nu::{nuon_io, runtime::EmbeddedNuRuntime},
-    progress::report,
-    sync_common,
+    util::progress::report,
 };
 
 use super::*;

@@ -8,7 +8,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{model::PackageState, paths, preferences::Preferences, progress::report};
+use crate::{
+    model::PackageState, model::preferences::Preferences, util::paths, util::progress::report,
+};
 
 /// Subdirectories scanned for human-facing artifacts (man pages, completions, desktop files)
 /// that are not explicitly declared as bins.

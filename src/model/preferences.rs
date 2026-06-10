@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use nu_protocol::{Record, Span, Value};
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
-use crate::{model::expect_string_map, nu::nuon_io, paths};
+use crate::{model::expect_string_map, nu::nuon_io, util::paths};
 
 #[derive(Debug, Clone, Default)]
 pub struct Preferences {

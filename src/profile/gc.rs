@@ -4,7 +4,7 @@
 use anyhow::{Context, Result, bail};
 use std::{collections::BTreeSet, fs, path::Path};
 
-use crate::{paths, progress::report};
+use crate::{util::paths, util::progress::report};
 
 use super::*;
 
