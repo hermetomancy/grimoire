@@ -1,0 +1,170 @@
+name: Release
+
+# Tag-triggered release pipeline: builds `grm` for every tier-1 target, packages each as
+# grm-<version>-<grimoire-triple>.tar.zst (the same triple naming and compression the store
+# uses), generates SHA256SUMS, minisign-signs every artifact — the exact trust model tomes
+# use — and publishes a GitHub release.
+#
+# Required secret: MINISIGN_SECRET_KEY — a *passwordless* minisign secret key
+# (generate with `minisign -GW`), so signing is non-interactive. Publish the matching
+# public key in the README; users verify with `minisign -Vm <file> -P <pubkey>`.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The tag must match Cargo.toml; a mismatched release is worse than a failed one.
+  preflight:
+    name: version check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches Cargo.toml version
+        run: |
+          crate_version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$crate_version" != "$tag_version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $crate_version" >&2
+            exit 1
+          fi
+
+  build:
+    name: build (${{ matrix.triple }})
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - triple: macos-aarch64-darwin
+            target: aarch64-apple-darwin
+            runner: macos-latest
+          - triple: macos-x86_64-darwin
+            target: x86_64-apple-darwin
+            runner: macos-latest
+          - triple: linux-x86_64-musl
+            target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - triple: linux-aarch64-musl
+            target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl toolchain
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Ensure zstd (macOS)
+        if: startsWith(matrix.runner, 'macos')
+        run: command -v zstd >/dev/null || brew install zstd
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          name="grm-${version}-${{ matrix.triple }}"
+          mkdir -p "dist/${name}"
+          cp "target/${{ matrix.target }}/release/grm" LICENSE README.md "dist/${name}/"
+          tar -C dist -cf - "${name}" | zstd -19 -o "dist/${name}.tar.zst"
+          rm -r "dist/${name}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: grm-${{ matrix.triple }}
+          path: dist/*.tar.zst
+          if-no-files-found: error
+
+  # No hosted FreeBSD runners: build inside a nested VM and let the workspace sync back.
+  build-freebsd:
+    name: build (freebsd-x86_64-unknown)
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build in a FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.2"
+          usesh: true
+          envs: "GITHUB_REF_NAME"
+          prepare: |
+            pkg install -y curl zstd
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain stable
+          run: |
+            . "$HOME/.cargo/env"
+            cargo build --release --locked
+            version="${GITHUB_REF_NAME#v}"
+            name="grm-${version}-freebsd-x86_64-unknown"
+            mkdir -p "dist/${name}"
+            cp target/release/grm LICENSE README.md "dist/${name}/"
+            tar -C dist -cf - "${name}" | zstd -19 -o "dist/${name}.tar.zst"
+            rm -r "dist/${name}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: grm-freebsd-x86_64-unknown
+          path: dist/*.tar.zst
+          if-no-files-found: error
+
+  release:
+    name: sign + publish
+    needs: [build, build-freebsd]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum *.tar.zst > SHA256SUMS
+
+      - name: Sign artifacts
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            echo "MINISIGN_SECRET_KEY is not configured; refusing to publish unsigned" >&2
+            exit 1
+          fi
+          sudo apt-get update && sudo apt-get install -y minisign
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > /tmp/minisign.key
+          cd dist
+          for file in *.tar.zst SHA256SUMS; do
+            minisign -S -s /tmp/minisign.key -m "$file" \
+              -t "grimoire release ${GITHUB_REF_NAME}"
+          done
+          rm -f /tmp/minisign.key
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "grimoire $GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/*.tar.zst dist/*.minisig dist/SHA256SUMS
