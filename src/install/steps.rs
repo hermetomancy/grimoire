@@ -153,18 +153,16 @@ impl Installer {
         // A pinned content address is the lock's recipe identity: it folds in the rune,
         // sources, dependency closure, and build environment. Drift fails here, before any
         // fetch or build, with a message that names what the lock expected.
-        if let (Some(pins), Some(computed)) = (&self.pins, step.store_hash.as_deref()) {
-            if let Some(pinned) = pins
+        if let (Some(pins), Some(computed)) = (&self.pins, step.store_hash.as_deref())
+            && let Some(pinned) = pins
                 .get(&step.name)
                 .and_then(|pin| pin.store_hash.as_deref())
-            {
-                if pinned != computed {
-                    bail!(
-                        "store hash for `{}` drifted from the lock (recipe, sources, or build                          environment changed): locked {pinned}, computed {computed}",
-                        step.name
-                    );
-                }
-            }
+            && pinned != computed
+        {
+            bail!(
+                "store hash for `{}` drifted from the lock (recipe, sources, or build                          environment changed): locked {pinned}, computed {computed}",
+                step.name
+            );
         }
         let installed = self
             .realize_step(&step)
@@ -194,10 +192,10 @@ impl Installer {
             };
         }
 
-        if let Some(hash) = &step.store_hash {
-            if let Some(sub) = step.substitutes.iter().find(|s| s.store_hash == *hash) {
-                return self.install_substitute(sub);
-            }
+        if let Some(hash) = &step.store_hash
+            && let Some(sub) = step.substitutes.iter().find(|s| s.store_hash == *hash)
+        {
+            return self.install_substitute(sub);
         }
 
         match &step.rune {

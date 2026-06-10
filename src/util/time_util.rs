@@ -19,7 +19,8 @@ pub fn format_timestamp(ts: u64) -> String {
     year += cycles * 400;
     days -= cycles * DAYS_IN_400_YEARS;
     loop {
-        let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+        let is_leap =
+            (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
         let year_days = if is_leap { 366 } else { 365 };
         if days < year_days {
             break;
@@ -28,7 +29,7 @@ pub fn format_timestamp(ts: u64) -> String {
         year += 1;
     }
 
-    let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    let is_leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
     let mut month = 1u64;
     for (i, &dim) in DAYS_IN_MONTH.iter().enumerate() {
         let dim = if i == 1 && is_leap { 29 } else { dim };

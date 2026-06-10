@@ -115,10 +115,10 @@ pub fn build_env_for_target(
     if is_musl_target(target) {
         env.extend(musl_static_env_vars());
     }
-    if target.starts_with("macos-") {
-        if let Some(sdk) = toolchain::macos_sdk_path() {
-            env.push(("SDKROOT".to_string(), sdk));
-        }
+    if target.starts_with("macos-")
+        && let Some(sdk) = toolchain::macos_sdk_path()
+    {
+        env.push(("SDKROOT".to_string(), sdk));
     }
 
     if core_compiler_boundary_available()? {

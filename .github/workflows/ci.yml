@@ -41,6 +41,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The example-tome integration tests drive the real tome-example submodule.
+          submodules: true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -52,7 +55,7 @@ jobs:
         run: cargo test
 
   msrv:
-    name: MSRV (1.85)
+    name: MSRV (1.93.1)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -60,7 +63,7 @@ jobs:
       - name: Install MSRV toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.85"
+          toolchain: "1.93.1"
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -76,6 +79,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - name: Run tests in a FreeBSD VM
         uses: vmactions/freebsd-vm@v1

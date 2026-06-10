@@ -161,15 +161,13 @@ pub fn news_command(name: Option<String>, all: bool) -> Result<()> {
             }
             println!();
         }
-        if !all {
-            if let Some(newest) = items.last().map(|item| item.id.clone()) {
-                if unread(&items, tome.last_seen_news.as_deref())
-                    .last()
-                    .is_some()
-                {
-                    advance_marker(tome, newest)?;
-                }
-            }
+        if !all
+            && let Some(newest) = items.last().map(|item| item.id.clone())
+            && unread(&items, tome.last_seen_news.as_deref())
+                .last()
+                .is_some()
+        {
+            advance_marker(tome, newest)?;
         }
     }
     if !printed_any {

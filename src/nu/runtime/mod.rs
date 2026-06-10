@@ -181,8 +181,16 @@ mod tests {
 
     #[test]
     fn reads_package_metadata_from_rune() -> Result<()> {
+        // Self-contained: a rune written to a temp dir, so the test does not depend on the
+        // tome-example submodule being checked out (CI checkouts may omit submodules).
+        let dir = tempfile::tempdir()?;
+        let rune = dir.path().join("hello.rn");
+        std::fs::write(
+            &rune,
+            "export const package = {\n  name: \"hello\"\n  version: \"0.1.0\"\n}\n\nexport def build [ctx] {\n  null\n}\n",
+        )?;
         let runtime = EmbeddedNuRuntime;
-        let metadata = runtime.package_metadata(Path::new("tome-example/runes/hello.rn"))?;
+        let metadata = runtime.package_metadata(&rune)?;
 
         assert_eq!(metadata.name, "hello");
         assert_eq!(metadata.version, "0.1.0");

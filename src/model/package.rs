@@ -272,10 +272,11 @@ pub fn resolve_target_conditional(
         result.extend(default.clone());
     }
     let os = target.split('-').next().unwrap_or("");
-    if !os.is_empty() && os != "default" {
-        if let Some(os_bins) = map.get(os) {
-            result.extend(os_bins.clone());
-        }
+    if !os.is_empty()
+        && os != "default"
+        && let Some(os_bins) = map.get(os)
+    {
+        result.extend(os_bins.clone());
     }
     if let Some(target_bins) = map.get(target) {
         result.extend(target_bins.clone());

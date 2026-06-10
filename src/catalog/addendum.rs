@@ -111,13 +111,13 @@ pub fn apply_patches(
         verify_addendum(&cache, &state)
             .with_context(|| format!("verify addendum `{}`", state.name))?;
 
-        if let Ok(head) = tome::git::head_commit(&cache) {
-            if head.as_ref() != state.checked_commit.as_ref() {
-                report(&format!(
-                    "warning: addendum `{}` is stale; run `grm addendum update {}`",
-                    state.name, state.name
-                ));
-            }
+        if let Ok(head) = tome::git::head_commit(&cache)
+            && head.as_ref() != state.checked_commit.as_ref()
+        {
+            report(&format!(
+                "warning: addendum `{}` is stale; run `grm addendum update {}`",
+                state.name, state.name
+            ));
         }
 
         let manifest =

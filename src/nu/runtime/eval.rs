@@ -133,10 +133,10 @@ pub(crate) fn eval_nu_source(
     };
     let (tail, log_path) = streamer.finish();
 
-    if outcome.is_ok() {
-        if let Some(path) = &log_path {
-            let _ = fs::remove_file(path);
-        }
+    if outcome.is_ok()
+        && let Some(path) = &log_path
+    {
+        let _ = fs::remove_file(path);
     }
 
     outcome.map_err(|error| build_failure(&error, &tail, log_path.as_deref()))?;
@@ -288,11 +288,11 @@ pub(crate) fn spawn_build_log_reader(
                 tail.push_back(line.clone());
             }
             progress::build_log_line(&line);
-            if let Some(file) = &log_file {
-                if let Ok(mut f) = file.lock() {
-                    let _ = writeln!(f, "{}", line);
-                    let _ = f.flush();
-                }
+            if let Some(file) = &log_file
+                && let Ok(mut f) = file.lock()
+            {
+                let _ = writeln!(f, "{}", line);
+                let _ = f.flush();
             }
         }
     })
