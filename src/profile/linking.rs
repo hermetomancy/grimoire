@@ -155,10 +155,10 @@ pub(crate) fn clone_or_hard_link(src: &Path, dst: &Path) -> Result<()> {
 /// Whether an error indicates that CoW cloning is unsupported on this filesystem.
 pub(crate) fn is_cow_unsupported(err: &anyhow::Error) -> bool {
     if let Some(io_err) = err.root_cause().downcast_ref::<std::io::Error>() {
-        matches!(
-            io_err.raw_os_error(),
-            Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP) | Some(libc::EINVAL)
-        )
+        // Comparisons rather than a match: ENOTSUP and EOPNOTSUPP are the same value on
+        // Linux (a match arm would be unreachable there) but distinct on macOS/BSD.
+        let code = io_err.raw_os_error();
+        code == Some(libc::ENOTSUP) || code == Some(libc::EOPNOTSUPP) || code == Some(libc::EINVAL)
     } else {
         false
     }

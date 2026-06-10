@@ -89,15 +89,15 @@ pub fn owns(args: OwnsArgs) -> Result<()> {
 /// same relative path. `share/` trees are linked by existence (and collide silently, last
 /// package wins), so every package containing the path is reported.
 fn owners_of_profile_path<'a>(states: &'a [PackageState], rel: &Path) -> Vec<&'a PackageState> {
-    if let Ok(bin) = rel.strip_prefix("bin") {
-        if let Some(name) = bin.to_str() {
-            let owners: Vec<&PackageState> = states
-                .iter()
-                .filter(|state| state.bins.contains_key(name))
-                .collect();
-            if !owners.is_empty() {
-                return owners;
-            }
+    if let Ok(bin) = rel.strip_prefix("bin")
+        && let Some(name) = bin.to_str()
+    {
+        let owners: Vec<&PackageState> = states
+            .iter()
+            .filter(|state| state.bins.contains_key(name))
+            .collect();
+        if !owners.is_empty() {
+            return owners;
         }
     }
     states

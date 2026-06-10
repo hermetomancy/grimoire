@@ -93,10 +93,10 @@ impl Resolver<'_> {
     /// Otherwise return the dep unchanged.
     fn expand_capability(&mut self, dep: &Dependency) -> Dependency {
         // Fast path: literal package exists
-        if let Ok(cands) = self.source.candidates(&dep.name) {
-            if !cands.is_empty() {
-                return dep.clone();
-            }
+        if let Ok(cands) = self.source.candidates(&dep.name)
+            && !cands.is_empty()
+        {
+            return dep.clone();
         }
         let providers = self.capabilities.providers(&dep.name);
         if providers.is_empty() {
@@ -122,14 +122,14 @@ impl Resolver<'_> {
         }
         // Prefer an already-installed provider that satisfies the version constraint.
         for provider in &providers {
-            if let Some(version) = self.installed.get(provider) {
-                if dep.req.matches(version) {
-                    return Dependency {
-                        name: provider.clone(),
-                        req: dep.req.clone(),
-                        platform: dep.platform.clone(),
-                    };
-                }
+            if let Some(version) = self.installed.get(provider)
+                && dep.req.matches(version)
+            {
+                return Dependency {
+                    name: provider.clone(),
+                    req: dep.req.clone(),
+                    platform: dep.platform.clone(),
+                };
             }
         }
         // No installed provider matches; use the first available one. With multiple uninstalled
@@ -172,21 +172,21 @@ impl Resolver<'_> {
         // Prefer reusing an already-installed satisfying version: it emits no step and its deps
         // are already present (so they are not expanded). If reuse leads to a dead end further
         // down the worklist, fall through and try fresh candidates instead.
-        if let Some(version) = self.installed.get(name) {
-            if req.matches(version) {
-                let mut trial = chosen.clone();
-                trial.insert(
-                    name.clone(),
-                    ChosenNode {
-                        version: version.clone(),
-                        deps: Vec::new(),
-                        route: None,
-                    },
-                );
-                if self.resolve_list(rest, &mut trial).is_ok() {
-                    *chosen = trial;
-                    return Ok(());
-                }
+        if let Some(version) = self.installed.get(name)
+            && req.matches(version)
+        {
+            let mut trial = chosen.clone();
+            trial.insert(
+                name.clone(),
+                ChosenNode {
+                    version: version.clone(),
+                    deps: Vec::new(),
+                    route: None,
+                },
+            );
+            if self.resolve_list(rest, &mut trial).is_ok() {
+                *chosen = trial;
+                return Ok(());
             }
         }
 

@@ -76,12 +76,12 @@ pub(crate) fn prune_registry() -> Result<()> {
     let mut registry = read_registry().unwrap_or_default();
     let before = registry.len();
     registry.retain(|g| generation_dir(g.id).map(|d| d.exists()).unwrap_or(false));
-    if registry.len() != before {
-        if let Err(e) = write_registry(&registry) {
-            report(&format!(
-                "warning: could not write generations registry: {e}"
-            ));
-        }
+    if registry.len() != before
+        && let Err(e) = write_registry(&registry)
+    {
+        report(&format!(
+            "warning: could not write generations registry: {e}"
+        ));
     }
     Ok(())
 }
@@ -91,10 +91,10 @@ pub(crate) fn collect_referenced_paths(to_retain: &BTreeSet<u64>) -> Result<BTre
     for id in to_retain {
         let dir = generation_dir(*id)?;
         let meta = dir.join("gen.nuon");
-        if meta.exists() {
-            if let Ok(g) = read_generation_metadata(&dir) {
-                referenced.extend(g.store_paths);
-            }
+        if meta.exists()
+            && let Ok(g) = read_generation_metadata(&dir)
+        {
+            referenced.extend(g.store_paths);
         }
     }
     Ok(referenced)
@@ -158,12 +158,12 @@ pub fn delete_generation(id: u64) -> Result<()> {
     let mut registry = read_registry().unwrap_or_default();
     let before = registry.len();
     registry.retain(|g| g.id != id);
-    if registry.len() != before {
-        if let Err(e) = write_registry(&registry) {
-            report(&format!(
-                "warning: could not write generations registry: {e}"
-            ));
-        }
+    if registry.len() != before
+        && let Err(e) = write_registry(&registry)
+    {
+        report(&format!(
+            "warning: could not write generations registry: {e}"
+        ));
     }
 
     report(&format!("deleted generation {id}"));

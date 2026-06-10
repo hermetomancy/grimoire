@@ -63,12 +63,10 @@ pub fn list_generations() -> Result<Vec<Generation>> {
 
     generations.sort_by_key(|b| std::cmp::Reverse(b.id));
 
-    if changed {
-        if let Err(e) = write_registry(&generations) {
-            report(&format!(
-                "warning: could not write generations registry: {e}"
-            ));
-        }
+    if changed && let Err(e) = write_registry(&generations) {
+        report(&format!(
+            "warning: could not write generations registry: {e}"
+        ));
     }
 
     Ok(generations)

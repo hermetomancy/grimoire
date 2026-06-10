@@ -297,10 +297,10 @@ fn set_spinner_message(message: &str) {
 
 /// Clears the transient spinner (if any) so it does not interleave with a line written to stdout.
 fn clear_spinner() {
-    if let Ok(mut guard) = SPINNER.lock() {
-        if let Some(bar) = guard.take() {
-            bar.finish_and_clear();
-        }
+    if let Ok(mut guard) = SPINNER.lock()
+        && let Some(bar) = guard.take()
+    {
+        bar.finish_and_clear();
     }
 }
 

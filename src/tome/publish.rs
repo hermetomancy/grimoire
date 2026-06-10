@@ -113,23 +113,22 @@ pub(crate) fn build_runes(
     let current_target = target.unwrap_or(&host_target);
     let mut any_built = false;
     for name in rune_names {
-        if !force {
-            if let Some(existing) = catalog
+        if !force
+            && let Some(existing) = catalog
                 .entries
                 .values()
                 .find(|e| e.name == *name && e.target == current_target)
-            {
-                let archive_path = dist_dir.join(format!(
-                    "{}-{}-{}.tar.zst",
-                    existing.name, existing.version, existing.target
+        {
+            let archive_path = dist_dir.join(format!(
+                "{}-{}-{}.tar.zst",
+                existing.name, existing.version, existing.target
+            ));
+            if archive_path.exists() {
+                status(&format!(
+                    "skipping {} {} (already built; pass --force to rebuild)",
+                    existing.name, existing.version
                 ));
-                if archive_path.exists() {
-                    status(&format!(
-                        "skipping {} {} (already built; pass --force to rebuild)",
-                        existing.name, existing.version
-                    ));
-                    continue;
-                }
+                continue;
             }
         }
         let (store_hash, entry, archive) =

@@ -2,7 +2,7 @@
 name = "grimoire"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.93.1"
 description = "A fast, git-native, POSIX package manager with reproducible installs and composable customization layers."
 license = "MIT"
 repository = "https://github.com/grimoire-of-glass/grimoire"

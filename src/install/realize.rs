@@ -209,13 +209,13 @@ pub(crate) fn resolve_store_dir(
             metadata.name
         );
     }
-    if let Some(expected) = expected_hash {
-        if hash != expected {
-            bail!(
-                "package `{}` embeds store hash `{hash}` but its inputs hash to `{expected}`",
-                metadata.name
-            );
-        }
+    if let Some(expected) = expected_hash
+        && hash != expected
+    {
+        bail!(
+            "package `{}` embeds store hash `{hash}` but its inputs hash to `{expected}`",
+            metadata.name
+        );
     }
     Ok((paths::store_root()?.join(basename), hash.to_string()))
 }
