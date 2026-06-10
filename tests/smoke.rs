@@ -3308,6 +3308,190 @@ fn solver_resolves_capability_dependency_through_preference() {
 }
 
 #[test]
+fn post_install_notes_surface_and_replay() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let dist = tome.join("dist");
+
+    // A binary archive whose embedded metadata carries static notes.
+    let pkg = "notepkg";
+    let archive_name = format!("{pkg}-0.1.0-{triple}.tar.zst");
+    let package_nuon = format!(
+        "{{format: 1, name: \"{pkg}\", version: \"0.1.0\", target: \"{triple}\", store_path: \"{}\", bins: {{default: {{{pkg}: \"bin/{pkg}\"}}}}, deps: {{ runtime: [] }}, notes: [\"run notepkg --init once\"]}}\n",
+        fake_store_basename_with_hash(pkg, "0.1.0", "cafef00dcafef00d-note")
+    );
+    fs::create_dir_all(&dist).unwrap();
+    let archive_path = dist.join(&archive_name);
+    let mut builder = open_archive(&archive_path);
+    append_file(
+        &mut builder,
+        ".grimoire/package.nuon",
+        package_nuon.as_bytes(),
+        0o644,
+    );
+    append_file(
+        &mut builder,
+        &format!("bin/{pkg}"),
+        format!("#!/usr/bin/env sh\nprintf '{pkg}\\n'\n").as_bytes(),
+        0o755,
+    );
+    finish_archive(builder);
+    let hash = sha256_file(&archive_path);
+    let entries = vec![format!(
+        "    \"cafef00dcafef00d-note\": {{ name: \"{pkg}\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{hash}\", runtime_deps: []}}"
+    )];
+    write_dep_tome(tome, "notecore", &entries);
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add notecore",
+    );
+    assert_success(&run(root, &["tome", "update", "notecore"]), "tome update");
+
+    let install = run(root, &["install", pkg]);
+    assert_success(&install, "install notepkg");
+    let out = stdout(&install);
+    assert!(
+        out.contains("notes for notepkg:") && out.contains("run notepkg --init once"),
+        "install should print the package notes after committing: {out}"
+    );
+
+    assert!(
+        state_text(root, pkg).contains("run notepkg --init once"),
+        "notes must persist in package state: {}",
+        state_text(root, pkg)
+    );
+    let info = run(root, &["info", pkg]);
+    assert_success(&info, "info notepkg");
+    assert!(
+        stdout(&info).contains("notes:") && stdout(&info).contains("run notepkg --init once"),
+        "info should replay the notes: {}",
+        stdout(&info)
+    );
+}
+
+#[test]
+fn build_returned_notes_merge_with_static_notes() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    // The rune declares a static note and its build returns a dynamic one; both must reach
+    // the installed state and the post-install report.
+    let rune_dir = TempDir::new().unwrap();
+    let rune = rune_dir.path().join("dualnote.rn");
+    fs::write(
+        &rune,
+        "export const package = {\n  name: 'dualnote'\n  version: '0.1.0'\n  notes: ['static note']\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'dualnote\\\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'dualnote')\n  { bins: { default: { dualnote: 'bin/dualnote' } }, notes: ['dynamic note'] }\n}\n",
+    )
+    .unwrap();
+
+    let install = run(root, &["install", rune.to_str().unwrap()]);
+    assert_success(&install, "install dualnote from rune");
+    let out = stdout(&install);
+    assert!(
+        out.contains("static note") && out.contains("dynamic note"),
+        "both static and build-returned notes should print: {out}"
+    );
+    let state = state_text(root, "dualnote");
+    assert!(
+        state.contains("static note") && state.contains("dynamic note"),
+        "both notes must persist in state: {state}"
+    );
+}
+
+#[test]
+fn tome_news_surfaces_once_after_updates() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let dist = tome.join("dist");
+
+    let entries = vec![dep_archive_entry(
+        &dist,
+        "newspkg",
+        "0.1.0",
+        &triple,
+        "[]",
+        "cafef00dcafef00d-nws",
+    )];
+    write_dep_tome(tome, "newscore", &entries);
+    let news_dir = tome.join("news");
+    fs::create_dir_all(&news_dir).unwrap();
+    fs::write(
+        news_dir.join("2026-01-01-alpha.md"),
+        "# Alpha note\n\nbody-alpha\n",
+    )
+    .unwrap();
+
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add newscore",
+    );
+    // First sync: the pre-existing backlog is marked seen silently, not dumped.
+    let first = run(root, &["tome", "update", "newscore"]);
+    assert_success(&first, "first tome update");
+    assert!(
+        !stdout(&first).contains("Alpha note"),
+        "first sync must not dump the news backlog: {}",
+        stdout(&first)
+    );
+
+    // A new item published after the add is printed exactly once.
+    fs::write(
+        news_dir.join("2026-06-10-beta.md"),
+        "# Beta note\n\nbody-beta\n",
+    )
+    .unwrap();
+    let second = run(root, &["tome", "update", "newscore"]);
+    assert_success(&second, "second tome update");
+    assert!(
+        stdout(&second).contains("news [newscore] Beta note")
+            && stdout(&second).contains("body-beta"),
+        "new news item should print on update: {}",
+        stdout(&second)
+    );
+    let third = run(root, &["tome", "update", "newscore"]);
+    assert_success(&third, "third tome update");
+    assert!(
+        !stdout(&third).contains("Beta note"),
+        "already-seen news must not repeat: {}",
+        stdout(&third)
+    );
+
+    // `tome news --all` re-reads everything without disturbing the marker.
+    let all = run(root, &["tome", "news", "newscore", "--all"]);
+    assert_success(&all, "tome news --all");
+    assert!(
+        stdout(&all).contains("Alpha note") && stdout(&all).contains("Beta note"),
+        "tome news --all should print every item: {}",
+        stdout(&all)
+    );
+    let unread = run(root, &["tome", "news", "newscore"]);
+    assert_success(&unread, "tome news");
+    assert!(
+        stdout(&unread).contains("no unread news"),
+        "everything is seen: {}",
+        stdout(&unread)
+    );
+
+    let state = fs::read_to_string(root.join("state").join("tomes").join("newscore.nuon")).unwrap();
+    assert!(
+        state.contains("2026-06-10-beta.md"),
+        "seen marker must be recorded in tome state: {state}"
+    );
+}
+
+#[test]
 fn files_owns_and_provides_resolve_package_contents() {
     let root = TempDir::new().unwrap();
     let root = root.path();

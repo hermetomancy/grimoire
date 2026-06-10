@@ -44,6 +44,9 @@ struct Installer {
     /// summary and to detect the "nothing to do" case where every requested package was already
     /// satisfied and the solver produced no steps.
     installed_now: Vec<String>,
+    /// Post-install notes collected from each installed package, printed once after the whole
+    /// command commits so they land after the progress output instead of interleaved with it.
+    notes: Vec<(String, Vec<String>)>,
     /// When true, every install path stops after planning and prints the plan to stdout —
     /// no fetches, no builds, no state writes. Wired from `--dry-run` / `--explain`.
     dry_run: bool,
@@ -56,6 +59,7 @@ impl Installer {
             pins,
             building: HashSet::new(),
             installed_now: Vec::new(),
+            notes: Vec::new(),
             dry_run: false,
         }
     }
@@ -136,6 +140,7 @@ pub fn install(args: InstallArgs) -> Result<()> {
         return Ok(());
     }
     installer.finalize()?;
+    installer.report_notes();
     Ok(())
 }
 
@@ -165,6 +170,8 @@ pub(crate) struct InstalledArchive {
     pub name: String,
     pub version: Version,
     pub runtime_deps: Vec<Dependency>,
+    /// Post-install notes from the embedded metadata, surfaced once the whole command lands.
+    pub notes: Vec<String>,
 }
 
 /// Verifies, extracts, and promotes the resolved archive into the install root, then rebuilds
@@ -287,6 +294,7 @@ pub(crate) fn install_store_only(
         name: metadata.name,
         version,
         runtime_deps,
+        notes: metadata.notes,
     })
 }
 
@@ -648,7 +656,21 @@ impl Installer {
 
     fn record(&mut self, installed: InstalledArchive) {
         self.installed_now.push(installed.name.clone());
+        if !installed.notes.is_empty() {
+            self.notes.push((installed.name.clone(), installed.notes));
+        }
         self.installed.insert(installed.name, installed.version);
+    }
+
+    /// Prints the collected post-install notes, one block per package. Called after the new
+    /// generation is active so the notes are the last thing the user reads.
+    fn report_notes(&self) {
+        for (name, lines) in &self.notes {
+            report(&format!("notes for {name}:"));
+            for line in lines {
+                report(&format!("  {line}"));
+            }
+        }
     }
 }
 
@@ -834,6 +856,7 @@ pub fn upgrade_packages(names: &[String]) -> Result<()> {
     // leaves the upgrades committed and the sweep partial, same containment as `remove`.
     autoremove_orphans(pre_upgrade_deps)?;
     installer.finalize()?;
+    installer.report_notes();
     Ok(())
 }
 
@@ -1388,6 +1411,7 @@ fn write_state(
         requested: previous_requested,
         provides: metadata.provides.clone(),
         libs: metadata.libs.clone(),
+        notes: metadata.notes.clone(),
     };
 
     // Capture the prior state so a later failure can restore it.
@@ -1536,6 +1560,7 @@ mod tests {
             requested,
             provides: Vec::new(),
             libs: Vec::new(),
+            notes: Vec::new(),
         }
     }
 

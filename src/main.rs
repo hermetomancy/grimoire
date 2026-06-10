@@ -129,6 +129,7 @@ fn run(cli: Cli) -> Result<()> {
             TomeCommand::Update(args) => tome::update(args),
             TomeCommand::Remove(args) => tome::remove(args),
             TomeCommand::List => tome::list(),
+            TomeCommand::News(args) => tome::news::news_command(args.name, args.all),
         },
         Command::Addendum { command } => match command {
             cli::AddendumCommand::Add(args) => addendum::add(args),
@@ -168,6 +169,8 @@ fn mutates_install_root(command: &Command) -> bool {
         Command::Tome { command } => match command {
             TomeCommand::Add(_) | TomeCommand::Update(_) | TomeCommand::Remove(_) => true,
             TomeCommand::Build(args) => args.all,
+            // Default `tome news` advances the seen marker; `--all` is a pure read.
+            TomeCommand::News(args) => !args.all,
             _ => false,
         },
         Command::Addendum { command } => matches!(

@@ -182,6 +182,7 @@ mod tests {
             build_flags: BTreeMap::new(),
             provides: Vec::new(),
             libs: Vec::new(),
+            notes: Vec::new(),
         }
     }
 

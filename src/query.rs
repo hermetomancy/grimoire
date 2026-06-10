@@ -245,6 +245,12 @@ fn print_installed(state: &PackageState) {
             println!("    {name}: {path}");
         }
     }
+    if !state.notes.is_empty() {
+        println!("  notes:");
+        for note in &state.notes {
+            println!("    {note}");
+        }
+    }
 }
 
 fn print_available(package: &TomePackage) {
@@ -262,6 +268,12 @@ fn print_available(package: &TomePackage) {
         println!("  bins:");
         for (name, path) in &bins {
             println!("    {name}: {path}");
+        }
+    }
+    if !package.metadata.notes.is_empty() {
+        println!("  notes:");
+        for note in &package.metadata.notes {
+            println!("    {note}");
         }
     }
 }

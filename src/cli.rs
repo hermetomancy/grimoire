@@ -294,6 +294,19 @@ pub enum TomeCommand {
     /// List configured tomes with their URLs and tracked refs.
     #[command(visible_alias = "ls")]
     List,
+    /// Read tome news items (`news/*.md` in the tome repository). By default prints unread
+    /// items in full and marks them seen; `--all` re-reads everything without touching the
+    /// seen marker.
+    News(TomeNewsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct TomeNewsArgs {
+    /// Tome to read news from. If omitted, reads news from every configured tome.
+    pub name: Option<String>,
+    /// Print every news item, including already-seen ones, without advancing the marker.
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Debug, Args)]
