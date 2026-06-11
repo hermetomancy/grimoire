@@ -3,9 +3,10 @@
 A rune is a Nushell module exporting `package` (inert metadata) and `build` (the build
 function). The binding rules live in [AGENTS.md §7](../AGENTS.md); this is the full reference.
 
-This document is the contract: it is kept in lockstep with the parser (`src/model/package.rs`)
-and the build context (`src/nu/runtime/mod.rs`). If you change either, update this file in the
-same commit (AGENTS.md §15.4).
+This document is the contract: it is kept in lockstep with the parser
+(`src/model/package.rs`), the build context (`src/nu/runtime/mod.rs`), and the rune command
+set (`src/nu/commands/`). If you change any of them, update this file in the same commit
+(AGENTS.md §15.4).
 
 ## Structure
 

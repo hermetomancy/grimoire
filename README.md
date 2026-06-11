@@ -11,7 +11,8 @@
 ---
 
 Grimoire is a self-contained Rust package manager that embeds Nushell to run package recipes
-called **runes**. It installs verified prebuilt packages when they exist, builds from source
+called **runes** — a [curated subset](docs/rune-authoring.md) of the language, so recipe
+behavior stays stable across Nushell releases. It installs verified prebuilt packages when they exist, builds from source
 when they do not, and manages package catalogs as ordinary git repositories called **tomes**.
 
 ## Highlights

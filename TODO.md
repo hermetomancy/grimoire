@@ -97,6 +97,18 @@ pointing to the active generation's `bin/`. Current user-local
 
 ## Completed
 
+### Dependency minimization
+
+- `nu-command` replaced by a curated rune command set (`src/nu/commands/`):
+  run-external/complete adapted from upstream, purpose-built fs/path/str/
+  filter commands, with the subset documented as a contract in
+  rune-authoring.md. gix trimmed to clone/open/head_commit features; unused
+  `hex` dep and `clap/env` feature dropped. Release dependency graph:
+  ~535 → 359 unique crates. The gix reqwest-transport replacement was
+  evaluated and deliberately declined (would duplicate ~500 lines of
+  upstream clone orchestration to remove pure-Rust crates that
+  cross-compile cleanly).
+
 ### Semantic rollback and lockfile restore
 
 - Every generation embeds a full `state.nuon` snapshot; `grm switch`/`rollback`
