@@ -18,10 +18,38 @@ use crate::{
     },
     nu::nuon_io,
     util::paths,
-    util::progress::{report, status, success},
+    util::progress::{faint, report, status, strong, success},
 };
 
 use super::*;
+
+/// How a package reached the store, named in its result line so the user can tell a verified
+/// prebuilt from a local source build at a glance.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum InstallOrigin {
+    /// A published substitute fetched from a binhost and verified against the signed index.
+    Prebuilt,
+    /// Built from its rune on this machine.
+    Source,
+    /// A local archive handed to `grm install` directly.
+    LocalArchive,
+    /// A build dependency cached store-only, never linked into the profile.
+    BuildDep,
+    /// A `grm tome build` product installed store-only for subsequent builds.
+    TomeBuild,
+}
+
+impl InstallOrigin {
+    fn describe(self) -> &'static str {
+        match self {
+            InstallOrigin::Prebuilt => "prebuilt, checksum verified",
+            InstallOrigin::Source => "built from source",
+            InstallOrigin::LocalArchive => "local archive",
+            InstallOrigin::BuildDep => "build dependency, store-only",
+            InstallOrigin::TomeBuild => "built, store-only",
+        }
+    }
+}
 
 /// The installed package's name, concrete version, and the runtime dependencies declared in its
 /// embedded metadata, returned so the caller can record it as installed and resolve those deps.
@@ -41,8 +69,9 @@ pub(crate) fn install_archive(
     archive_path: &Path,
     expected_hash: Option<String>,
     expected_store_hash: Option<&str>,
+    origin: InstallOrigin,
 ) -> Result<InstalledArchive> {
-    let installed = install_store_only(archive_path, expected_hash, expected_store_hash)?;
+    let installed = install_store_only(archive_path, expected_hash, expected_store_hash, origin)?;
     let mut tx = Transaction::new();
     rebuild_lock(&mut tx)?;
     tx.commit();
@@ -56,6 +85,7 @@ pub(crate) fn install_store_only(
     archive_path: &Path,
     expected_hash: Option<String>,
     expected_store_hash: Option<&str>,
+    origin: InstallOrigin,
 ) -> Result<InstalledArchive> {
     if !archive_path.exists() {
         bail!(
@@ -137,10 +167,9 @@ pub(crate) fn install_store_only(
     }
 
     report(&format!(
-        "installed {} {} into {}",
-        metadata.name,
-        metadata.version,
-        root.display()
+        "{} {}",
+        strong(&format!("{} {}", metadata.name, metadata.version)),
+        faint(&format!("— {}", origin.describe()))
     ));
     let version = parse_version_relaxed(&metadata.version)
         .with_context(|| format!("package version `{}` is not valid semver", metadata.version))?;

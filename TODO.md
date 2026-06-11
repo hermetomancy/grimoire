@@ -97,6 +97,22 @@ pointing to the active generation's `bin/`. Current user-local
 
 ## Completed
 
+### CLI output restyle
+
+- One result-line vocabulary in `util/progress` (AGENTS.md §12.4): `✦` confirmations, `!`
+  cautions (`warn`), `strong`/`faint` inline emphasis, `→` for version transitions; piped
+  output stays plain.
+- Install result lines name their origin (`prebuilt, checksum verified` / `built from
+  source` / `local archive` / store-only variants) via `InstallOrigin` threaded through
+  `install_archive`/`install_store_only`.
+- Mutations end with `generation N is now current`; rollback/switch print `switching profile
+  to generation N…` plus a timed `restored/switched in X.XXs — nothing was rebuilt, nothing
+  was lost`; duplicate confirmations from `main.rs` removed.
+- `grm generations` (new `src/cmd/generations.rs`) diffs each generation against its
+  predecessor (`+ added 1.2.3, ~ moved 1.0 → 1.1, - removed`, snapshot-aware) and ends with
+  `profiles/current → gen-N · every change is undoable`.
+- Major-version upgrades warn persistently with a `grm hold` hint.
+
 ### Dependency minimization
 
 - `nu-command` replaced by a curated rune command set (`src/nu/commands/`):
