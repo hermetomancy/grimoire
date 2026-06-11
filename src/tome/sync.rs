@@ -126,7 +126,7 @@ pub(crate) fn sync_report_line(
         )
     } else {
         format!(
-            "updated tome {name} ({ref_name} {} -> {})",
+            "updated tome {name} ({ref_name} {} → {})",
             short_commit(from),
             short_commit(to)
         )

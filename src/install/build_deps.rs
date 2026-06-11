@@ -65,6 +65,7 @@ pub(crate) fn ensure_build_deps_installed_inner(
                 &archive,
                 Some(sub.entry.archive_hash.clone()),
                 Some(&sub.store_hash),
+                InstallOrigin::BuildDep,
             )
         } else if let Some(rune) = &step.rune {
             let store_hash = crate::store::closure::store_hash_for_rune(rune)
@@ -85,7 +86,12 @@ pub(crate) fn ensure_build_deps_installed_inner(
                 &env,
                 &store_hash,
             )?;
-            install_store_only(&result.archive, None, Some(&result.store_hash))
+            install_store_only(
+                &result.archive,
+                None,
+                Some(&result.store_hash),
+                InstallOrigin::BuildDep,
+            )
         } else {
             bail!(
                 "no installable prebuilt or source for `{}` {}",

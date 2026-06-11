@@ -146,6 +146,7 @@ pub fn upgrade(args: UpgradeArgs) -> Result<()> {
     }
 
     let names: Vec<String> = to_upgrade.into_iter().map(|(name, _, _)| name).collect();
+    progress::status(&format!("upgrading {} package(s)…", names.len()));
     install::upgrade_packages(&names)
 }
 
@@ -162,7 +163,7 @@ fn collect_upgrades(
             bail!("package `{name}` is not installed");
         };
         if !explicit && held.get(name).copied().unwrap_or(false) {
-            progress::report(&format!(
+            progress::warn(&format!(
                 "{name} is held; skipping (use `grm unhold {name}` to allow)"
             ));
             continue;
@@ -170,7 +171,17 @@ fn collect_upgrades(
         match solve::newest_available(name)? {
             Some(newest) if newest > *current => {
                 if !dry_run {
-                    progress::status(&format!("upgrading {name} {current} -> {newest}"));
+                    // A major bump deserves a persistent line the user can act on; routine
+                    // bumps just feed the transient progress spinner.
+                    if newest.major > current.major {
+                        progress::warn(&format!(
+                            "{} {} — major version (next time: grm hold {name})",
+                            progress::strong(name),
+                            progress::strong(&format!("{current} → {newest}")),
+                        ));
+                    } else {
+                        progress::status(&format!("upgrading {name} {current} → {newest}"));
+                    }
                 }
                 to_upgrade.push((name.clone(), current.clone(), newest));
             }
@@ -183,7 +194,7 @@ fn collect_upgrades(
 fn print_upgrade_plan(to_upgrade: &[(String, Version, Version)]) {
     println!("plan:");
     for (name, current, newest) in to_upgrade {
-        println!("  ~ {name} {current} -> {newest}");
+        println!("  ~ {name} {current} → {newest}");
     }
 }
 

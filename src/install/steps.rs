@@ -63,7 +63,12 @@ impl Installer {
             self.dry_run_local_root(package)?;
             return Ok(package.to_owned());
         }
-        let installed = install_archive(&PathBuf::from(package), sha256, None)?;
+        let installed = install_archive(
+            &PathBuf::from(package),
+            sha256,
+            None,
+            InstallOrigin::LocalArchive,
+        )?;
         let name = installed.name.clone();
         let runtime = installed.runtime_deps.clone();
         self.record(installed);
@@ -241,6 +246,7 @@ impl Installer {
             &archive,
             Some(sub.entry.archive_hash.clone()),
             Some(&sub.store_hash),
+            InstallOrigin::Prebuilt,
         )
     }
 
@@ -293,7 +299,12 @@ impl Installer {
                 &env,
                 store_hash,
             )?;
-            install_archive(&result.archive, expected_hash, Some(&result.store_hash))
+            install_archive(
+                &result.archive,
+                expected_hash,
+                Some(&result.store_hash),
+                InstallOrigin::Source,
+            )
         })();
         self.building.remove(&metadata.name);
         result
