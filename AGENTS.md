@@ -109,6 +109,10 @@ rules:
 4. Wrap variables in parentheses in external command position — `($ctx.prefix)`, never
    `$ctx.prefix` — or Nushell can silently mis-parse them.
 5. Platform logic lives in the rune via `ctx.target` prefix matches; Rust only supplies the triple.
+6. Runes target a **curated command subset**, not full Nushell: the core language plus the
+   commands registered in `src/nu/commands/` (table in rune-authoring.md). Anything
+   unregistered does not exist in the rune engine; needing more means extending the set and
+   its documentation together, not reaching for `nu-command`.
 
 ## 8. Store-only installation
 
@@ -204,11 +208,12 @@ next to it — and the code probably wants a better name.
    a refactor, or a documentation update. The commit message describes *what* changed and
    *why*; the diff shows *how*.
 2. **Update TODO.md as you go.** Completed items move to **Completed**; new work lands in
-   **Active work** or **Remaining**; obsolete todos are deleted. TODO.md is the canonical
-   remaining-work list — keep it honest.
+   **Remaining** (or **Planned**/**Deferred decisions** when it is not release-blocking);
+   obsolete todos are deleted. TODO.md is the canonical remaining-work list — keep it honest.
 3. **Update AGENTS.md when the rules change.** New invariants and conventions are documented
    here immediately. AGENTS.md is a living document, not a fossil.
 4. **Keep docs/rune-authoring.md in lockstep with the code.** It is the authoring contract:
    any change to the `package` schema (`src/model/package.rs` parsing), the `ctx` record or
-   build environment (`src/nu/runtime/`), or the build-return handling updates the reference
-   in the same commit. A stale field table is worse than none — authors trust it verbatim.
+   build environment (`src/nu/runtime/`), or the rune command set (`src/nu/commands/`)
+   updates the reference in the same commit. A stale field table is worse than none —
+   authors trust it verbatim.
