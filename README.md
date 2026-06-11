@@ -125,7 +125,7 @@ export const package = {
     build: { default: ["make"] }
     runtime: []
   }
-  bins: { widget: "bin/widget" }
+  bins: { default: { widget: "bin/widget" } }
 }
 
 export def build [ctx] {
@@ -156,7 +156,7 @@ profiles:
 │       ├── bin/
 │       └── share/man/
 ├── state/packages/<name>.nuon       # installed state
-└── grimoire.lock.nuon               # lockfile
+└── state/grimoire.lock.nuon         # lockfile
 ```
 
 Put `~/.grimoire/profiles/current/bin` on your PATH.
