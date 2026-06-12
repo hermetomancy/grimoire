@@ -18,7 +18,7 @@ use crate::{
     },
     nu::nuon_io,
     util::paths,
-    util::progress::{faint, report, status, strong, success},
+    util::progress::{accent, faint, report, status, success},
 };
 
 use super::*;
@@ -52,6 +52,33 @@ impl InstallOrigin {
             InstallOrigin::TomeBuild => "built, store-only",
         }
     }
+}
+
+/// Refuses to bring `name` into the linked set while a *linked* installed package conflicts
+/// with it (symmetrically; packages `name` replaces are exempt). Store-only packages on
+/// either side never conflict — they are cache, not environment. Shared by archive
+/// realization and by requested-promotion, which links an already-present store-only
+/// package without re-realizing it.
+pub(crate) fn refuse_linked_conflicts(
+    states: &[PackageState],
+    name: &str,
+    conflicts: &[String],
+    replaces: &[String],
+) -> Result<()> {
+    let linked_names = linked_set(states);
+    if let Some(conflict) = states.iter().find(|state| {
+        state.name != name
+            && linked_names.contains(&state.name)
+            && !replaces.contains(&state.name)
+            && (conflicts.contains(&state.name) || state.conflicts.iter().any(|c| c == name))
+    }) {
+        bail!(
+            "cannot install `{name}`: it conflicts with installed `{}`; remove `{}` first",
+            conflict.name,
+            conflict.name
+        );
+    }
+    Ok(())
 }
 
 /// The installed package's name, concrete version, and the runtime dependencies declared in its
@@ -156,9 +183,12 @@ pub(crate) fn install_store_only(
     let metadata = PackageMetadata::from_value(nuon_io::parse_nuon(&metadata_text)?, true)?;
     validate_target(&metadata, &paths::target_triple())?;
 
-    // Conflicts gate linked installs only: store-only packages (build deps, tome-build
-    // products) never enter the environment, so coexistence in the store is fine. The check
-    // is symmetric, and packages this one replaces are exempt — a replacer routinely
+    // Conflicts gate linked installs only — on *both* sides: store-only packages (build
+    // deps, tome-build products) never enter the environment, so coexistence in the store
+    // is fine whichever direction it happens. The canonical case is a package conflicting
+    // with its own bootstrap seed (`rust` vs `rust-stage0`): the seed sits store-only as a
+    // build dep and must not block the linked install of the package it just built. The
+    // check is symmetric, and packages this one replaces are exempt — a replacer routinely
     // conflicts with what it supersedes, and migration removes it in the same transaction.
     let linked = matches!(
         origin,
@@ -168,20 +198,12 @@ pub(crate) fn install_store_only(
             | InstallOrigin::LocalArchive
     );
     if linked {
-        let states = installed_states()?;
-        if let Some(conflict) = states.iter().find(|state| {
-            state.name != metadata.name
-                && !metadata.replaces.contains(&state.name)
-                && (metadata.conflicts.contains(&state.name)
-                    || state.conflicts.contains(&metadata.name))
-        }) {
-            bail!(
-                "cannot install `{}`: it conflicts with installed `{}`; remove `{}` first",
-                metadata.name,
-                conflict.name,
-                conflict.name
-            );
-        }
+        refuse_linked_conflicts(
+            &installed_states()?,
+            &metadata.name,
+            &metadata.conflicts,
+            &metadata.replaces,
+        )?;
     }
 
     let root = paths::install_root()?;
@@ -236,7 +258,11 @@ pub(crate) fn install_store_only(
             let Some(old_state) = installed_old else {
                 continue;
             };
-            report(&format!("{} replaces {old}; removing {old}", metadata.name));
+            report(&format!(
+                "{} {}",
+                accent(&metadata.name),
+                faint(&format!("replaces {old}; removing {old}"))
+            ));
             let removed = remove_one(old)?;
             if old_state.requested || removed.requested {
                 set_requested(&metadata.name, true, false)?;
@@ -250,7 +276,7 @@ pub(crate) fn install_store_only(
 
     report(&format!(
         "{} {}",
-        strong(&format!("{} {}", metadata.name, metadata.version)),
+        accent(&format!("{} {}", metadata.name, metadata.version)),
         faint(&format!("— {}", origin.describe()))
     ));
     let version = parse_version_relaxed(&metadata.version)

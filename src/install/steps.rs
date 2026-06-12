@@ -27,9 +27,16 @@ impl Installer {
         plan.compute_store_hashes()
             .with_context(|| format!("compute store hashes for `{name}`"))?;
         if self.dry_run {
-            print_plan(&plan);
+            // Print the full picture first — steps, migrations, build-dep closure — then
+            // surface the same refusals a real run would hit, so a dry run that would fail
+            // says so after showing why.
+            print_plan(&plan, &self.installed)?;
+            refuse_plan_conflicts(&plan)?;
             return Ok(name.to_owned());
         }
+        // Linked-coexistence is decided here, before anything is fetched or built; the
+        // realize-time gate remains as defense against stale plans.
+        refuse_plan_conflicts(&plan)?;
         self.execute_plan(plan)?;
         Ok(name.to_owned())
     }
@@ -102,6 +109,7 @@ impl Installer {
         }
         let plan = solve::resolve(&combined, &self.installed, self.pins.as_ref())?;
         print_plan_body(&plan);
+        print_plan_consequences(&plan, &self.installed)?;
         Ok(())
     }
 
@@ -129,6 +137,7 @@ impl Installer {
         }
         let plan = solve::resolve(&runtime, &self.installed, self.pins.as_ref())?;
         print_plan_body(&plan);
+        print_plan_consequences(&plan, &self.installed)?;
         Ok(())
     }
 
@@ -288,6 +297,14 @@ impl Installer {
             build::read_rune_metadata(rune, build::tome_name_for_rune(rune)?.as_deref())?;
         validate_targets(&metadata, &paths::target_triple())
             .with_context(|| format!("validate target for `{}`", metadata.name))?;
+        // A source root that conflicts with the linked environment must refuse *before*
+        // the (potentially hour-long) build, not when the finished archive installs.
+        refuse_linked_conflicts(
+            &installed_states()?,
+            &metadata.name,
+            &metadata.conflicts,
+            &metadata.replaces,
+        )?;
         if !self.building.insert(metadata.name.clone()) {
             bail!("build dependency cycle involving `{}`", metadata.name);
         }
@@ -317,7 +334,7 @@ impl Installer {
                     InstallOrigin::CachedBuild,
                 );
             }
-            let build_deps = metadata.deps.build_for(&paths::target_triple());
+            let build_deps = build::effective_build_deps(rune, &metadata, &paths::target_triple())?;
             self.install_deps(&build_deps)
                 .with_context(|| format!("install build dependencies for `{}`", metadata.name))?;
             let env = build::build_env_for_target(
@@ -331,10 +348,12 @@ impl Installer {
                 &env,
                 store_hash,
             )?;
+            // Group siblings already landed in the build output dir; their own install
+            // steps reuse them via `cached_build_archive` instead of rebuilding the group.
             install_archive(
-                &result.archive,
+                &result.primary.archive,
                 expected_hash,
-                Some(&result.store_hash),
+                Some(&result.primary.store_hash),
                 InstallOrigin::Source,
             )
         })();
@@ -354,9 +373,12 @@ impl Installer {
     /// generation is active so the notes are the last thing the user reads.
     pub(super) fn report_notes(&self) {
         for (name, lines) in &self.notes {
-            report(&format!("notes for {name}:"));
+            report(&format!(
+                "notes for {}:",
+                crate::util::progress::strong(name)
+            ));
             for line in lines {
-                report(&format!("  {line}"));
+                crate::util::progress::note(&format!("  {line}"));
             }
         }
     }

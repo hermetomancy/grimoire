@@ -66,6 +66,8 @@ pub(crate) fn resolve_with(
 pub(crate) struct Route {
     rune: Option<PathBuf>,
     substitutes: Vec<Substitute>,
+    conflicts: Vec<String>,
+    replaces: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -119,7 +121,7 @@ impl Resolver<'_> {
                     platform: dep.platform.clone(),
                 };
             }
-            progress::report(&format!(
+            progress::warn(&format!(
                 "preference for `{}` names `{preferred}`, which no longer provides it; ignoring",
                 dep.name
             ));
@@ -222,6 +224,8 @@ impl Resolver<'_> {
                     route: Some(Route {
                         rune: candidate.rune.clone(),
                         substitutes: candidate.substitutes.clone(),
+                        conflicts: candidate.conflicts.clone(),
+                        replaces: candidate.replaces.clone(),
                     }),
                 },
             );
@@ -298,6 +302,8 @@ pub(crate) fn visit(
             substitutes: route.substitutes.clone(),
             store_hash: None,
             runtime_deps: node.deps.clone(),
+            conflicts: route.conflicts.clone(),
+            replaces: route.replaces.clone(),
         });
     }
     Ok(())
