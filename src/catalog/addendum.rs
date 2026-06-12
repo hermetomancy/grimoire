@@ -111,14 +111,24 @@ pub fn apply_patches(
         verify_addendum(&cache, &state)
             .with_context(|| format!("verify addendum `{}`", state.name))?;
 
-        if let Ok(head) = tome::git::head_commit(&cache)
+        // A cache whose HEAD drifted from the recorded commit means the patches on disk are
+        // not the set the last update verified — and patches change store hashes, so applying
+        // them silently would address packages with content nobody synced. Re-sync to
+        // converge instead of warning and continuing with stale data; if the sync cannot
+        // succeed, fail loudly rather than patch from an unaccounted-for cache.
+        let state = if let Ok(head) = tome::git::head_commit(&cache)
             && head.as_ref() != state.checked_commit.as_ref()
         {
             report(&format!(
-                "warning: addendum `{}` is stale; run `grm addendum update {}`",
-                state.name, state.name
+                "addendum `{}` cache drifted from its recorded commit; re-syncing",
+                state.name
             ));
-        }
+            sync_addendum_cache(&state)
+                .with_context(|| format!("re-sync drifted addendum `{}`", state.name))?;
+            sync_common::load_catalog::<AddendumState>(&state.name)?
+        } else {
+            state
+        };
 
         let manifest =
             read_manifest(&cache).with_context(|| format!("read addendum `{}`", state.name))?;

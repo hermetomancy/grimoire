@@ -204,8 +204,8 @@ fn addendum_staleness_warning_on_use() {
     assert_success(&first, "info succeeds on first use");
     let first_text = format!("{}{}", stdout(&first), stderr(&first));
     assert!(
-        !first_text.contains("is stale"),
-        "fresh addendum should not warn: {first_text}"
+        !first_text.contains("re-syncing"),
+        "fresh addendum should not re-sync: {first_text}"
     );
 
     // Modify the addendum source and simulate staleness by making the recorded commit diverge.
@@ -219,13 +219,19 @@ fn addendum_staleness_warning_on_use() {
     state = state.replace('}', ", checked_commit: \"deadbeef\"}");
     fs::write(&state_path, state).unwrap();
 
-    // Second info call should warn about staleness.
+    // Second info call detects the drifted cache and converges by re-syncing — and the
+    // re-synced patch set is what gets applied, not the stale one.
     let second = run(root, &["info", "stalepkg"]);
-    assert_success(&second, "info succeeds but warns");
+    assert_success(&second, "info succeeds after re-sync");
     let second_text = format!("{}{}", stdout(&second), stderr(&second));
     assert!(
-        second_text.contains("is stale"),
-        "stale addendum should warn: {second_text}"
+        second_text.contains("re-syncing"),
+        "drifted addendum must announce the re-sync: {second_text}"
+    );
+    assert!(
+        stdout(&second).contains("0.2.0"),
+        "the re-synced addendum's patch must be applied: {}",
+        stdout(&second)
     );
 }
 

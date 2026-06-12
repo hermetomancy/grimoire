@@ -144,21 +144,39 @@ pub(crate) fn ensure_build_deps_installed_inner(
 }
 
 /// Finds an installed package that satisfies the dependency `name`.
-/// First tries an exact package name match, then falls back to capability resolution
-/// (any installed package whose `bins` map contains `name` as a key).
+/// First tries an exact package name match, then falls back to capability resolution: an
+/// installed package whose `bins` map contains `name` as a key, or that lists it in
+/// `provides`. With several installed providers the `grm prefer` choice wins, else the first
+/// by name (states are sorted) — the same order the solver and the closure walker use, so
+/// the linked set and `<DEP>_PREFIX` env vars agree with resolution.
 pub(crate) fn find_dep_state<'a>(
     states: &'a [PackageState],
     name: &str,
 ) -> Option<&'a PackageState> {
-    states
+    if let Some(state) = states.iter().find(|state| state.name == name) {
+        return Some(state);
+    }
+    let providers: Vec<&PackageState> = states
         .iter()
-        .find(|state| state.name == name)
-        .or_else(|| states.iter().find(|state| state.bins.contains_key(name)))
-        .or_else(|| {
-            states
-                .iter()
-                .find(|state| state.provides.iter().any(|p| p == name))
-        })
+        .filter(|state| state.bins.contains_key(name) || state.provides.iter().any(|p| p == name))
+        .collect();
+    match providers.len() {
+        0 => None,
+        1 => Some(providers[0]),
+        _ => {
+            let preferences = crate::model::preferences::Preferences::load().unwrap_or_default();
+            preferences
+                .providers
+                .get(name)
+                .and_then(|preferred| {
+                    providers
+                        .iter()
+                        .find(|state| &state.name == preferred)
+                        .copied()
+                })
+                .or(Some(providers[0]))
+        }
+    }
 }
 
 pub(crate) fn push_bin_dirs(dirs: &mut Vec<PathBuf>, state: &PackageState) {

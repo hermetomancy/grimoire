@@ -95,7 +95,35 @@ pub fn update_all_configured() -> Result<()> {
 }
 
 pub fn remove(args: TomeRemoveArgs) -> Result<()> {
+    // Installed packages whose runes resolve from this tome keep working, but silently lose
+    // drift detection and the ability to be rebuilt from source ("no rune → treated fresh").
+    // Warn before the cache disappears, while resolution can still attribute them.
+    let orphaned = installed_from_tome(&args.name).unwrap_or_default();
+    if !orphaned.is_empty() {
+        report(&format!(
+            "! installed packages resolve from tome `{}`: {} — they stay installed but can \
+             no longer be rebuilt or drift-checked until a tome provides their runes again",
+            args.name,
+            orphaned.join(", ")
+        ));
+    }
     sync_common::remove_catalog::<TomeState>(&args.name, false)
+}
+
+/// Names of installed packages whose rune currently resolves from the cache of tome `name`.
+fn installed_from_tome(name: &str) -> Result<Vec<String>> {
+    let cache = sync_common::cache_path(TomeState::SUBDIR, name)?;
+    // find_rune canonicalizes its result; match like-for-like (e.g. /var vs /private/var).
+    let cache = cache.canonicalize().unwrap_or(cache);
+    let mut names = Vec::new();
+    for state in crate::install::installed_states()? {
+        if let Ok(Some(rune)) = crate::build::find_rune(&state.name)
+            && rune.starts_with(&cache)
+        {
+            names.push(state.name);
+        }
+    }
+    Ok(names)
 }
 
 pub fn load_tomes() -> Result<Vec<TomeState>> {
