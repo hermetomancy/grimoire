@@ -239,9 +239,10 @@ next to it — and the code probably wants a better name.
 1. **Commits are scoped and coherent.** A single commit changes one thing: a feature, a bugfix,
    a refactor, or a documentation update. The commit message describes *what* changed and
    *why*; the diff shows *how*.
-2. **Update TODO.md as you go.** Completed items move to **Completed**; new work lands in
-   **Remaining** (or **Planned**/**Deferred decisions** when it is not release-blocking);
-   obsolete todos are deleted. TODO.md is the canonical remaining-work list — keep it honest.
+2. **Update TODO.md as you go.** Completed items are *deleted* — the record of finished
+   work is git history, not the todo list. New work lands in **Remaining** (or
+   **Known debts**/**Planned** when it is not release-blocking); obsolete todos are
+   deleted too. TODO.md is the canonical remaining-work list — keep it honest and short.
 3. **Update AGENTS.md when the rules change.** New invariants and conventions are documented
    here immediately. AGENTS.md is a living document, not a fossil.
 4. **Keep docs/rune-authoring.md in lockstep with the code.** It is the authoring contract:
