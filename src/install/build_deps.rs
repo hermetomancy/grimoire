@@ -106,6 +106,17 @@ pub(crate) fn ensure_build_deps_installed_inner(
                 .with_context(|| format!("cannot compute store hash for `{}`", step.name))?;
             let metadata =
                 build::read_rune_metadata(rune, build::tome_name_for_rune(rune)?.as_deref())?;
+            // Reuse a verified cached build of these exact inputs instead of rebuilding.
+            if let Some(archive) = cached_build_archive(&metadata, &store_hash) {
+                let installed_archive =
+                    install_store_only(&archive, None, Some(&store_hash), InstallOrigin::BuildDep)
+                        .with_context(|| {
+                            format!("store-only install `{}` {}", step.name, step.version)
+                        })?;
+                installed.insert(installed_archive.name, installed_archive.version);
+                building.remove(&step.name);
+                continue;
+            }
             let build_deps = metadata.deps.build_for(&paths::target_triple());
             ensure_build_deps_installed_inner(&build_deps, building)
                 .with_context(|| format!("install build dependencies for `{}`", step.name))?;

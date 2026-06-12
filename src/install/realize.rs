@@ -31,6 +31,8 @@ pub(crate) enum InstallOrigin {
     Prebuilt,
     /// Built from its rune on this machine.
     Source,
+    /// A previously built archive reused from `cache/builds`, content address verified.
+    CachedBuild,
     /// A local archive handed to `grm install` directly.
     LocalArchive,
     /// A build dependency cached store-only, never linked into the profile.
@@ -44,6 +46,7 @@ impl InstallOrigin {
         match self {
             InstallOrigin::Prebuilt => "prebuilt, checksum verified",
             InstallOrigin::Source => "built from source",
+            InstallOrigin::CachedBuild => "built from source, cached archive",
             InstallOrigin::LocalArchive => "local archive",
             InstallOrigin::BuildDep => "build dependency, store-only",
             InstallOrigin::TomeBuild => "built, store-only",
@@ -159,7 +162,10 @@ pub(crate) fn install_store_only(
     // conflicts with what it supersedes, and migration removes it in the same transaction.
     let linked = matches!(
         origin,
-        InstallOrigin::Prebuilt | InstallOrigin::Source | InstallOrigin::LocalArchive
+        InstallOrigin::Prebuilt
+            | InstallOrigin::Source
+            | InstallOrigin::CachedBuild
+            | InstallOrigin::LocalArchive
     );
     if linked {
         let states = installed_states()?;
@@ -262,6 +268,32 @@ pub(crate) fn install_store_only(
         runtime_deps,
         notes: metadata.notes,
     })
+}
+
+/// A previously built archive in `cache/builds` whose embedded content address matches
+/// `store_hash`, if any. The reuse gets the same acceptance check a substitute gets —
+/// `resolve_store_dir` cross-checks the embedded store basename against the expected hash at
+/// install — so a cached archive is as trustworthy as a verified prebuilt. Any read or
+/// mismatch problem is a miss (the build runs normally), never an error.
+pub(crate) fn cached_build_archive(
+    metadata: &PackageMetadata,
+    store_hash: &str,
+) -> Option<PathBuf> {
+    let path = paths::build_output_dir().ok()?.join(format!(
+        "{}-{}-{}.tar.zst",
+        metadata.name,
+        metadata.version,
+        paths::target_triple()
+    ));
+    if !path.exists() {
+        return None;
+    }
+    let embedded = inspect_archive(&path).ok()?;
+    if embedded.name != metadata.name || embedded.version != metadata.version {
+        return None;
+    }
+    let (_, embedded_hash) = resolve_store_dir(&embedded, None).ok()?;
+    (embedded_hash == store_hash).then_some(path)
 }
 
 pub(crate) fn inspect_archive(path: &Path) -> Result<PackageMetadata> {

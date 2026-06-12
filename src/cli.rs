@@ -358,6 +358,9 @@ pub struct TomeBuildArgs {
     /// Rebuild runes even if they already exist in the index.
     #[arg(long, conflicts_with = "index")]
     pub force: bool,
+    /// Fail the build when the purity lint finds baked host paths (default: warn only).
+    #[arg(long)]
+    pub strict: bool,
 }
 
 #[derive(Debug, Args)]

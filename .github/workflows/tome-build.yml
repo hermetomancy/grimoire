@@ -1,0 +1,51 @@
+# Builds every rune in tome-core from source on each supported platform — the end-to-end
+# proof that the catalog and the bootstrap toolchain actually work together.
+#
+# Currently manual (workflow_dispatch): the core bootstrap (TODO.md "Bootstrap stage 1") has
+# not landed on every platform yet, and a multi-hour llvm+rust build per push would be
+# noise. Once bootstrap lands, promote this to a release-blocking gate: trigger on tags
+# alongside release.yml and drop `continue-on-error`.
+#
+# tome-core is intentionally not in this repository (gitignored); set TOME_REPO to wherever
+# the canonical core tome lives.
+
+name: tome-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      tome_repo:
+        description: Git URL of the core tome repository
+        required: false
+        default: https://github.com/grimoire-of-glass/core
+
+env:
+  GRIMOIRE_ROOT: ${{ github.workspace }}/grimoire-root
+
+jobs:
+  build-all:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    # Manual proving runs should report per-platform results without failing the whole
+    # dispatch; remove when this becomes a release gate.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build grm
+        run: cargo build --release
+      - name: Clone the core tome
+        run: git clone --depth 1 "${{ inputs.tome_repo }}" core-tome
+      - name: Build every rune
+        run: |
+          mkdir -p "$GRIMOIRE_ROOT"
+          ./target/release/grm tome build --all --strict --path core-tome
+      - name: Upload built archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: tome-core-dist-${{ matrix.os }}
+          path: core-tome/dist/
+          if-no-files-found: error
