@@ -149,10 +149,20 @@ pub fn install(args: InstallArgs) -> Result<()> {
     if installer.installed_now.is_empty() {
         let names = args.packages.join(", ");
         if !promoted {
-            report(&format!("{names} already installed and up to date"));
-            return Ok(());
+            // State alone is not proof the environment is current: an earlier run can commit
+            // its package transactions and then fail to build the generation (e.g. a contested
+            // bin refusing the link). Relink in that case so the re-run converges — or repeats
+            // the link error — instead of reporting success over a stale environment.
+            if !profile::current_generation_is_stale(&installed_states()?)? {
+                report(&format!("{names} already installed and up to date"));
+                return Ok(());
+            }
+            report(&format!(
+                "{names} already installed; relinking the out-of-date generation"
+            ));
+        } else {
+            report(&format!("{names} already installed; marked as requested"));
         }
-        report(&format!("{names} already installed; marked as requested"));
     }
     installer.finalize()?;
     installer.report_notes();
@@ -346,8 +356,13 @@ pub fn upgrade_packages(names: &[String]) -> Result<()> {
             .with_context(|| format!("upgrade `{name}`"))?;
     }
     if installer.installed_now.is_empty() {
-        report("all requested packages are already up to date");
-        return Ok(());
+        if !profile::current_generation_is_stale(&installed_states()?)? {
+            report("all requested packages are already up to date");
+            return Ok(());
+        }
+        report(
+            "all requested packages are already up to date; relinking the out-of-date generation",
+        );
     }
     // Sweep before finalize() so the single new generation reflects both the upgrades and
     // the removals. Each swept dependency is its own committed transaction; a failure

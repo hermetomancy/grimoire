@@ -85,6 +85,38 @@ pub fn current_generation_id() -> Result<Option<u64>> {
     .map(Some)
 }
 
+/// Whether the active generation no longer describes `states`' linked set. Package state
+/// commits per-transaction but the generation builds once at the end of a command, so a
+/// failure in between (a contested bin refusing the link) leaves state saying "installed"
+/// while the environment disagrees. The no-op install path checks this instead of trusting
+/// state alone, so re-running the command converges rather than reporting success.
+pub fn current_generation_is_stale(states: &[PackageState]) -> Result<bool> {
+    let linked_names = crate::install::linked_set(states);
+    let mut want: Vec<(&str, &str)> = states
+        .iter()
+        .filter(|state| linked_names.contains(&state.name))
+        .map(|state| (state.name.as_str(), state.store_path.as_str()))
+        .collect();
+    want.sort_unstable();
+
+    let Some(id) = current_generation_id()? else {
+        return Ok(!want.is_empty());
+    };
+    let gen_dir = generation_dir(id)?;
+    if !gen_dir.exists() {
+        return Ok(true);
+    }
+    let metadata = read_generation_metadata(&gen_dir)?;
+    let mut have: Vec<(&str, &str)> = metadata
+        .packages
+        .iter()
+        .map(String::as_str)
+        .zip(metadata.store_paths.iter().map(String::as_str))
+        .collect();
+    have.sort_unstable();
+    Ok(want != have)
+}
+
 /// Creates a new generation from the given package states and atomically activates it.
 ///
 /// This is the install/remove/upgrade path: `state/packages/` is already the authoritative
