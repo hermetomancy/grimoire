@@ -454,6 +454,14 @@ what stage 2 must package. Folding "toybox-ambient or not" into
 `build_env_id` is the cheap interim fix if prebuilts ever come from
 heterogeneous builders.
 
+Related: `build_env_id` probes the *host* `cc` banner even after the
+managed boundary takes over compiling — so post-bootstrap addresses
+encode a compiler the build did not use (host Xcode upgrades re-address
+the store), while the managed compiler's identity only reaches hashes
+through toolchain-wrappers' runtime-dep closure. Once the managed
+boundary is active, derive `build_env_id` from the toolchain-wrappers /
+clang store hashes instead; re-addresses the world (fine pre-release).
+
 
 ## Deletion criteria
 
