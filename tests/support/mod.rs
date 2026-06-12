@@ -27,7 +27,7 @@ pub fn core_readiness_packages() -> &'static [&'static str] {
             "clang",
             "cmake",
             "python3",
-            "make",
+            "gmake",
             "toybox",
             "toolchain-wrappers",
         ]
@@ -37,7 +37,7 @@ pub fn core_readiness_packages() -> &'static [&'static str] {
             "clang",
             "cmake",
             "python3",
-            "make",
+            "gmake",
             "toybox",
             "toolchain-wrappers",
         ]

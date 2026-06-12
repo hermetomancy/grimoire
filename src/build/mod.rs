@@ -39,7 +39,7 @@ const CORE_PACKAGES: &[&str] = &[
     "clang",
     "cmake",
     "python3",
-    "make",
+    "gmake",
     "toybox",
     "toolchain-wrappers",
 ];
@@ -99,16 +99,18 @@ fn musl_static_env_vars() -> Vec<(String, String)> {
     ]
 }
 
-/// Constructs a [`BuildEnv`] for a build on `target`. Core package `bin/` dirs are always
-/// prepended to PATH. When the managed compiler boundary is not yet available (bootstrap),
-/// host compiler tools are included.
+/// Constructs a [`BuildEnv`] for a build on `target`. Declared build-dep `bin/` dirs come
+/// first — declaration is specificity, so a rune that declares `gsed` gets GNU sed as
+/// plain `sed` even though the core floor (toybox) also ships one — then the core package
+/// dirs as the managed floor. When the managed compiler boundary is not yet available
+/// (bootstrap), host compiler tools are included after both.
 pub fn build_env_for_target(
     path_dirs: Vec<PathBuf>,
     extra_env: Vec<(String, String)>,
     target: &str,
 ) -> Result<BuildEnv> {
-    let mut all_path_dirs = core_bin_dirs()?;
-    all_path_dirs.extend(path_dirs);
+    let mut all_path_dirs = path_dirs;
+    all_path_dirs.extend(core_bin_dirs()?);
 
     let mut env = extra_env;
     if is_musl_target(target) {
@@ -282,7 +284,7 @@ pub fn build_package_with_env(
     if let Some(manifest) = &raw.manifest {
         metadata.merge_build_manifest(manifest);
     }
-    apply_discovery(&mut metadata, &raw.payload_dir);
+    apply_discovery(&mut metadata, &raw.payload_dir, &target);
 
     let archive = pack::pack_built_rune(
         &rune,
@@ -390,7 +392,7 @@ fn build_group_with_env(
         if is_parent && let Some(manifest) = &raw.manifest {
             metadata.merge_build_manifest(manifest);
         }
-        apply_discovery(&mut metadata, &payload);
+        apply_discovery(&mut metadata, &payload, &target);
         if !is_parent {
             split::warn_parent_prefix_leaks(&member.name, &payload, &parent_prefix)?;
         }
@@ -507,17 +509,23 @@ fn run_rune_build(
     })
 }
 
-/// Applies post-build discovery to `metadata`: bins found in the payload override the
-/// static declaration for the default target key, and become the package's `provides`.
-fn apply_discovery(metadata: &mut crate::model::PackageMetadata, payload_dir: &Path) {
-    let discovered = discover_bins(payload_dir);
-    let libs = discover_libs(payload_dir);
-    if !discovered.is_empty() {
-        metadata
-            .bins
-            .insert("default".to_string(), discovered.clone());
+/// Applies post-build discovery to `metadata`. Discovered executables are the ground
+/// truth for names that collide, but declared *aliases* — a second command name for a
+/// file that really exists, like `awk: "bin/gawk"` — survive the merge: aliases are how
+/// implementation packages provide the generic capability name, and discovery only sees
+/// file names. The merged set becomes the package's `provides`.
+fn apply_discovery(metadata: &mut crate::model::PackageMetadata, payload_dir: &Path, target: &str) {
+    let mut merged = discover_bins(payload_dir);
+    for (name, path) in metadata.bins_for(target) {
+        if !merged.contains_key(&name) && payload_dir.join(&path).is_file() {
+            merged.insert(name, path);
+        }
     }
-    metadata.provides = discovered.keys().cloned().collect();
+    let libs = discover_libs(payload_dir);
+    if !merged.is_empty() {
+        metadata.bins.insert("default".to_string(), merged.clone());
+    }
+    metadata.provides = merged.keys().cloned().collect();
     metadata.libs = libs;
 }
 

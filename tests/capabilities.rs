@@ -111,3 +111,52 @@ fn preference_changes_the_capability_providers_address() {
         "the preferred provider must be installed"
     );
 }
+
+#[test]
+fn explicit_install_of_contested_capability_asks_or_errors() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let _tome = setup_capability_tome(root);
+
+    // `awk` has two providers (gawk, mawk) and no preference. An explicit install is a
+    // human stating ambiguous intent: without a terminal to ask on, refuse with the
+    // provider list instead of silently picking.
+    let ambiguous = run(root, &["install", "awk"]);
+    assert_failure_contains(
+        &ambiguous,
+        "provided by multiple packages",
+        "explicit ambiguous capability install refuses without a terminal",
+    );
+    assert_failure_contains(&ambiguous, "grm prefer awk", "the refusal names the fix");
+    assert!(
+        !root
+            .join("state")
+            .join("packages")
+            .join("gawk.nuon")
+            .exists(),
+        "nothing may be installed by a refused ambiguous request"
+    );
+
+    // A dry run reports the ambiguity without prompting or failing.
+    let dry = run(root, &["install", "awk", "--dry-run"]);
+    assert_success(&dry, "ambiguous capability dry-run");
+    assert!(
+        stdout(&dry).contains("multiple providers"),
+        "dry-run surfaces the ambiguity: {}",
+        stdout(&dry)
+    );
+
+    // A recorded preference settles it; the install proceeds deterministically.
+    assert_success(&run(root, &["prefer", "awk", "mawk"]), "prefer awk mawk");
+    assert_success(
+        &run(root, &["install", "awk"]),
+        "install awk with preference",
+    );
+    assert!(
+        root.join("state")
+            .join("packages")
+            .join("mawk.nuon")
+            .exists(),
+        "the preferred provider is installed"
+    );
+}

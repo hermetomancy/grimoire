@@ -121,6 +121,7 @@ pub fn install(args: InstallArgs) -> Result<()> {
         } else if PathBuf::from(package).exists() || package.ends_with(".tar.zst") {
             installer.install_local_root(package, args.sha256.clone())?
         } else {
+            settle_capability_intent(package, args.dry_run, args.locked)?;
             installer.install_named(package)?
         };
         root_names.push(name);
@@ -360,6 +361,79 @@ pub fn upgrade_packages(names: &[String]) -> Result<()> {
 
 /// Prints a complete solver plan (header + body). For a `--dry-run` whose root step is the
 /// solver-resolved package itself.
+/// When a *human* explicitly installs a capability name (`grm install sed`) that several
+/// packages provide and no preference exists, ask which implementation they meant and
+/// record the answer as a `grm prefer` choice — resolution stays deterministic afterwards.
+/// Only explicit requests prompt: rune-declared deps keep the deterministic chain
+/// (preference → installed → first by name), because plan hashing and non-interactive
+/// bootstraps cannot answer questions. Literal package names, locked installs, and
+/// already-settled preferences pass through untouched; without a terminal the ambiguity is
+/// an error naming the providers.
+fn settle_capability_intent(name: &str, dry_run: bool, locked: bool) -> Result<()> {
+    if locked {
+        return Ok(()); // the lockfile already pinned a concrete provider
+    }
+    // A literal package (rune or published prebuilt) is not a capability request.
+    if solve::newest_available(name)?.is_some() {
+        return Ok(());
+    }
+    let providers = solve::capability_providers(name)?;
+    if providers.len() < 2 {
+        return Ok(()); // zero providers fails in resolution with the normal error
+    }
+    let preferences = crate::model::preferences::Preferences::load()?;
+    if preferences.providers.contains_key(name) {
+        return Ok(());
+    }
+    let mut providers = providers;
+    providers.sort();
+    providers.dedup();
+    if dry_run {
+        crate::util::progress::warn(&format!(
+            "`{name}` is a capability with multiple providers ({}); a real install will ask \
+             which one you mean",
+            providers.join(", ")
+        ));
+        return Ok(());
+    }
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        bail!(
+            "`{name}` is provided by multiple packages: {}; choose one with \
+             `grm prefer {name} <package>` and retry",
+            providers.join(", ")
+        );
+    }
+
+    println!("`{name}` is provided by multiple packages:");
+    for (index, provider) in providers.iter().enumerate() {
+        println!("  {}) {provider}", index + 1);
+    }
+    print!("which should provide `{name}`? [1-{}]: ", providers.len());
+    use std::io::Write;
+    std::io::stdout().flush().ok();
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .context("read provider choice")?;
+    let answer = answer.trim();
+    let chosen = answer
+        .parse::<usize>()
+        .ok()
+        .and_then(|index| index.checked_sub(1))
+        .and_then(|index| providers.get(index))
+        .cloned()
+        .or_else(|| providers.iter().find(|p| p.as_str() == answer).cloned())
+        .with_context(|| format!("`{answer}` is not one of the listed providers"))?;
+
+    let mut preferences = crate::model::preferences::Preferences::load()?;
+    preferences
+        .providers
+        .insert(name.to_owned(), chosen.clone());
+    preferences.save()?;
+    report(&format!("`{name}` now provided by `{chosen}`"));
+    Ok(())
+}
+
 /// Plan-time mirror of the realize-time conflict gate: refuses the plan while a *linked*
 /// installed package (or another planned step) conflicts with a step, before anything is
 /// fetched or built. Packages a step replaces are exempt — the migration removes them in

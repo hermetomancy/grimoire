@@ -66,7 +66,7 @@ Every field Grimoire parses. Unknown keys are ignored, so informational conventi
 | `deps` | record | no | Build and runtime dependencies; see [Dependencies](#dependencies). |
 | `bins` | record | no | Target-keyed executable declarations; see [Bins and capabilities](#bins-and-capabilities). |
 | `build_flags` | record\<string, string\> | no | Free-form feature toggles surfaced to the build as `ctx.build_flags`. Addenda may patch them; they are part of a compiled package's store hash. |
-| `provides` | list\<string\> | no | Capability names this package supplies beyond its bins. Used by the solver pre-build; **overwritten at pack time by discovered bin names** (see below), so declare it for capabilities the solver must know before any build exists. |
+| `provides` | list\<string\> | no | Capability names this package supplies beyond its bins. Used by the solver pre-build; **replaced at pack time by the merged bin-name set** (discovered executables plus surviving declared aliases — see below), so declare it for capabilities the solver must know before any build exists. |
 | `libs` | list\<string\> | no | Library base names (`foo` for `libfoo.so`). Like `provides`, replaced by discovery at pack time. |
 | `notes` | list\<string\> | no | User-facing post-install notes, printed once after install commits and replayed by `grm info`. |
 | `upstream_version` | string | no | The real upstream version string when `version` had to be normalized to semver (see [Version policy](#version-policy)). Display only — shown by `grm info`, never ordered. |
@@ -164,14 +164,44 @@ bins: {
 - Any key that differs from the package `name` is a **capability**: `awk` resolves to this
   package in dependency resolution, and `grm prefer awk <pkg>` chooses among multiple
   providers.
-- **Discovery overrides declaration at pack time.** After a successful build, every
-  executable staged under `bin/` is discovered; the discovered set replaces the `default`
-  key in the packed archive's metadata, `provides` is reset to the discovered names, and
-  `libs` to the discovered libraries. Static declarations therefore matter most *before* a
+- **Discovery merges with declaration at pack time.** After a successful build, every
+  executable staged under `bin/` is discovered; discovered names win on collision, but a
+  declared *alias* — a second command name whose path is a real file, like
+  `awk: "bin/gawk"` — survives into the packed metadata. `provides` becomes the merged
+  name set, `libs` the discovered libraries. Static declarations still matter *before* a
   build exists: they tell the solver (and `grm tome build --all`'s ordering) what the rune
   will provide. Keep them accurate.
 - Only declare commands end users or other runes invoke; internal helper scripts need no
   entries.
+
+### Naming rule: implementations own their name, the generic name is a capability
+
+A standard utility with multiple real implementations (make, sed, awk, grep, tar, …) is
+packaged under its **implementation name**, and ships **both** command names:
+
+| Package | Bins | Wrong |
+|---|---|---|
+| `gmake` | `gmake`, `make` | a package named `make` — *which* make? |
+| `gsed`  | `gsed`, `sed`   | `gnu-sed` — the package name should match the primary bin |
+| `gawk`  | `gawk`, `awk`   | |
+
+The generic name (`make`, `sed`, `awk`) is then a **capability** with potentially many
+providers — never assume what the platform floor provides (GNU on glibc distros, busybox
+on Alpine, toybox once the managed userland is bootstrapped):
+
+- **Consumers** depend on and invoke the *generic* name when any implementation serves,
+  and the *implementation* name when specific semantics are required (`gsed` for GNU `T`
+  branches, `gmake` for GNU pattern rules). The dependency and the invocation should
+  agree.
+- **Declared build deps outrank the core floor on PATH**, so declaring `gsed` makes plain
+  `sed` mean GNU sed *for that build* — declaration is specificity.
+- When a user explicitly installs an ambiguous capability (`grm install sed` with several
+  providers and no preference), Grimoire asks which implementation they mean and records
+  the answer as a `grm prefer` choice. Rune-declared deps never prompt: they resolve
+  deterministically (preference → installed provider → first by name).
+
+Single-implementation tools (`cmake`, `python3`, `llvm`) keep their upstream names — there
+is no "which cmake" question to encode.
 
 ## The `ctx` record
 

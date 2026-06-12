@@ -45,7 +45,7 @@ const CORE_USERLAND_TOOLS_LINUX: &[&str] = &[
     "clang",
     "cmake",
     "python3",
-    "make",
+    "gmake",
     "toybox",
     "toolchain-wrappers",
 ];
@@ -55,7 +55,7 @@ const CORE_USERLAND_TOOLS_NON_LINUX: &[&str] = &[
     "clang",
     "cmake",
     "python3",
-    "make",
+    "gmake",
     "toybox",
     "toolchain-wrappers",
 ];
