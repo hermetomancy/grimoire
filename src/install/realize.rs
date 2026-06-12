@@ -61,6 +61,31 @@ pub(crate) struct InstalledArchive {
     pub notes: Vec<String>,
 }
 
+/// Whether the exact install a plan step describes has already landed: recorded state matches
+/// the step's name, version, and (when computed) content address, and the recorded store path
+/// still exists on disk. Plans go stale — a deeper build-dependency recursion can realize a
+/// package after the plan holding it was resolved — and re-realizing a stale step refetches or,
+/// far worse, rebuilds it from source.
+///
+/// A store directory *without* a matching state record is deliberately not reused: state is
+/// written only after hash verification inside a committed transaction, so an unrecorded
+/// directory cannot be re-trusted (AGENTS.md §10.1) and the step realizes normally.
+pub(crate) fn step_already_realized(step: &crate::solve::PlanStep) -> Result<bool> {
+    let states = installed_states()?;
+    let Some(state) = states.iter().find(|state| state.name == step.name) else {
+        return Ok(false);
+    };
+    if state.version != step.version.to_string() {
+        return Ok(false);
+    }
+    if let Some(hash) = step.store_hash.as_deref()
+        && state.store_hash != hash
+    {
+        return Ok(false);
+    }
+    Ok(Path::new(&state.store_path).exists())
+}
+
 /// Verifies, extracts, and promotes the resolved archive into the install root, then rebuilds
 /// the lockfile. `expected_hash` is the hash the archive must match before it is read (from
 /// `--sha256` or a tome index entry); `None` skips the check, which only happens for a local
