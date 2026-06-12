@@ -475,6 +475,66 @@ fn changed_build_dep_rune_is_rebuilt_not_reused() {
 }
 
 #[test]
+fn clean_reclaims_unused_build_dep_state_and_store_dirs() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'cleantome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("tool.rn"),
+        "export const package = {\n  name: 'tool'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'tool\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'tool')\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("app.rn"),
+        "export const package = {\n  name: 'app'\n  version: '0.1.0'\n  deps: { build: { default: ['tool'] }, runtime: [] }\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'app\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'app')\n}\n",
+    )
+    .unwrap();
+
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add cleantome",
+    );
+    assert_success(&run(root, &["install", "app"]), "install app");
+    assert!(
+        store_has_package(root, "tool"),
+        "the build dep is cached store-only after the install"
+    );
+
+    // Generations describe the linked environment only, so the cache is not pinned: one
+    // clean removes the unused build dep's state *and* reclaims its store dir.
+    let clean = run(root, &["clean", "-k", "1"]);
+    assert_success(&clean, "clean");
+    assert!(
+        !store_has_package(root, "tool"),
+        "clean must reclaim the unused build dep's store dir"
+    );
+    assert!(
+        !root
+            .join("state")
+            .join("packages")
+            .join("tool.nuon")
+            .exists(),
+        "clean must sweep the unused build dep's state"
+    );
+    assert_eq!(
+        stdout(&run_shim(root, "app")).trim(),
+        "app",
+        "the linked environment survives the clean"
+    );
+}
+
+#[test]
 fn store_only_packages_stay_out_of_lock_upgrade_and_profile() {
     let root = TempDir::new().unwrap();
     let root = root.path();
@@ -524,11 +584,16 @@ fn store_only_packages_stay_out_of_lock_upgrade_and_profile() {
         !lock.contains("[tooldep,"),
         "build dep must not be recorded as a locked package: {lock}"
     );
-    let list = stdout(&run(root, &["list"]));
+    let list = stdout(&run(root, &["list", "--all"]));
     assert!(
         list.lines()
             .any(|l| l.contains("tooldep") && l.contains("store-only")),
-        "list must mark the cached build dep store-only: {list}"
+        "list --all must mark the cached build dep store-only: {list}"
+    );
+    let default_list = stdout(&run(root, &["list"]));
+    assert!(
+        !default_list.contains("tooldep"),
+        "default list shows only the linked environment, not store-only cache: {default_list}"
     );
 
     // A newer tooldep appears; a bare upgrade must leave the cache alone.

@@ -281,6 +281,29 @@ pub(super) fn restore_state_snapshot(gen_dir: &Path) -> Result<bool> {
         )?;
     }
 
+    // Snapshots describe the linked environment only; live *store-only* records (cached
+    // build deps) are cache, orthogonal to the semantic state, and survive activation —
+    // dropping them would orphan their store dirs (unrecorded dirs are never re-trusted).
+    // Only genuine cache carries over: anything in the abandoned environment's linked
+    // closure is exactly what a semantic rollback must drop, and a record whose store
+    // path is gone is not worth keeping either.
+    let snapshot_names: std::collections::HashSet<&str> =
+        states.iter().map(|s| s.name.as_str()).collect();
+    let live_states = crate::install::installed_states().unwrap_or_default();
+    let live_linked = crate::install::linked_set(&live_states);
+    for live in live_states {
+        if snapshot_names.contains(live.name.as_str()) || live_linked.contains(&live.name) {
+            continue;
+        }
+        if !Path::new(&live.store_path).exists() {
+            continue;
+        }
+        nuon_io::write_nuon(
+            &staging.join(format!("{}.nuon", live.name)),
+            &live.to_value(),
+        )?;
+    }
+
     if packages_dir.exists() {
         fs::rename(&packages_dir, &backup)
             .with_context(|| format!("move aside {}", packages_dir.display()))?;

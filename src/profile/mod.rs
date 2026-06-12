@@ -15,7 +15,7 @@ use std::{collections::BTreeSet, fs, path::PathBuf};
 use crate::{
     model::PackageState,
     util::paths,
-    util::progress::{report, status, strong, success},
+    util::progress::{note, status, strong, success, warn},
 };
 
 mod gc;
@@ -93,7 +93,7 @@ pub fn current_generation_id() -> Result<Option<u64>> {
 pub fn rebuild_and_activate(states: &[PackageState]) -> Result<u64> {
     let id = create_generation(states)?;
     switch_symlink(id)?;
-    report(&format!(
+    note(&format!(
         "generation {} is now current",
         strong(&id.to_string())
     ));
@@ -116,10 +116,13 @@ pub fn create_generation(states: &[PackageState]) -> Result<u64> {
 
     status(&format!("building generation {next_id}"));
 
-    // Only the linked set is surfaced: requested/held packages and their runtime closure.
-    // Store-only packages — cached build deps, residue from a failed install — stay in the
-    // snapshot and in `store_paths` (so gc keeps their dirs and semantic activation restores
-    // their records) but never reach `bin/` or `share/`, and never contest a bin name.
+    // A generation describes the *environment*: the linked set — requested/held packages
+    // and their runtime closure. Store-only packages (cached build deps, residue from a
+    // failed install) are cache, not environment: they never reach `bin/` or `share/`,
+    // never contest a bin name, and deliberately do not appear in `store_paths` or the
+    // state snapshot — so `grm clean` can reclaim their dirs once their state is swept,
+    // instead of every retained generation pinning the cache forever. Activation preserves
+    // live cache records untouched (see `restore_state_snapshot`).
     let linked_names = crate::install::linked_set(states);
     let linked: Vec<&PackageState> = states
         .iter()
@@ -131,11 +134,11 @@ pub fn create_generation(states: &[PackageState]) -> Result<u64> {
     let skip_bins = contested_bin_skips(&linked)?;
     let no_skips = BTreeSet::new();
 
-    for state in linked {
+    for state in &linked {
         let store_path = PathBuf::from(&state.store_path);
         if !store_path.exists() {
-            report(&format!(
-                "warning: store path {} does not exist, skipping",
+            warn(&format!(
+                "store path {} does not exist, skipping",
                 store_path.display()
             ));
             continue;
@@ -147,20 +150,19 @@ pub fn create_generation(states: &[PackageState]) -> Result<u64> {
     let generation = Generation {
         id: next_id,
         created: unix_now(),
-        packages: states.iter().map(|s| s.name.clone()).collect(),
-        store_paths: states.iter().map(|s| s.store_path.clone()).collect(),
+        packages: linked.iter().map(|s| s.name.clone()).collect(),
+        store_paths: linked.iter().map(|s| s.store_path.clone()).collect(),
     };
     write_generation_metadata(&gen_dir, &generation)?;
-    // The full state snapshot is what makes activation *semantic*: rollback/switch restore
+    // The linked state snapshot is what makes activation *semantic*: rollback/switch restore
     // `state/packages/` from it, so the rolled-back-to generation really is the system state.
-    write_state_snapshot(&gen_dir, states)?;
+    let linked_states: Vec<PackageState> = linked.iter().map(|s| (*s).clone()).collect();
+    write_state_snapshot(&gen_dir, &linked_states)?;
 
     let mut registry = read_registry().unwrap_or_default();
     registry.push(generation);
     if let Err(e) = write_registry(&registry) {
-        report(&format!(
-            "warning: could not write generations registry: {e}"
-        ));
+        warn(&format!("could not write generations registry: {e}"));
     }
 
     success(&format!("created generation {next_id}"));
@@ -185,21 +187,24 @@ pub fn activate_generation(id: u64) -> Result<bool> {
     }
     let already_active = current_generation_id()? == Some(id);
     if !already_active {
-        report(&format!(
+        note(&format!(
             "switching profile to generation {}…",
             strong(&id.to_string())
         ));
     }
     if !restore_state_snapshot(&gen_dir)? {
-        report(&format!(
-            "warning: generation {id} has no state snapshot (created by an older grimoire); \
+        warn(&format!(
+            "generation {id} has no state snapshot (created by an older grimoire); \
              switching the profile view only"
         ));
     }
     if already_active {
         // Re-activating the current generation is the repair path for an interrupted
         // activation: the state restore above converges state with the symlink.
-        report(&format!("generation {id} is already active"));
+        note(&format!(
+            "generation {} is already active",
+            strong(&id.to_string())
+        ));
         return Ok(false);
     }
     switch_symlink(id)?;
@@ -226,6 +231,57 @@ fn switch_symlink(id: u64) -> Result<()> {
 
 /// Rolls back to the previous generation (the newest generation older than the current one).
 /// Returns the ID of the generation rolled back to.
+/// `rollback --dry-run`: names the generation activation would switch to and diffs its
+/// snapshot against current state, without touching the profile.
+pub fn dry_run_activation(generation: Option<u64>) -> Result<()> {
+    let target = match generation {
+        Some(id) => id,
+        None => {
+            let current =
+                current_generation_id()?.context("no active generation to roll back from")?;
+            let mut generations = list_generations()?;
+            generations.sort_by_key(|b| std::cmp::Reverse(b.id));
+            generations
+                .into_iter()
+                .find(|g| g.id < current)
+                .context("no previous generation to roll back to")?
+                .id
+        }
+    };
+    let gen_dir = generation_dir(target)?;
+    if !gen_dir.exists() {
+        bail!("generation {target} does not exist");
+    }
+    if current_generation_id()? == Some(target) {
+        println!("generation {target} is already active; activation would only converge state");
+        return Ok(());
+    }
+    println!("would switch to generation {target}:");
+    let Some(snapshot) = read_state_snapshot(&gen_dir)? else {
+        println!("  (no state snapshot — profile view would switch, state would be untouched)");
+        return Ok(());
+    };
+    let current: std::collections::BTreeMap<String, String> = crate::install::installed_states()?
+        .into_iter()
+        .map(|s| (s.name, s.version))
+        .collect();
+    let target_set: std::collections::BTreeMap<String, String> =
+        snapshot.into_iter().map(|s| (s.name, s.version)).collect();
+    for (name, version) in &target_set {
+        match current.get(name) {
+            None => println!("  + {name} {version}"),
+            Some(now) if now != version => println!("  ~ {name} {now} → {version}"),
+            _ => {}
+        }
+    }
+    for name in current.keys() {
+        if !target_set.contains_key(name) {
+            println!("  - {name}");
+        }
+    }
+    Ok(())
+}
+
 pub fn rollback() -> Result<u64> {
     let current = current_generation_id()?.context("no active generation to roll back from")?;
     let mut generations = list_generations()?;
