@@ -23,6 +23,12 @@ use super::*;
 
 pub(crate) fn exported_const(path: &Path, name: &str) -> Result<Value> {
     let source = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    exported_const_from_bytes(&source, &path.display().to_string(), name)
+}
+
+/// Like [`exported_const`], for rune source already in memory — e.g. a group rune embedded
+/// in an archive's `.grimoire/group/`. `label` stands in for the file path in errors.
+pub(crate) fn exported_const_from_bytes(source: &[u8], label: &str, name: &str) -> Result<Value> {
     // Parse with the full rune command context — the same one the build runner uses — so a
     // rune that strays outside the command subset (docs/rune-authoring.md) fails here, at
     // `grm info`/`search`/plan time, instead of after its build dependencies have already
@@ -32,24 +38,18 @@ pub(crate) fn exported_const(path: &Path, name: &str) -> Result<Value> {
         crate::nu::commands::add_rune_command_context(nu_cmd_lang::create_default_context());
     engine_state.add_env_var("PWD".to_string(), Value::test_string("."));
     let mut working_set = StateWorkingSet::new(&engine_state);
-    nu_parser::parse(&mut working_set, path.to_str(), &source, false);
+    nu_parser::parse(&mut working_set, Some(label), source, false);
 
     if let Some(err) = working_set.parse_errors.first() {
-        return Err(anyhow!(
-            "could not parse {}: {err} ({err:?})",
-            path.display()
-        ));
+        return Err(anyhow!("could not parse {label}: {err} ({err:?})"));
     }
 
     let var_id = working_set
         .find_variable(name.as_bytes())
-        .ok_or_else(|| anyhow!("{} does not export const `{name}`", path.display()))?;
-    let value = working_set.get_constant(var_id).map_err(|err| {
-        anyhow!(
-            "could not read exported const `{name}` from {}: {err}",
-            path.display()
-        )
-    })?;
+        .ok_or_else(|| anyhow!("{label} does not export const `{name}`"))?;
+    let value = working_set
+        .get_constant(var_id)
+        .map_err(|err| anyhow!("could not read exported const `{name}` from {label}: {err}"))?;
 
     Ok(value.clone())
 }

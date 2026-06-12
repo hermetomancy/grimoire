@@ -60,6 +60,17 @@ pub struct PackageMetadata {
     /// transaction, migrating their requested/held intent onto this package.
     #[serde(default)]
     pub replaces: Vec<String>,
+    /// The parent package this rune splits from. A split member declares no sources and no
+    /// `build` function: its files are carved out of the parent rune's build output by the
+    /// `files` globs, and the whole group is built in one pass.
+    #[serde(default)]
+    pub split_from: Option<String>,
+    /// Glob patterns (relative to the package payload root; `*` stays within a path
+    /// component, `**` crosses directories) claiming this member's files from the parent
+    /// build's output. Present exactly when `split_from` is set; the parent package
+    /// receives every unclaimed file.
+    #[serde(default)]
+    pub files: Vec<String>,
 }
 
 /// A declared source artifact for a source build. Every source must carry a checksum so
@@ -116,6 +127,18 @@ impl PackageMetadata {
         let upstream_version = optional_string(&record, "upstream_version")?;
         let conflicts = optional_string_list(&record, "conflicts")?;
         let replaces = optional_string_list(&record, "replaces")?;
+        let split_from = optional_string(&record, "split_from")?;
+        let files = optional_string_list(&record, "files")?;
+        validate_split_fields(
+            &name,
+            split_from.as_deref(),
+            &files,
+            &sources,
+            &deps,
+            &build_flags,
+            &targets,
+            fixed_output,
+        )?;
 
         Ok(Self {
             name,
@@ -135,7 +158,15 @@ impl PackageMetadata {
             upstream_version,
             conflicts,
             replaces,
+            split_from,
+            files,
         })
+    }
+
+    /// `true` when this package is a split member: a companion rune whose files come out of
+    /// its parent's build rather than a build of its own.
+    pub fn is_split_member(&self) -> bool {
+        self.split_from.is_some()
     }
 
     /// Resolve the bin map for a concrete target: `default` → OS wildcard → exact triple,
@@ -215,6 +246,10 @@ impl PackageMetadata {
         }
         record.push("conflicts", string_list_value(&self.conflicts));
         record.push("replaces", string_list_value(&self.replaces));
+        if let Some(split_from) = &self.split_from {
+            record.push("split_from", Value::string(split_from, Span::unknown()));
+            record.push("files", string_list_value(&self.files));
+        }
 
         let mut sources = Record::new();
         for (name, source) in &self.sources {
@@ -338,6 +373,56 @@ pub fn validate_targets(metadata: &PackageMetadata, current: &str) -> Result<()>
     );
 }
 
+/// Validates the `split_from`/`files` pair: a split member is *only* a claim on its parent's
+/// build output, so everything that describes an independent build is forbidden on it. The
+/// member inherits sources, build deps, build flags, and supported targets from the parent.
+#[allow(clippy::too_many_arguments)]
+fn validate_split_fields(
+    name: &str,
+    split_from: Option<&str>,
+    files: &[String],
+    sources: &BTreeMap<String, Source>,
+    deps: &Deps,
+    build_flags: &BTreeMap<String, String>,
+    targets: &[String],
+    fixed_output: bool,
+) -> Result<()> {
+    let Some(parent) = split_from else {
+        if !files.is_empty() {
+            bail!("package field `files` requires `split_from`: only a split member claims files");
+        }
+        return Ok(());
+    };
+    validate_package_name(parent)?;
+    if parent == name {
+        bail!("package `{name}` cannot split from itself");
+    }
+    if files.is_empty() {
+        bail!("split member `{name}` must declare a non-empty `files` glob list");
+    }
+    for pattern in files {
+        validate_relative_package_path(pattern, &format!("files glob `{pattern}`"))?;
+        nu_glob::Pattern::new(pattern)
+            .map_err(|err| anyhow::anyhow!("files glob `{pattern}` is invalid: {err}"))?;
+    }
+    if !sources.is_empty() {
+        bail!("split member `{name}` must not declare `sources`; they come from `{parent}`");
+    }
+    if !deps.build.is_empty() {
+        bail!("split member `{name}` must not declare build deps; declare them on `{parent}`");
+    }
+    if !build_flags.is_empty() {
+        bail!("split member `{name}` must not declare `build_flags`; declare them on `{parent}`");
+    }
+    if !targets.is_empty() {
+        bail!("split member `{name}` must not declare `targets`; it inherits `{parent}`'s");
+    }
+    if fixed_output {
+        bail!("split member `{name}` cannot be fixed-output; splits only apply to compiled builds");
+    }
+    Ok(())
+}
+
 pub(crate) fn parse_target_conditional_bins(
     value: &Value,
     label: &str,
@@ -425,6 +510,8 @@ mod tests {
             upstream_version: None,
             conflicts: Vec::new(),
             replaces: Vec::new(),
+            split_from: None,
+            files: Vec::new(),
         };
         let mac = metadata.sources_for("macos-aarch64-darwin");
         assert!(mac.contains_key("everywhere") && mac.contains_key("mac-only"));
@@ -465,6 +552,8 @@ mod tests {
             upstream_version: None,
             conflicts: Vec::new(),
             replaces: Vec::new(),
+            split_from: None,
+            files: Vec::new(),
         };
 
         let resolved: Vec<_> = meta.bins_for("linux-x86_64-musl").into_keys().collect();

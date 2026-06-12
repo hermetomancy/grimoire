@@ -34,6 +34,17 @@ impl EmbeddedNuRuntime {
             .with_context(|| format!("parse package metadata from {}", rune.display()))
     }
 
+    /// Reads package metadata from rune source already in memory (an archive-embedded group
+    /// rune). `label` stands in for the file path in errors.
+    pub fn package_metadata_from_bytes(
+        &self,
+        source: &[u8],
+        label: &str,
+    ) -> Result<PackageMetadata> {
+        PackageMetadata::from_value(exported_const_from_bytes(source, label, "package")?, false)
+            .with_context(|| format!("parse package metadata from {label}"))
+    }
+
     pub fn tome_manifest(&self, tome: &Path) -> Result<TomeManifest> {
         TomeManifest::from_value(exported_const(tome, "tome")?)
             .with_context(|| format!("parse tome manifest from {}", tome.display()))
