@@ -2,38 +2,121 @@
 
 This file tracks the remaining work before Grimoire is ready for a stable
 release, plus the planned Grimoire-OS work that follows it. Once every item
-in **Remaining** is done and the **Planned** items have graduated into real
-work, this file should be deleted.
+in the **Roadmap** is done and the **Planned** items have graduated into
+real work, this file should be deleted.
 
 
-## Remaining
+## Roadmap
 
-### 1. Release engineering
+Phases are ordered by dependency and urgency; items within a phase are
+independent. Each item records the *decided* design, not just the problem.
 
-- ~~Multi-OS CI matrix (Linux, macOS, FreeBSD) + MSRV job.~~ Done:
-  `.github/workflows/ci.yml` (lint, ubuntu/macos test matrix, MSRV check,
-  FreeBSD suite in a nested VM).
-- ~~Signed release archives for supported targets.~~ Done:
-  `.github/workflows/release.yml` (tag-triggered five-target builds,
-  SHA256SUMS + minisign, GitHub release). Before the first tag: generate the
-  release keypair (`minisign -GW`), add `MINISIGN_SECRET_KEY` to repo
-  secrets, and publish the public key in the README.
-- `grm self-update`.
-- `CHANGELOG.md`.
-- Release-blocking job that runs `grm tome build --all` against tome-core
-  on each platform once bootstrap lands.
+### Phase 0 — land the working tree ✅
 
-## Deferred decisions
+Done. The session's five semantic strands were co-developed and co-tested
+(`state.rs`/`orphans.rs`/`closure.rs` interleave all of them), so synthetic
+per-feature intermediate commits would have been untested fake history;
+landed as one comprehensive, fully-tested commit ("consolidate the CLI and
+make installs content-addressed end to end") plus this roadmap. The
+tome-core runes (`rust-stage0` + `rust` 1.96.0, llvm `LLVM_INSTALL_UTILS`)
+live outside this repo's history — `tome-core/` is gitignored; commit them
+in the tome repository.
 
-Not release-blocking, but decide before the catalog grows past core:
+### Phase 1 — small correctness/UX fixes (each ≤ half a day)
 
-- **Version ordering beyond semver.** Every comparison goes through
-  `semver::Version`; real upstreams ship `1.1.1w`, `2024.07.02`, `9.0p1`.
-  Either adopt a permissive ordering (pacman-style vercmp) or codify
-  "normalize the version, keep the real one in the URL" as the convention.
-- **`conflicts`/`replaces` metadata.** Package renames and mutually
-  exclusive packages have no mechanism (`grm prefer` covers contested bins
-  only). Retrofitting after a public catalog exists is painful.
+- **Early rune-subset validation.** Const extraction
+  (`nu/runtime/eval.rs` bare-core context) accepts runes the build runner
+  later rejects (`str join` incident: 4-minute toolchain build wasted on a
+  parse error). Switch const-extraction to `add_rune_command_context` so
+  `info`/`search`/`tome build` reject subset violations before any fetch.
+  Test: a rune using `each`/`str join` fails at `grm info`.
+- **`tome remove` warning.** Name installed packages whose runes resolve
+  from the tome being removed — they keep working but silently lose drift
+  detection and rebuildability.
+- **Preference-aware `find_dep_state`.** The capability fallback is
+  first-match; solver and closure walker are preference-aware. Align it:
+  preference, else first provider by name. Affects linked-set edges and
+  `<DEP>_PREFIX` env vars when multiple providers are installed.
+- **Doctor: rollback-target snapshot check.** Validate that retained
+  generations' snapshots reference existing store paths, before a rollback
+  discovers the gap.
+- **Addendum staleness.** `apply_patches` warns on a moved addendum commit
+  and continues with stale patches; auto-resync instead (or error with the
+  `grm addendum update` hint). Stale patches silently change store hashes.
+- **`xz2 = { features = ["static"] }`.** `lzma-sys` otherwise links host
+  liblzma via pkg-config — a host dependency leak, and a blocker for the
+  `grimoire` rune.
+
+### Phase 2 — rune metadata cache (performance)
+
+Every staleness walk nu-evals the rune of every installed package; building
+a `CapabilityIndex` nu-evals every rune in every tome. Linear in installed
+set × catalog size, paid per mutating command. Design:
+
+- `build::read_rune_metadata` routes through a cache keyed by
+  sha256(rune bytes): per-process `HashMap` first (the same rune is
+  currently evaluated several times per command), then on-disk
+  `cache/rune-meta/<sha256>.nuon` holding the serialized `PackageMetadata`.
+- Cache the **pre-patch** eval result; apply addendum patches after the
+  cache (patches are cheap data merges, and this keeps the key independent
+  of addendum state).
+- Version-stamp the cache directory (rune-eval semantics may change across
+  grimoire versions); `grm clean` wipes it like any cache.
+
+### Phase 3 — catalog-readiness (decide before the catalog grows)
+
+- **Version policy: normalize, don't vercmp.** Keep `semver::Version` as
+  the only internal ordering. Codify in rune-authoring.md: `version` must
+  be semver-orderable; add an optional `upstream_version` metadata field
+  (shown by `info`/`search`, used in source URLs) with per-ecosystem
+  mapping recipes (e.g. `2025a` → `2025.1.0`, `9.9p1` → `9.9.1`).
+  Rationale: pacman-style vercmp would replace `Version`/`VersionReq`
+  through resolver, lock, and index for marginal gain; the mapping
+  convention is one doc section plus an optional `tome build` lint.
+- **`conflicts`/`replaces` metadata.** Add both to rune metadata and
+  `IndexEntry`. `replaces: ["old"]`: installing/upgrading the new package
+  removes `old` in the same transaction and migrates its
+  `requested`/`held` intent; `upgrade` treats a replacer as an upgrade
+  candidate for the replaced name. `conflicts: ["x"]`: resolution fails
+  when both would be installed; install refuses while the conflicting
+  package is installed unless it leaves in the same command. Renames
+  become catalog-expressible (the `rust` → `rust-stage0` rename was free
+  only because nothing was released).
+
+### Phase 4 — build pipeline
+
+- **Built-archive cache trust.** Remove → reinstall of a source-built
+  package currently rebuilds from scratch (unrecorded store dirs are
+  rightly never re-trusted — §10.1). Instead: before building a source
+  step, scan `cache/builds/` for an archive whose embedded store basename
+  matches the step's computed store hash; on match, install it through the
+  normal verified local-archive path. Same acceptance check substitutes
+  get; makes remove→reinstall of rust ~free. `clean` still wipes the cache.
+- **Impurity lint instead of hard isolation.** Decision: namespace/chroot
+  isolation is deferred to Grimoire OS; build-time network stays allowed
+  (cargo `--locked` policy). What we add now: a post-build `tome build`
+  scan of staged artifacts for absolute host paths outside the store root
+  (`/usr/local`, `/opt/homebrew`, build dirs) — warn, `--strict` errors.
+  Catches the common purity leaks cheaply on every platform.
+- **Release engineering.** `CHANGELOG.md` at first tag; release-blocking
+  `grm tome build --all` CI job per platform (blocked on the bootstrap in
+  Active work); generate the minisign release keypair before the first tag
+  (`minisign -GW`, `MINISIGN_SECRET_KEY` secret, public key in README).
+- **Package grimoire as `grimoire`.** Rune in tome-core: codeload tarball
+  pinned by tag, `cargo build --release --locked` (crates fetched at build
+  time per the vendoring decision), `bins: { grm }`, build dep `rust`.
+  Version = release tags; between-tag pins use `-dev.YYYYMMDD` prerelease
+  (orders correctly under semver). `grm upgrade grimoire` then *is*
+  self-update — replaces the old `grm self-update` item (safe: the running
+  binary keeps its inode; the generation flip is atomic).
+
+### Phase 5 — expansion projects (spec before code)
+
+- **linux-aarch64-musl cross bootstrap.** No official rust host tools —
+  needs a real cross story: build deps resolved for the *host* triple
+  while runtime deps and outputs target the *target* triple (the model
+  currently conflates them), cross toolchain-wrappers, rust cross-std.
+  Project-sized; write the design doc first.
 
 ## Planned: Grimoire OS
 
@@ -265,7 +348,7 @@ pointing to the active generation's `bin/`. Current user-local
 
 ## Active work
 
-### Phase 1: Bootstrap core on all targets
+### Bootstrap stage 1: core on all targets
 
 Build the 8/6 core runes (`linux-headers`, `musl`, `compiler-rt`, `llvm`,
 `clang`, `make`, `toybox`, `toolchain-wrappers`) from source on every
@@ -279,7 +362,7 @@ supported target. Current status:
 - ⏳ FreeBSD x86_64
 - ⏳ FreeBSD aarch64
 
-### Phase 2: Full self-hosting
+### Bootstrap stage 2: full self-hosting
 
 Add `cmake` and `python3` to `core` so no non-POSIX host tools are required
 for bootstrap. Removes the need for `host_tool_dirs()`.
