@@ -9,7 +9,7 @@ use std::{env, fs, os::unix::ffi::OsStrExt, path::Path};
 
 use crate::util::paths;
 
-pub fn setup() -> Result<()> {
+pub fn setup(args: crate::cli::SetupArgs) -> Result<()> {
     if env::var_os("GRIMOIRE_ROOT").is_some() {
         let root = paths::install_root()?;
         println!(
@@ -18,12 +18,82 @@ pub fn setup() -> Result<()> {
         );
         return Ok(());
     }
+    if args.dry_run {
+        #[cfg(target_os = "macos")]
+        println!(
+            "would register /grm in /etc/synthetic.conf (requires sudo) and prompt for a \
+             reboot so macOS creates the synthetic root directory"
+        );
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        println!("would create /grm (requires sudo) and chown it to the current user");
+        println!(
+            "would then add the {CORE_TOME_URL} tome (if no tome is configured) and \
+             install grimoire through itself"
+        );
+        return Ok(());
+    }
 
     #[cfg(target_os = "macos")]
-    return setup_macos();
+    setup_macos()?;
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    return setup_linux();
+    setup_linux()?;
+
+    bootstrap_core()
+}
+
+const CORE_TOME_URL: &str = "https://github.com/grimoire-of-glass/tome-core";
+
+/// The dogfooding tail of `grm setup`: once the store is usable, configure the core tome
+/// (when none is configured yet) and install `grimoire` through itself. Best-effort — the
+/// store setup already succeeded, so a bootstrap problem warns instead of failing setup,
+/// and an already-bootstrapped system is a quiet no-op.
+fn bootstrap_core() -> Result<()> {
+    let store = Path::new("/grm");
+    if !store.exists() || !is_writable(store)? {
+        // The macOS first run ends here: /grm appears after the reboot, and the rerun of
+        // `grm setup` the instructions ask for performs the bootstrap.
+        return Ok(());
+    }
+    // Setup itself runs lock-free (there is no install root to lock before it exists);
+    // the bootstrap mutates shared state, so serialise it like any other mutation.
+    let _lock = crate::util::process_lock::acquire()?;
+
+    if crate::tome::load_tomes()?.is_empty() {
+        crate::util::progress::note(&format!("adding the core tome from {CORE_TOME_URL}…"));
+        if let Err(e) = crate::tome::add(crate::cli::TomeAddArgs {
+            git_url: CORE_TOME_URL.to_owned(),
+            ref_name: "main".to_owned(),
+            signer: Vec::new(),
+            dry_run: false,
+        }) {
+            crate::util::progress::warn(&format!(
+                "could not add the core tome: {e:#}; add one with `grm tome add`"
+            ));
+            return Ok(());
+        }
+    }
+
+    let grimoire_installed = crate::install::installed_states()?
+        .iter()
+        .any(|state| state.name == "grimoire");
+    if grimoire_installed {
+        return Ok(());
+    }
+    crate::util::progress::note("installing grimoire through itself…");
+    if let Err(e) = crate::install::install(crate::cli::InstallArgs {
+        packages: vec!["grimoire".to_owned()],
+        from_source: false,
+        locked: false,
+        sha256: None,
+        dry_run: false,
+    }) {
+        crate::util::progress::warn(&format!(
+            "could not install grimoire through itself: {e:#}; run `grm install grimoire` \
+             once the tome publishes it"
+        ));
+    }
+    Ok(())
 }
 
 fn setup_posix(path: &Path) -> Result<()> {
