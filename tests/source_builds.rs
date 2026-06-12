@@ -314,6 +314,22 @@ fn build_install_list_remove() {
         "list includes package name"
     );
 
+    // `remove --dry-run` previews the removal without touching state.
+    let dry = run(root, &["remove", "hello", "--dry-run"]);
+    assert_success(&dry, "remove dry-run");
+    assert!(
+        stdout(&dry).contains("- hello"),
+        "remove dry-run names the package: {}",
+        stdout(&dry)
+    );
+    assert!(
+        root.join("state")
+            .join("packages")
+            .join("hello.nuon")
+            .exists(),
+        "dry-run must not remove anything"
+    );
+
     let remove = run(root, &["remove", "hello"]);
     assert_success(&remove, "remove installed package");
     assert!(
@@ -328,6 +344,20 @@ fn build_install_list_remove() {
     assert!(
         store_has_package(root, "hello"),
         "removal is store-preserving: the store dir stays until `grm clean`"
+    );
+
+    // `clean --dry-run` reports what would be reclaimed without reclaiming it.
+    let clean_dry = run(root, &["clean", "--dry-run", "--keep", "1"]);
+    assert_success(&clean_dry, "clean dry-run");
+    assert!(
+        stdout(&clean_dry).contains("would reclaim")
+            || stdout(&clean_dry).contains("nothing to clean"),
+        "clean dry-run summarises: {}",
+        stdout(&clean_dry)
+    );
+    assert!(
+        store_has_package(root, "hello"),
+        "clean dry-run must not delete store paths"
     );
 }
 

@@ -10,15 +10,21 @@ use anyhow::{Result, bail};
 use std::collections::BTreeMap;
 
 use crate::{
-    cli::PreferArgs, cmd::query, install, model::preferences::Preferences, profile, solve,
-    util::paths, util::progress::report,
+    cli::PreferArgs,
+    cmd::query,
+    install,
+    model::preferences::Preferences,
+    profile, solve,
+    util::paths,
+    util::progress::{self, report},
+    util::table::{self, Cell},
 };
 
 pub fn prefer(args: PreferArgs) -> Result<()> {
     match (&args.capability, &args.package, args.unset) {
         (None, None, false) => list(),
-        (Some(capability), None, true) => unset(capability),
-        (Some(capability), Some(package), false) => set(capability, package),
+        (Some(capability), None, true) => unset(capability, args.dry_run),
+        (Some(capability), Some(package), false) => set(capability, package, args.dry_run),
         (Some(_), None, false) => {
             bail!("specify the package that should provide the capability, or pass --unset")
         }
@@ -34,10 +40,18 @@ pub fn prefer(args: PreferArgs) -> Result<()> {
 fn list() -> Result<()> {
     let preferences = Preferences::load()?;
     if !preferences.providers.is_empty() {
-        println!("preferred:");
-        for (capability, package) in &preferences.providers {
-            println!("  {capability}\t{package}");
-        }
+        println!("{}", progress::strong("preferred:"));
+        let rows = preferences
+            .providers
+            .iter()
+            .map(|(capability, package)| {
+                vec![
+                    Cell::plain(format!("  {capability}")),
+                    Cell::strong(package),
+                ]
+            })
+            .collect();
+        table::print_rows(rows);
     }
 
     let mut contested: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -59,16 +73,35 @@ fn list() -> Result<()> {
         return Ok(());
     }
     if !contested.is_empty() {
-        println!("contested (no preference set):");
-        for (capability, providers) in contested {
-            println!("  {capability}\t{}", providers.join(", "));
-        }
+        println!("{}", progress::strong("contested (no preference set):"));
+        let rows = contested
+            .into_iter()
+            .map(|(capability, providers)| {
+                vec![
+                    Cell::caution(format!("  {capability}")),
+                    Cell::plain(providers.join(", ")),
+                ]
+            })
+            .collect();
+        table::print_rows(rows);
     }
     Ok(())
 }
 
-fn set(capability: &str, package: &str) -> Result<()> {
+fn set(capability: &str, package: &str, dry_run: bool) -> Result<()> {
     validate_provider(capability, package)?;
+    if dry_run {
+        let claimants = installed_claimants(capability)?;
+        println!(
+            "would set `{capability}` → `{package}`{}",
+            if claimants >= 2 {
+                " and relink the active generation"
+            } else {
+                ""
+            }
+        );
+        return Ok(());
+    }
     let mut preferences = Preferences::load()?;
     let previous = preferences
         .providers
@@ -82,10 +115,14 @@ fn set(capability: &str, package: &str) -> Result<()> {
     relink_if_contested(capability)
 }
 
-fn unset(capability: &str) -> Result<()> {
+fn unset(capability: &str, dry_run: bool) -> Result<()> {
     let mut preferences = Preferences::load()?;
     if !preferences.providers.contains_key(capability) {
         report(&format!("no preference set for `{capability}`"));
+        return Ok(());
+    }
+    if dry_run {
+        println!("would clear the preference for `{capability}`");
         return Ok(());
     }
     // Refuse to clear a preference the active generation still depends on: without it the
@@ -147,6 +184,15 @@ fn validate_provider(capability: &str, package: &str) -> Result<()> {
         "`{package}` does not provide `{capability}`; providers are: {}",
         providers.join(", ")
     );
+}
+
+/// How many installed packages claim `capability` as a bin — two or more means a
+/// preference change relinks the active generation.
+fn installed_claimants(capability: &str) -> Result<usize> {
+    Ok(install::installed_states()?
+        .iter()
+        .filter(|state| state.bins.contains_key(capability))
+        .count())
 }
 
 /// Rebuilds and activates a new generation when the preference change affects bins of

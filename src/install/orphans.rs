@@ -11,17 +11,24 @@ use std::{
 };
 
 use crate::{
-    cli::PackageArg, model::PackageState, nu::nuon_io, profile, util::paths, util::progress::report,
+    model::PackageState,
+    nu::nuon_io,
+    profile,
+    util::paths,
+    util::progress::{accent, note, report, strong, warn},
 };
 
 use super::*;
 
-pub fn remove(args: PackageArg) -> Result<()> {
+pub fn remove(args: crate::cli::MutatePackagesArgs) -> Result<()> {
     if let Some(msg) = paths::fixed_store_setup_instructions() {
         bail!("{msg}");
     }
     if args.packages.is_empty() {
         bail!("specify at least one package to remove");
+    }
+    if args.dry_run {
+        return dry_run_remove(&args.packages);
     }
 
     // Never break installed packages: a removal target that something outside the removal set
@@ -45,7 +52,7 @@ pub fn remove(args: PackageArg) -> Result<()> {
             to_remove.push(target.name.clone());
         } else {
             set_requested(&target.name, false, false)?;
-            report(&format!(
+            warn(&format!(
                 "kept {package} — still required by {}; now a dependency, removed once nothing needs it",
                 dependents.join(", ")
             ));
@@ -56,7 +63,7 @@ pub fn remove(args: PackageArg) -> Result<()> {
     let mut all_runtime_deps = Vec::new();
     for package in &to_remove {
         let removed = remove_one(package)?;
-        report(&format!("removed {package}"));
+        report(&format!("removed {}", accent(package)));
         all_runtime_deps.extend(removed.runtime_deps);
     }
     let swept = sweep_orphans(all_runtime_deps)?;
@@ -68,6 +75,80 @@ pub fn remove(args: PackageArg) -> Result<()> {
         report("nothing removed");
     }
     Ok(())
+}
+
+/// `remove --dry-run`: the same target/demotion decisions a real removal makes, plus a pure
+/// simulation of the orphan cascade, printed as a plan with nothing touched.
+fn dry_run_remove(packages: &[String]) -> Result<()> {
+    let states = installed_states()?;
+    let linked = linked_set(&states);
+    let removal_set: HashSet<&str> = packages.iter().map(String::as_str).collect();
+    let mut to_remove = Vec::new();
+    println!("plan:");
+    for package in packages {
+        let Some(target) = states.iter().find(|state| state.name == *package) else {
+            bail!("package `{package}` is not installed");
+        };
+        let dependents = dependents_outside(&states, target, &removal_set, &linked);
+        if dependents.is_empty() {
+            println!("  - {} {}", target.name, target.version);
+            to_remove.push(target.name.clone());
+        } else {
+            println!(
+                "  ~ {} kept — still required by {}; demoted to dependency",
+                target.name,
+                dependents.join(", ")
+            );
+        }
+    }
+    for orphan in simulate_orphan_sweep(&states, &to_remove, &[]) {
+        println!("  - {orphan} (unused dependency)");
+    }
+    Ok(())
+}
+
+/// Pure simulation of [`sweep_orphans`] after removing `removed`: which non-requested,
+/// non-held packages would cascade out, computed on an in-memory copy of state.
+/// `extra_seeds` adds candidates beyond the removed set's dependencies — `clean --dry-run`
+/// seeds with every non-requested package, mirroring the real sweep.
+pub(crate) fn simulate_orphan_sweep(
+    states: &[PackageState],
+    removed: &[String],
+    extra_seeds: &[String],
+) -> Vec<String> {
+    let mut remaining: Vec<PackageState> = states
+        .iter()
+        .filter(|state| !removed.contains(&state.name))
+        .cloned()
+        .collect();
+    let mut queue: VecDeque<String> = states
+        .iter()
+        .filter(|state| removed.contains(&state.name))
+        .flat_map(|state| state.runtime_deps.iter().cloned())
+        .chain(extra_seeds.iter().cloned())
+        .collect();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut swept = Vec::new();
+    while let Some(name) = queue.pop_front() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let Some(index) = remaining.iter().position(|s| s.name == name) else {
+            continue;
+        };
+        if remaining[index].requested || remaining[index].held {
+            continue;
+        }
+        if referenced_by_other(remaining.iter(), &remaining[index]) {
+            continue;
+        }
+        let state = remaining.swap_remove(index);
+        for dep in &state.runtime_deps {
+            queue.push_back(dep.clone());
+        }
+        swept.push(state.name);
+    }
+    swept
 }
 
 /// The *linked* installed packages outside `removal_set` that require `target` in their
@@ -178,7 +259,7 @@ pub(crate) fn sweep_orphans(initial: Vec<String>) -> Result<Vec<String>> {
         }
         let removed =
             remove_one(&name).with_context(|| format!("remove unused dependency `{name}`"))?;
-        report(&format!("removed unused dependency {name}"));
+        note(&format!("removed unused dependency {}", strong(&name)));
         removed_names.push(name);
         for dep in removed.runtime_deps {
             queue.push_back(dep);

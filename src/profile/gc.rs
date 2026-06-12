@@ -5,7 +5,10 @@
 use anyhow::Result;
 use std::{collections::BTreeSet, fs, path::Path};
 
-use crate::{util::paths, util::progress::report};
+use crate::{
+    util::paths,
+    util::progress::{accent, faint, report, warn},
+};
 
 use super::*;
 
@@ -48,6 +51,57 @@ pub fn collect_garbage(keep: usize) -> Result<(usize, usize, u64)> {
     Ok((freed_stores, freed_generations, freed_bytes))
 }
 
+/// Pure version of [`collect_garbage`]: what *would* be reclaimed, with nothing deleted.
+/// Returns `(unreferenced_store_paths, old_generations, bytes)`.
+pub fn plan_garbage(keep: usize) -> Result<(Vec<String>, usize, u64)> {
+    let mut generations = list_generations()?;
+    generations.sort_by_key(|b| std::cmp::Reverse(b.id));
+    if generations.is_empty() {
+        return Ok((Vec::new(), 0, 0));
+    }
+
+    let current = current_generation_id()?;
+    let mut to_retain: BTreeSet<u64> = generations.iter().take(keep).map(|g| g.id).collect();
+    if let Some(current_id) = current {
+        to_retain.insert(current_id);
+        if let Some(previous) = generations
+            .iter()
+            .map(|g| g.id)
+            .filter(|id| *id < current_id)
+            .max()
+        {
+            to_retain.insert(previous);
+        }
+    }
+
+    let old_generations = generations
+        .iter()
+        .filter(|g| !to_retain.contains(&g.id) && Some(g.id) != current)
+        .filter(|g| generation_dir(g.id).map(|d| d.exists()).unwrap_or(false))
+        .count();
+
+    let referenced = collect_referenced_paths(&to_retain)?;
+    let store_root = paths::store_root()?;
+    let mut doomed = Vec::new();
+    let mut bytes = 0u64;
+    if store_root.exists() {
+        for entry in fs::read_dir(&store_root)? {
+            let path = entry?.path();
+            if referenced.contains(&path.display().to_string()) {
+                continue;
+            }
+            bytes += du(&path)?;
+            doomed.push(
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    Ok((doomed, old_generations, bytes))
+}
+
 pub(crate) fn delete_old_generations(
     generations: &[Generation],
     to_retain: &BTreeSet<u64>,
@@ -81,9 +135,7 @@ pub(crate) fn prune_registry() -> Result<()> {
     if registry.len() != before
         && let Err(e) = write_registry(&registry)
     {
-        report(&format!(
-            "warning: could not write generations registry: {e}"
-        ));
+        warn(&format!("could not write generations registry: {e}"));
     }
     Ok(())
 }
@@ -120,9 +172,9 @@ pub(crate) fn collect_unreferenced_stores(referenced: &BTreeSet<String>) -> Resu
         let size = du(&path)?;
         fs::remove_dir_all(&path)?;
         report(&format!(
-            "collected {} ({:.2} MiB)",
-            path.file_name().unwrap_or_default().to_string_lossy(),
-            size as f64 / (1024.0 * 1024.0)
+            "collected {} {}",
+            accent(&path.file_name().unwrap_or_default().to_string_lossy()),
+            faint(&format!("({:.2} MiB)", size as f64 / (1024.0 * 1024.0)))
         ));
         freed += 1;
         bytes += size;

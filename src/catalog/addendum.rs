@@ -18,7 +18,7 @@ use crate::{
     },
     nu::nuon_io,
     tome,
-    util::progress::{report, status},
+    util::progress::{accent, note, report, status, warn},
 };
 
 const MANIFEST: &str = "addendum.nuon";
@@ -27,6 +27,13 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
     validate_tome_url(&args.git_url)?;
     validate_tome_ref(&args.ref_name)?;
     sync_common::validate_local_source(&args.git_url, MANIFEST)?;
+    if args.dry_run {
+        println!(
+            "would clone {} (ref {}) and register the addendum under its manifest name",
+            args.git_url, args.ref_name
+        );
+        return Ok(());
+    }
 
     let name = sync_common::read_source_catalog_name(
         &args.git_url,
@@ -55,11 +62,15 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
         signer_pubkeys: args.signer,
     };
     nuon_io::write_nuon(&state_path, &state.to_value())?;
-    report(&format!("added addendum {name}"));
+    report(&format!("added addendum {}", accent(&name)));
     Ok(())
 }
 
 pub fn remove(args: TomeRemoveArgs) -> Result<()> {
+    if args.dry_run {
+        println!("would remove addendum `{}` and its cache", args.name);
+        return Ok(());
+    }
     sync_common::remove_catalog::<AddendumState>(&args.name, true)
 }
 
@@ -83,10 +94,17 @@ pub fn update(args: TomeUpdateArgs) -> Result<()> {
 
     let mut any_failed = false;
     for state in addenda {
+        if args.dry_run {
+            println!(
+                "would sync addendum `{}` from {} (ref {})",
+                state.name, state.url, state.ref_name
+            );
+            continue;
+        }
         match sync_addendum_cache(&state) {
-            Ok(()) => report(&format!("updated addendum {}", state.name)),
+            Ok(()) => report(&format!("updated addendum {}", accent(&state.name))),
             Err(e) => {
-                report(&format!("failed to update addendum {}: {e}", state.name));
+                warn(&format!("failed to update addendum {}: {e}", state.name));
                 any_failed = true;
             }
         }
@@ -119,7 +137,7 @@ pub fn apply_patches(
         let state = if let Ok(head) = tome::git::head_commit(&cache)
             && head.as_ref() != state.checked_commit.as_ref()
         {
-            report(&format!(
+            note(&format!(
                 "addendum `{}` cache drifted from its recorded commit; re-syncing",
                 state.name
             ));
