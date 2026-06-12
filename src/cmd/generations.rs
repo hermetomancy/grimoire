@@ -37,7 +37,7 @@ pub fn generations() -> Result<()> {
     }
 
     if let Some(id) = current {
-        println!("profiles/current → gen-{id} · every change is undoable");
+        println!("profiles/current → gen-{id}");
     }
     Ok(())
 }
