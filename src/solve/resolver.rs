@@ -98,10 +98,14 @@ impl Resolver<'_> {
         {
             return dep.clone();
         }
-        let providers = self.capabilities.providers(&dep.name);
+        let mut providers = self.capabilities.providers(&dep.name);
         if providers.is_empty() {
             return dep.clone();
         }
+        // Provider order must be deterministic: the choice folds into the chosen package's
+        // dependents' store hashes, and the closure walker (`store::closure`) mirrors this
+        // resolution when hashing straight from a rune — both sides must agree.
+        providers.sort();
         // A `grm prefer` choice wins over everything: it is explicit user intent. If the
         // preferred package cannot satisfy the version requirement, resolution fails loudly
         // downstream instead of silently substituting a different provider. Only a *stale*
@@ -132,8 +136,8 @@ impl Resolver<'_> {
                 };
             }
         }
-        // No installed provider matches; use the first available one. With multiple uninstalled
-        // providers the pick is arbitrary — `grm prefer <capability> <package>` decides it.
+        // No installed provider matches; use the first by name. With multiple uninstalled
+        // providers `grm prefer <capability> <package>` is how the user overrides this pick.
         Dependency {
             name: providers[0].clone(),
             req: dep.req.clone(),
@@ -197,11 +201,16 @@ impl Resolver<'_> {
             if !req.matches(&candidate.version) {
                 continue;
             }
+            // Expand capability names to concrete providers *here*, so the chosen node's dep
+            // list (and therefore the plan step's `runtime_deps`) names real packages: the
+            // topo order needs the dependent→provider edge, and store-hash computation needs
+            // the provider's hash under a name it can find. Worklist re-expansion downstream
+            // is idempotent — a literal package name passes through unchanged.
             let runtime: Vec<Dependency> = candidate
                 .runtime
                 .iter()
                 .filter(|d| d.matches_platform(&target))
-                .cloned()
+                .map(|d| self.expand_capability(d))
                 .collect();
             // Try this candidate against a clone so a branch that fails deeper rolls back.
             let mut trial = chosen.clone();

@@ -1,5 +1,6 @@
-//! Semantic activation: rollback/switch restore package state and the lockfile from the
-//! generation's snapshot, GC preserves the rollback target, and doctor flags divergence.
+//! Semantic activation: rollback restores package state and the lockfile from the
+//! generation's snapshot, clean preserves the rollback target and reclaims unreferenced
+//! store paths, and doctor flags divergence.
 
 mod support;
 
@@ -125,7 +126,7 @@ fn switch_forward_restores_the_newer_set() {
     setup_two_generations(root);
 
     assert_success(&run(root, &["rollback"]), "rollback to gen 1");
-    assert_success(&run(root, &["switch", "2"]), "switch forward to gen 2");
+    assert_success(&run(root, &["rollback", "2"]), "switch forward to gen 2");
 
     let list = stdout(&run(root, &["list"]));
     assert!(
@@ -142,19 +143,48 @@ fn switch_forward_restores_the_newer_set() {
 }
 
 #[test]
-fn gc_preserves_the_rollback_target() {
+fn clean_preserves_the_rollback_target() {
     let root = TempDir::new().unwrap();
     let root = root.path();
     setup_two_generations(root);
     assert_success(&run(root, &["install", "gamma"]), "install gamma (gen 3)");
 
-    assert_success(&run(root, &["gc", "--keep", "1"]), "gc --keep 1");
+    assert_success(&run(root, &["clean", "--keep", "1"]), "clean --keep 1");
     let rollback = run(root, &["rollback"]);
-    assert_success(&rollback, "rollback after aggressive gc");
+    assert_success(&rollback, "rollback after aggressive clean");
     let list = stdout(&run(root, &["list"]));
     assert!(
         list.contains("beta") && !list.contains("gamma"),
-        "rollback target (gen 2) must have survived gc: {list}"
+        "rollback target (gen 2) must have survived clean: {list}"
+    );
+}
+
+#[test]
+fn clean_reclaims_store_dirs_left_by_removal() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    setup_two_generations(root);
+
+    // Removal is store-preserving: beta's store dir survives the remove (gen 3) ...
+    assert_success(&run(root, &["remove", "beta"]), "remove beta (gen 3)");
+    assert!(
+        store_has_package(root, "beta"),
+        "beta's store dir must survive its removal"
+    );
+
+    // ... and a couple more generations push every beta-referencing generation past the
+    // retention window (`--keep 1` retains gen 5 plus its rollback target, gen 4).
+    assert_success(&run(root, &["install", "gamma"]), "install gamma (gen 4)");
+    assert_success(&run(root, &["remove", "gamma"]), "remove gamma (gen 5)");
+    assert_success(&run(root, &["clean", "--keep", "1"]), "clean --keep 1");
+
+    assert!(
+        !store_has_package(root, "beta"),
+        "clean must collect the store dir no retained generation references"
+    );
+    assert!(
+        store_has_package(root, "alpha"),
+        "alpha is still installed and must survive clean"
     );
 }
 
@@ -178,7 +208,7 @@ fn doctor_flags_state_generation_divergence() {
     // Re-activating the current generation is the documented repair path.
     let current = stdout(&run(root, &["generations"]));
     assert!(current.contains("* gen-2"), "gen 2 active: {current}");
-    assert_success(&run(root, &["switch", "2"]), "re-activate to converge");
+    assert_success(&run(root, &["rollback", "2"]), "re-activate to converge");
     assert!(
         root.join("state")
             .join("packages")

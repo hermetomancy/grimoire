@@ -455,12 +455,13 @@ fn install_pulls_in_runtime_dependencies() {
     let lib_store = store_hash(root, "lib");
     let app_store = store_hash(root, "app");
     let app_name = format!("app-0.1.0-{triple}.tar.zst");
-    let app = make_prebuilt(
+    let app = make_prebuilt_with_deps(
         &tome.join("dist").join(&app_name),
         "app",
         "0.1.0",
         &triple,
         &app_store,
+        "[\"lib\"]",
         "#!/usr/bin/env sh\nprintf 'app\\n'\n",
     );
     let app_hash = sha256_file(&app);
@@ -530,13 +531,14 @@ fn install_selects_constrained_dependency_version() {
     .unwrap();
     let dist = tome.join("dist");
     let app_name = format!("app-1.0.0-{triple}.tar.zst");
-    let app = make_versioned_archive_with_hash(
+    let app = make_versioned_archive_with_hash_and_deps(
         &dist.join(&app_name),
         "app",
         "1.0.0",
         &triple,
         "#!/usr/bin/env sh\nprintf 'app\\n'\n",
         "cafef00dcafef000",
+        "[\"lib\"]",
     );
     let app_hash = sha256_file(&app);
 

@@ -50,13 +50,22 @@ pub fn lock_path() -> Result<PathBuf> {
 }
 
 /// Regenerates `grimoire.lock.nuon` from the current installed-package and tome state. Called
-/// after every install and removal so the lock always reflects committed state.
+/// after every install and removal so the lock always reflects committed state. Only the
+/// linked set is recorded: the lock is the blueprint of the user's environment, and
+/// store-only packages (cached build deps, residue) are reproducible scaffolding that
+/// `restore` would only sweep again.
 pub fn rebuild() -> Result<()> {
+    let states = install::installed_states()?;
+    let linked = install::linked_set(&states);
+    let packages = states
+        .into_iter()
+        .filter(|state| linked.contains(&state.name))
+        .collect();
     let lock = LockFile::new(
         paths::target_triple(),
         tome::load_tomes()?,
         sync_common::load_catalogs::<AddendumState>()?,
-        install::installed_states()?,
+        packages,
     );
     let path = lock_path()?;
     if let Some(parent) = path.parent() {

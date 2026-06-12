@@ -8,14 +8,14 @@ use support::*;
 use tempfile::TempDir;
 
 #[test]
-fn remove_autoremoves_orphaned_runtime_dependencies() {
+fn remove_sweeps_orphaned_runtime_dependencies() {
     let root = TempDir::new().unwrap();
     let root = root.path();
     let triple = target_triple();
 
     // Two top-level packages, `app` and `other`, that both depend on the same `lib`. After
     // removing `app`, `lib` must stay because `other` still needs it; after removing `other`,
-    // `lib` becomes truly unreferenced and the cascade autoremove must take it out too.
+    // `lib` becomes truly unreferenced and the orphan sweep must take it out too.
     // A pure binary repo: `app` and `other` both declare a runtime dep on `lib` in their index
     // entries and embedded archive metadata.
     let tome = TempDir::new().unwrap();
@@ -38,7 +38,7 @@ fn remove_autoremoves_orphaned_runtime_dependencies() {
     for (pkg, deps) in [("app", "[\"lib\"]"), ("other", "[\"lib\"]"), ("lib", "[]")] {
         let name = format!("{pkg}-0.1.0-{triple}.tar.zst");
         // Embed deps in the archive's package.nuon, not just the index entry: the install state
-        // record reads from the archive, and the autoremove cascade reads from that state.
+        // record reads from the archive, and the orphan sweep reads from that state.
         let package_nuon = format!(
             "{{format: 1, name: \"{pkg}\", version: \"0.1.0\", target: \"{triple}\", store_path: \"{}\", bins: {{default: {{{pkg}: \"bin/{pkg}\"}}}}, deps: {{ runtime: {deps} }}}}\n",
             fake_store_basename_with_hash(pkg, "0.1.0", &format!("cafef00dcafef00d-{pkg}"))
@@ -98,8 +98,8 @@ fn remove_autoremoves_orphaned_runtime_dependencies() {
         "should report app removal: {remove_app_out}"
     );
     assert!(
-        !remove_app_out.contains("autoremoved unused dependency lib"),
-        "lib must not be autoremoved while other still depends on it: {remove_app_out}"
+        !remove_app_out.contains("removed unused dependency lib"),
+        "lib must not be swept while other still depends on it: {remove_app_out}"
     );
     assert!(lib_state.exists(), "lib should still be installed");
 
@@ -108,13 +108,13 @@ fn remove_autoremoves_orphaned_runtime_dependencies() {
     assert_success(&remove_other, "remove other");
     let remove_other_out = stdout(&remove_other);
     assert!(
-        remove_other_out.contains("autoremoved unused dependency lib"),
-        "lib should be autoremoved when no package depends on it: {remove_other_out}"
+        remove_other_out.contains("removed unused dependency lib"),
+        "lib should be swept when no package depends on it: {remove_other_out}"
     );
     assert!(!lib_state.exists(), "lib state should be gone");
     assert!(
-        !store_has_package(root, "lib"),
-        "lib package dir should be gone"
+        store_has_package(root, "lib"),
+        "removal is store-preserving: lib's store dir stays until `grm clean`"
     );
     assert!(
         !root
@@ -170,7 +170,7 @@ fn install_marks_roots_requested_and_promotes_explicit_deps() {
     );
 
     // An explicit install of an already-installed dependency promotes it, exempting it from
-    // the autoremove cascade when its last dependent goes away.
+    // the orphan sweep when its last dependent goes away.
     assert_success(&run(root, &["install", "lib"]), "explicit install lib");
     assert!(
         state_text(root, "lib").contains("requested: true"),
@@ -180,7 +180,7 @@ fn install_marks_roots_requested_and_promotes_explicit_deps() {
     let remove_app = run(root, &["remove", "app"]);
     assert_success(&remove_app, "remove app");
     assert!(
-        !stdout(&remove_app).contains("autoremoved unused dependency lib"),
+        !stdout(&remove_app).contains("removed unused dependency lib"),
         "requested lib must survive removal of its dependent: {}",
         stdout(&remove_app)
     );
@@ -194,7 +194,7 @@ fn install_marks_roots_requested_and_promotes_explicit_deps() {
 }
 
 #[test]
-fn held_dependency_survives_autoremove_cascade() {
+fn held_dependency_survives_orphan_sweep() {
     let root = TempDir::new().unwrap();
     let root = root.path();
     let triple = target_triple();
@@ -228,8 +228,8 @@ fn held_dependency_survives_autoremove_cascade() {
     let remove_app = run(root, &["remove", "app"]);
     assert_success(&remove_app, "remove app");
     assert!(
-        !stdout(&remove_app).contains("autoremoved unused dependency lib"),
-        "held lib must not be autoremoved: {}",
+        !stdout(&remove_app).contains("removed unused dependency lib"),
+        "held lib must not be swept: {}",
         stdout(&remove_app)
     );
     assert!(
@@ -294,7 +294,7 @@ fn upgrade_sweeps_dependencies_dropped_by_new_version() {
     let upgrade = run(root, &["upgrade", "app"]);
     assert_success(&upgrade, "upgrade app");
     assert!(
-        stdout(&upgrade).contains("autoremoved unused dependency lib"),
+        stdout(&upgrade).contains("removed unused dependency lib"),
         "upgrade must sweep the dropped dep: {}",
         stdout(&upgrade)
     );
@@ -319,90 +319,7 @@ fn upgrade_sweeps_dependencies_dropped_by_new_version() {
 }
 
 #[test]
-fn orphans_lists_and_autoremove_reclaims() {
-    let root = TempDir::new().unwrap();
-    let root = root.path();
-    let triple = target_triple();
-    let tome = TempDir::new().unwrap();
-    let tome = tome.path();
-    let dist = tome.join("dist");
-
-    let entries = vec![
-        dep_archive_entry(
-            &dist,
-            "app",
-            "0.1.0",
-            &triple,
-            "[\"lib\"]",
-            "cafef00dcafef00d-app",
-        ),
-        dep_archive_entry(&dist, "lib", "0.1.0", &triple, "[]", "cafef00dcafef00d-lib"),
-    ];
-    write_dep_tome(tome, "orphcore", &entries);
-    assert_success(
-        &run(
-            root,
-            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
-        ),
-        "tome add orphcore",
-    );
-    assert_success(&run(root, &["tome", "update", "orphcore"]), "tome update");
-    assert_success(&run(root, &["install", "app"]), "install app");
-
-    // Nothing is orphaned while the requested root holds the chain.
-    let orphans = run(root, &["orphans"]);
-    assert_success(&orphans, "orphans");
-    assert!(
-        stdout(&orphans).contains("no orphaned packages"),
-        "no orphans expected: {}",
-        stdout(&orphans)
-    );
-
-    // Demoting the root orphans the whole chain; `orphans` lists it without removing.
-    assert_success(&run(root, &["unrequest", "app"]), "unrequest app");
-    let orphans = run(root, &["orphans"]);
-    assert_success(&orphans, "orphans after unrequest");
-    let listed = stdout(&orphans);
-    assert!(
-        listed.contains("app\t0.1.0") && listed.contains("lib\t0.1.0"),
-        "both packages should be orphaned: {listed}"
-    );
-    assert!(
-        root.join("state")
-            .join("packages")
-            .join("app.nuon")
-            .exists(),
-        "orphans must not remove anything"
-    );
-
-    let autoremove = run(root, &["autoremove"]);
-    assert_success(&autoremove, "autoremove");
-    assert!(
-        !root
-            .join("state")
-            .join("packages")
-            .join("app.nuon")
-            .exists()
-            && !root
-                .join("state")
-                .join("packages")
-                .join("lib.nuon")
-                .exists(),
-        "autoremove must reclaim the orphaned chain"
-    );
-    assert!(
-        !root
-            .join("profiles")
-            .join("current")
-            .join("bin")
-            .join("app")
-            .exists(),
-        "reclaimed bins must leave the active generation"
-    );
-}
-
-#[test]
-fn remove_refuses_to_break_dependents() {
+fn remove_demotes_a_still_required_package_instead_of_breaking_dependents() {
     let root = TempDir::new().unwrap();
     let root = root.path();
     let triple = target_triple();
@@ -431,22 +348,98 @@ fn remove_refuses_to_break_dependents() {
     );
     assert_success(&run(root, &["tome", "update", "guardcore"]), "tome update");
     assert_success(&run(root, &["install", "app"]), "install app");
+    // Promote lib so the demotion below is observable in its state record.
+    assert_success(&run(root, &["install", "lib"]), "explicit install lib");
+    assert!(
+        state_text(root, "lib").contains("requested: true"),
+        "lib promoted: {}",
+        state_text(root, "lib")
+    );
 
-    // Removing a package something still depends on must fail, naming the dependent.
+    // Removing a package something still depends on keeps it, demoted to a dependency.
     let remove_lib = run(root, &["remove", "lib"]);
-    assert_failure_contains(&remove_lib, "still required by app", "remove a needed dep");
+    assert_success(&remove_lib, "remove a still-needed package");
+    assert!(
+        stdout(&remove_lib).contains("kept lib")
+            && stdout(&remove_lib).contains("still required by app"),
+        "demotion must name the dependents: {}",
+        stdout(&remove_lib)
+    );
     assert!(
         root.join("state")
             .join("packages")
             .join("lib.nuon")
             .exists(),
-        "lib must remain installed after the refused removal"
+        "lib must remain installed after the demoting removal"
+    );
+    assert!(
+        state_text(root, "lib").contains("requested: false"),
+        "lib demoted to dependency: {}",
+        state_text(root, "lib")
     );
 
-    // Removing the dependent and the dependency together is allowed.
+    // Removing the last dependent now sweeps the demoted package in the same transaction.
+    let remove_app = run(root, &["remove", "app"]);
+    assert_success(&remove_app, "remove app");
+    assert!(
+        stdout(&remove_app).contains("removed unused dependency lib"),
+        "demoted lib leaves with its last dependent: {}",
+        stdout(&remove_app)
+    );
+    assert!(
+        !root
+            .join("state")
+            .join("packages")
+            .join("app.nuon")
+            .exists()
+            && !root
+                .join("state")
+                .join("packages")
+                .join("lib.nuon")
+                .exists(),
+        "both packages gone after removing the last dependent"
+    );
+}
+
+#[test]
+fn remove_takes_a_dependent_and_its_dependency_together() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let dist = tome.join("dist");
+
+    let entries = vec![
+        dep_archive_entry(
+            &dist,
+            "app",
+            "0.1.0",
+            &triple,
+            "[\"lib\"]",
+            "cafef00dcafef00d-app",
+        ),
+        dep_archive_entry(&dist, "lib", "0.1.0", &triple, "[]", "cafef00dcafef00d-lib"),
+    ];
+    write_dep_tome(tome, "jointcore", &entries);
     assert_success(
-        &run(root, &["remove", "app", "lib"]),
-        "remove the set together",
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add jointcore",
+    );
+    assert_success(&run(root, &["tome", "update", "jointcore"]), "tome update");
+    assert_success(&run(root, &["install", "app"]), "install app");
+
+    // The whole named set leaves together: lib's only dependent is in the removal set, so
+    // lib is removed outright rather than demoted.
+    let remove = run(root, &["remove", "app", "lib"]);
+    assert_success(&remove, "remove the set together");
+    assert!(
+        !stdout(&remove).contains("kept lib"),
+        "lib must not be demoted when its dependent leaves too: {}",
+        stdout(&remove)
     );
     assert!(
         !root

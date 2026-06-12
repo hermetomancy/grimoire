@@ -1,11 +1,13 @@
-//! Removal and orphan cleanup: explicit removes, the autoremove cascade, and the
-//! read-only orphan listing.
+//! Removal and the orphan sweep that runs inside every removing transaction.
+//!
+//! Removal is store-preserving: it drops state records, the lockfile entry, and the package's
+//! presence in the next generation, but leaves the store directory in place — older
+//! generations hard-link from it and `grm clean` reclaims it once nothing references it.
 
 use anyhow::{Context, Result, bail};
 use std::{
     collections::{HashSet, VecDeque},
     fs,
-    path::PathBuf,
 };
 
 use crate::{
@@ -22,52 +24,84 @@ pub fn remove(args: PackageArg) -> Result<()> {
         bail!("specify at least one package to remove");
     }
 
-    // Refuse to break installed packages: a removal target that something outside the
-    // removal set still requires (by name, bin, or capability) is an error naming the
-    // dependents. The whole named set leaves together, so removing a package alongside
-    // its last dependent is fine.
+    // Never break installed packages: a removal target that something outside the removal set
+    // still requires (by name, bin, or capability) is kept and demoted to dependency status
+    // instead, so the sweep takes it out the moment nothing needs it. Only *linked* dependents
+    // count — a store-only package (cached build dep, residue) is not part of the environment
+    // and cannot pin a package into it; its dangling dep is re-resolved if it is ever needed
+    // again. The whole named set leaves together, so removing a package alongside its last
+    // dependent removes both.
     let states = installed_states()?;
+    let linked = linked_set(&states);
     let removal_set: HashSet<&str> = args.packages.iter().map(String::as_str).collect();
+    let mut to_remove = Vec::new();
+    let mut demoted = 0usize;
     for package in &args.packages {
         let Some(target) = states.iter().find(|state| state.name == *package) else {
-            continue; // remove_one reports "not installed" with the right message
+            bail!("package `{package}` is not installed");
         };
-        let dependents: Vec<&str> = states
-            .iter()
-            .filter(|other| other.name != target.name && !removal_set.contains(other.name.as_str()))
-            .filter(|other| {
-                other.runtime_deps.iter().any(|dep| {
-                    dep == &target.name
-                        || target.bins.contains_key(dep)
-                        || target.provides.iter().any(|p| p == dep)
-                })
-            })
-            .map(|state| state.name.as_str())
-            .collect();
-        if !dependents.is_empty() {
-            bail!(
-                "cannot remove `{package}`: still required by {}. Remove the dependents \
-                 first (or in the same command) to proceed",
+        let dependents = dependents_outside(&states, target, &removal_set, &linked);
+        if dependents.is_empty() {
+            to_remove.push(target.name.clone());
+        } else {
+            set_requested(&target.name, false, false)?;
+            report(&format!(
+                "kept {package} — still required by {}; now a dependency, removed once nothing needs it",
                 dependents.join(", ")
-            );
+            ));
+            demoted += 1;
         }
     }
 
     let mut all_runtime_deps = Vec::new();
-    for package in &args.packages {
+    for package in &to_remove {
         let removed = remove_one(package)?;
         report(&format!("removed {package}"));
         all_runtime_deps.extend(removed.runtime_deps);
     }
-    autoremove_orphans(all_runtime_deps)?;
-    let states = installed_states()?;
-    profile::rebuild_and_activate(&states)?;
+    let swept = sweep_orphans(all_runtime_deps)?;
+    if !to_remove.is_empty() || !swept.is_empty() {
+        let states = installed_states()?;
+        profile::rebuild_and_activate(&states)?;
+    } else if demoted > 0 {
+        // Demotion only flips intent flags; the generation's contents are unchanged.
+        report("nothing removed");
+    }
     Ok(())
 }
 
-/// Removes one installed package and returns its prior state record. Each call is a complete
-/// transaction (package directory, state file, lockfile, profile generation) — callers chaining multiple
-/// removes do not need to coordinate rollback across them.
+/// The *linked* installed packages outside `removal_set` that require `target` in their
+/// `runtime_deps` — by its package name, one of its bins, or a capability it provides.
+/// Store-only packages are ignored: they are cache, not environment.
+fn dependents_outside<'a>(
+    states: &'a [PackageState],
+    target: &PackageState,
+    removal_set: &HashSet<&str>,
+    linked: &HashSet<String>,
+) -> Vec<&'a str> {
+    states
+        .iter()
+        .filter(|other| {
+            other.name != target.name
+                && !removal_set.contains(other.name.as_str())
+                && linked.contains(&other.name)
+        })
+        .filter(|other| {
+            other.runtime_deps.iter().any(|dep| {
+                dep == &target.name
+                    || target.bins.contains_key(dep)
+                    || target.provides.iter().any(|p| p == dep)
+            })
+        })
+        .map(|state| state.name.as_str())
+        .collect()
+}
+
+/// Removes one installed package's state record and returns it. Each call is a complete
+/// transaction (state file plus lockfile) — callers chaining multiple removes do not need to
+/// coordinate rollback across them. The store directory is deliberately left in place: it is
+/// content-addressed and unreferenced state-less directories are never re-trusted, so it acts
+/// as a cache until `grm clean` collects it.
 pub(crate) fn remove_one(name: &str) -> Result<PackageState> {
     let root = paths::install_root()?;
     let state_path = root
@@ -82,36 +116,9 @@ pub(crate) fn remove_one(name: &str) -> Result<PackageState> {
     let state = PackageState::from_value(nuon_io::read_nuon(&state_path)?)?;
 
     // Removal mutates the same shared install state as an install, so stage every step against
-    // a transaction: a failure partway through restores the package files and state record
-    // rather than leaving the package half-removed.
+    // a transaction: a failure partway through restores the state record rather than leaving
+    // the package half-removed.
     let mut tx = Transaction::new();
-
-    // Move the package dir aside rather than deleting outright, so a later failure can restore
-    // it; the backup is dropped only once the whole removal commits.
-    let store_root = paths::store_root()?;
-    let package_dir = PathBuf::from(&state.store_path);
-    if !package_dir.starts_with(&store_root) {
-        bail!(
-            "package `{}` store path `{}` is outside the store root `{}`; refusing to remove",
-            state.name,
-            package_dir.display(),
-            store_root.display()
-        );
-    }
-    let backup = backup_path(&package_dir)?;
-    let had_package = package_dir.exists();
-    if had_package {
-        if backup.exists() {
-            fs::remove_dir_all(&backup)?;
-        }
-        fs::rename(&package_dir, &backup)
-            .with_context(|| format!("move aside package {}", package_dir.display()))?;
-        let package_dir = package_dir.clone();
-        let backup = backup.clone();
-        tx.on_rollback(move || {
-            let _ = fs::rename(&backup, &package_dir);
-        });
-    }
 
     let state_bytes = fs::read(&state_path)?;
     {
@@ -125,9 +132,6 @@ pub(crate) fn remove_one(name: &str) -> Result<PackageState> {
     rebuild_lock(&mut tx)?;
 
     tx.commit();
-    if had_package {
-        let _ = fs::remove_dir_all(&backup);
-    }
     Ok(state)
 }
 
@@ -149,35 +153,12 @@ pub(crate) fn referenced_by_other<'a>(
     })
 }
 
-/// The packages `grm autoremove` would delete: dependency-installed (`!requested`), not held,
-/// and unreferenced by any remaining package. Iterates to a fixed point so chains collapse —
-/// removing an orphan can orphan its own dependencies in turn. Read-only; serves `grm orphans`.
-pub(crate) fn orphan_candidates(states: &[PackageState]) -> Vec<String> {
-    let mut remaining: Vec<&PackageState> = states.iter().collect();
-    let mut orphans = Vec::new();
-    loop {
-        let (gone, kept): (Vec<&PackageState>, Vec<&PackageState>) =
-            remaining.iter().copied().partition(|state| {
-                !state.requested
-                    && !state.held
-                    && !referenced_by_other(remaining.iter().copied(), state)
-            });
-        if gone.is_empty() {
-            break;
-        }
-        orphans.extend(gone.iter().map(|state| state.name.clone()));
-        remaining = kept;
-    }
-    orphans.sort();
-    orphans
-}
-
-/// Removes runtime dependencies left orphaned by a previous removal or upgrade — packages no
-/// other installed package still lists in its `runtime_deps`. Cascades transitively: a dep
-/// that becomes orphaned mid-pass is itself a candidate. Explicitly requested and held
-/// packages are never autoremoved. Build dependencies are not considered; once a package is
-/// installed they are no longer load-bearing for it. Returns the names removed.
-pub(crate) fn autoremove_orphans(initial: Vec<String>) -> Result<Vec<String>> {
+/// Removes runtime dependencies left orphaned by a removal or upgrade — packages no other
+/// installed package still lists in its `runtime_deps`. Cascades transitively: a dep that
+/// becomes orphaned mid-pass is itself a candidate. Explicitly requested and held packages are
+/// never swept. Build dependencies are not considered; once a package is installed they are no
+/// longer load-bearing for it. Returns the names removed.
+pub(crate) fn sweep_orphans(initial: Vec<String>) -> Result<Vec<String>> {
     let mut queue: VecDeque<String> = initial.into();
     let mut seen: HashSet<String> = HashSet::new();
     let mut removed_names = Vec::new();
@@ -196,8 +177,8 @@ pub(crate) fn autoremove_orphans(initial: Vec<String>) -> Result<Vec<String>> {
             continue;
         }
         let removed =
-            remove_one(&name).with_context(|| format!("autoremove unused dependency `{name}`"))?;
-        report(&format!("autoremoved unused dependency {name}"));
+            remove_one(&name).with_context(|| format!("remove unused dependency `{name}`"))?;
+        report(&format!("removed unused dependency {name}"));
         removed_names.push(name);
         for dep in removed.runtime_deps {
             queue.push_back(dep);
@@ -205,48 +186,6 @@ pub(crate) fn autoremove_orphans(initial: Vec<String>) -> Result<Vec<String>> {
         states = installed_states()?;
     }
     Ok(removed_names)
-}
-
-/// Lists the packages `grm autoremove` would remove, without removing anything.
-pub fn orphans() -> Result<()> {
-    let states = installed_states()?;
-    let candidates = orphan_candidates(&states);
-    if candidates.is_empty() {
-        report("no orphaned packages");
-        return Ok(());
-    }
-    for name in candidates {
-        let version = states
-            .iter()
-            .find(|s| s.name == name)
-            .map(|s| s.version.as_str())
-            .unwrap_or("");
-        println!("{name}\t{version}");
-    }
-    Ok(())
-}
-
-/// Removes every orphaned dependency package: installed as a dependency (not requested, not
-/// held) and referenced by no remaining package. Rebuilds the active generation when anything
-/// was removed.
-pub fn autoremove() -> Result<()> {
-    if let Some(msg) = paths::fixed_store_setup_instructions() {
-        bail!("{msg}");
-    }
-    let states = installed_states()?;
-    let seeds: Vec<String> = states
-        .iter()
-        .filter(|state| !state.requested && !state.held)
-        .map(|state| state.name.clone())
-        .collect();
-    let removed = autoremove_orphans(seeds)?;
-    if removed.is_empty() {
-        report("no orphaned packages");
-        return Ok(());
-    }
-    let states = installed_states()?;
-    profile::rebuild_and_activate(&states)?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -275,54 +214,67 @@ mod tests {
     }
 
     #[test]
-    fn orphan_candidates_keeps_referenced_deps() {
-        let states = vec![
+    fn referenced_dep_is_not_orphaned() {
+        let states = [
             state("app", &["lib"], true, false),
             state("lib", &[], false, false),
         ];
-        assert!(orphan_candidates(&states).is_empty());
+        assert!(referenced_by_other(states.iter(), &states[1]));
     }
 
     #[test]
-    fn orphan_candidates_finds_unreferenced_dep() {
-        let states = vec![
+    fn unreferenced_dep_is_orphaned() {
+        let states = [
             state("app", &[], true, false),
             state("lib", &[], false, false),
         ];
-        assert_eq!(orphan_candidates(&states), vec!["lib".to_owned()]);
+        assert!(!referenced_by_other(states.iter(), &states[1]));
     }
 
     #[test]
-    fn orphan_candidates_cascades_chains() {
-        // app no longer depends on lib-a; lib-a -> lib-b becomes a dead chain.
-        let states = vec![
-            state("app", &[], true, false),
-            state("lib-a", &["lib-b"], false, false),
-            state("lib-b", &[], false, false),
-        ];
-        assert_eq!(
-            orphan_candidates(&states),
-            vec!["lib-a".to_owned(), "lib-b".to_owned()]
-        );
-    }
-
-    #[test]
-    fn orphan_candidates_spares_requested_and_held() {
-        let states = vec![
-            state("explicit", &[], true, false),
-            state("pinned", &[], false, true),
-            state("dep-of-pinned", &[], false, false),
-        ];
-        // `pinned` is held so it survives, and it references nothing, so `dep-of-pinned`
-        // (referenced by nobody) is the only orphan.
-        assert_eq!(orphan_candidates(&states), vec!["dep-of-pinned".to_owned()]);
-    }
-
-    #[test]
-    fn orphan_candidates_resolves_capability_references() {
+    fn capability_reference_counts_as_a_dependent() {
         let mut provider = state("gawk", &[], false, false);
         provider.provides = vec!["awk".to_owned()];
-        let states = vec![state("app", &["awk"], true, false), provider];
-        assert!(orphan_candidates(&states).is_empty());
+        let states = [state("app", &["awk"], true, false), provider.clone()];
+        assert!(referenced_by_other(states.iter(), &provider));
+    }
+
+    #[test]
+    fn dependents_outside_ignores_the_removal_set() {
+        let states = vec![
+            state("app", &["lib"], true, false),
+            state("other", &["lib"], true, false),
+            state("lib", &[], false, false),
+        ];
+        let linked = linked_set(&states);
+        let everyone: HashSet<&str> = HashSet::new();
+        assert_eq!(
+            dependents_outside(&states, &states[2], &everyone, &linked),
+            vec!["app", "other"]
+        );
+        let with_app: HashSet<&str> = ["app"].into();
+        assert_eq!(
+            dependents_outside(&states, &states[2], &with_app, &linked),
+            vec!["other"]
+        );
+        let both: HashSet<&str> = ["app", "other"].into();
+        assert!(dependents_outside(&states, &states[2], &both, &linked).is_empty());
+    }
+
+    #[test]
+    fn store_only_dependents_cannot_pin_a_package() {
+        // `residue` (not requested, referenced by nothing linked) runtime-depends on `tool`,
+        // but residue is cache, not environment: removing `tool` must not be blocked by it.
+        let states = vec![
+            state("tool", &[], true, false),
+            state("residue", &["tool"], false, false),
+        ];
+        let linked = linked_set(&states);
+        assert!(!linked.contains("residue"), "residue must be store-only");
+        let nobody: HashSet<&str> = HashSet::new();
+        assert!(
+            dependents_outside(&states, &states[0], &nobody, &linked).is_empty(),
+            "a store-only referencer must not count as a dependent"
+        );
     }
 }

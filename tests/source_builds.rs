@@ -326,8 +326,8 @@ fn build_install_list_remove() {
         "removed shim should be gone"
     );
     assert!(
-        !store_has_package(root, "hello"),
-        "removed store dir should be gone"
+        store_has_package(root, "hello"),
+        "removal is store-preserving: the store dir stays until `grm clean`"
     );
 }
 
@@ -496,4 +496,133 @@ fn platform_filtered_sources_are_skipped_for_other_targets() {
     let install = run(root, &["install", rune.to_str().unwrap()]);
     assert_success(&install, "install with a filtered-out source");
     assert_eq!(stdout(&run_shim(root, "splitsrc")).trim(), "splitsrc");
+}
+
+#[test]
+fn changed_runtime_dep_rune_reinstalls_dep_and_dependent() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    // `app` runtime-depends on `lib`. Editing lib's rune without changing its version gives
+    // lib a new content address — and, because runtime deps fold into their dependents'
+    // hashes, a new address for app too. The next install must re-realize both instead of
+    // reusing them by version.
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'drifttome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    let lib_rune = |payload: &str| {
+        format!(
+            "export const package = {{\n  name: 'lib'\n  version: '0.1.0'\n \n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf '{payload}\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'lib')\n}}\n"
+        )
+    };
+    fs::write(runes.join("lib.rn"), lib_rune("lib one")).unwrap();
+    fs::write(
+        runes.join("app.rn"),
+        "export const package = {\n  name: 'app'\n  version: '0.1.0'\n  deps: { runtime: ['lib'], build: {} }\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'app\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'app')\n}\n",
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "add drift tome");
+    assert_success(&run(root, &["install", "app"]), "install app");
+    assert_eq!(stdout(&run_shim(root, "lib")).trim(), "lib one");
+    let lib_state_before = state_text(root, "lib");
+
+    fs::write(runes.join("lib.rn"), lib_rune("lib two")).unwrap();
+    assert_success(&run(root, &["tome", "update", "drifttome"]), "tome update");
+
+    let reinstall = run(root, &["install", "app"]);
+    assert_success(&reinstall, "reinstall app after lib rune change");
+    assert_eq!(
+        stdout(&run_shim(root, "lib")).trim(),
+        "lib two",
+        "the active generation must surface the re-realized lib"
+    );
+    assert_ne!(
+        state_text(root, "lib"),
+        lib_state_before,
+        "lib's state record must carry the new content address"
+    );
+
+    // With nothing drifted, the same install is a no-op again.
+    let again = run(root, &["install", "app"]);
+    assert_success(&again, "reinstall app with no drift");
+    assert!(
+        stdout(&again).contains("already installed and up to date"),
+        "an unchanged graph must not reinstall: {}",
+        stdout(&again)
+    );
+}
+
+#[test]
+fn held_package_is_not_re_realized_for_rune_drift() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    // A hold pins the installed bits, not just the version: a rune edit at the same version
+    // must not re-realize a held package until it is released.
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'holdfast'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    let pinned_rune = |payload: &str| {
+        format!(
+            "export const package = {{\n  name: 'pinned'\n  version: '0.1.0'\n \n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf '{payload}\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'pinned')\n}}\n"
+        )
+    };
+    fs::write(runes.join("pinned.rn"), pinned_rune("payload one")).unwrap();
+
+    let add = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "add holdfast tome");
+    assert_success(&run(root, &["install", "pinned"]), "install pinned");
+    assert_success(&run(root, &["hold", "pinned"]), "hold pinned");
+    let state_before = state_text(root, "pinned");
+
+    fs::write(runes.join("pinned.rn"), pinned_rune("payload two")).unwrap();
+    assert_success(&run(root, &["tome", "update", "holdfast"]), "tome update");
+
+    let reinstall = run(root, &["install", "pinned"]);
+    assert_success(&reinstall, "reinstall while held");
+    assert!(
+        !stdout(&reinstall).contains("no longer matches its rune"),
+        "a held package must not be flagged for drift: {}",
+        stdout(&reinstall)
+    );
+    assert_eq!(
+        stdout(&run_shim(root, "pinned")).trim(),
+        "payload one",
+        "held bits must stay exactly as installed"
+    );
+    assert_eq!(
+        state_text(root, "pinned"),
+        state_before,
+        "held state must be untouched by drift"
+    );
+
+    // Releasing the hold lets the pending drift apply on the next install.
+    assert_success(&run(root, &["unhold", "pinned"]), "unhold pinned");
+    let after = run(root, &["install", "pinned"]);
+    assert_success(&after, "reinstall after unhold");
+    assert_eq!(
+        stdout(&run_shim(root, "pinned")).trim(),
+        "payload two",
+        "the released package must be re-realized from the edited rune"
+    );
 }

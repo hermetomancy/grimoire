@@ -9,6 +9,7 @@ use crate::{
     model::{Dependency, PackageState},
     solve,
     util::paths,
+    util::progress::report,
 };
 
 use super::*;
@@ -31,11 +32,37 @@ pub(crate) fn ensure_build_deps_installed_inner(
 
     let mut installed = installed_versions()?;
     let states = installed_states().unwrap_or_default();
-    let missing: Vec<Dependency> = deps
-        .iter()
-        .filter(|dep| find_dep_state(&states, &dep.name).is_none())
-        .cloned()
+
+    // A build dep is *missing* when nothing installed satisfies it, and *stale* when the
+    // satisfying install no longer matches its rune — same version, different store hash
+    // (e.g. the rune was edited after the dep was first realized). Stale deps re-resolve so
+    // the rune stays the truth: the solver sees them as absent and realization replaces
+    // them at their new address.
+    let mut missing: Vec<Dependency> = Vec::new();
+    let mut satisfied: Vec<PackageState> = Vec::new();
+    for dep in deps {
+        match find_dep_state(&states, &dep.name) {
+            None => missing.push(dep.clone()),
+            Some(state) => satisfied.push(state.clone()),
+        }
+    }
+    let stale: HashSet<String> = crate::store::closure::stale_installed(&satisfied)
+        .into_iter()
         .collect();
+    for dep in deps {
+        if let Some(state) = find_dep_state(&states, &dep.name)
+            && stale.contains(&state.name)
+        {
+            report(&format!(
+                "{} {} no longer matches its rune; reinstalling",
+                state.name, state.version
+            ));
+            missing.push(dep.clone());
+        }
+    }
+    for name in &stale {
+        installed.remove(name);
+    }
 
     if missing.is_empty() {
         return Ok(());

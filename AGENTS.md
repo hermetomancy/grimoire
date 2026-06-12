@@ -133,13 +133,19 @@ Grimoire has no database. Durability is explicit transaction directories plus at
    partway leaves the user-visible profile untouched. Per-package work commits as it
    completes, so a failed multi-package command can leave already-completed packages in the
    store and state as *store-only residue*: never linked into a generation, marked
-   `requested: false`, and reclaimed by `grm autoremove`. Do not claim stronger atomicity
+   `requested: false`, and reclaimed by `grm clean`. Do not claim stronger atomicity
    than this.
 4. Installed package version directories are immutable once promoted. Upgrades create new version
    directories.
-5. Local state is inspectable NUON under the install root. No databases.
-6. **Activation is semantic.** Every generation embeds a full `state.nuon` snapshot of the
-   package state it was built from. `grm switch`/`grm rollback` restore `state/packages/`
+5. **Dependency reuse is content-addressed, not name+version.** Resolution reuses an installed
+   package only while its recorded store hash still matches what its rune at the same version
+   would produce now (`closure::stale_installed`); a drifted package — rune edit, source bump,
+   build-env change — is re-realized at its new address on the next install that needs it. A
+   rune at a *different* version is `grm upgrade`'s business, and a package with no resolvable
+   rune (local archive) stays reusable.
+6. Local state is inspectable NUON under the install root. No databases.
+7. **Activation is semantic.** Every generation embeds a full `state.nuon` snapshot of the
+   package state it was built from. `grm rollback` restores `state/packages/`
    and the lockfile from that snapshot *before* flipping the `current` symlink, so the
    active generation and the recorded state always describe the same world — rolling back
    really rolls back, and the next mutating command builds on the activated set instead of
