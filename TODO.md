@@ -119,11 +119,11 @@ pointing to the active generation's `bin/`. Current user-local
   source` / `local archive` / store-only variants) via `InstallOrigin` threaded through
   `install_archive`/`install_store_only`.
 - Mutations end with `generation N is now current`; rollback/switch print `switching profile
-  to generation N…` plus a timed `restored/switched in X.XXs — nothing was rebuilt, nothing
-  was lost`; duplicate confirmations from `main.rs` removed.
+  to generation N…` plus a timed `rolled back to generation N in X.XXs`; duplicate
+  confirmations from `main.rs` removed.
 - `grm generations` (new `src/cmd/generations.rs`) diffs each generation against its
   predecessor (`+ added 1.2.3, ~ moved 1.0 → 1.1, - removed`, snapshot-aware) and ends with
-  `profiles/current → gen-N · every change is undoable`.
+  `profiles/current → gen-N`.
 - Major-version upgrades warn persistently with a `grm hold` hint.
 
 ### Dependency minimization

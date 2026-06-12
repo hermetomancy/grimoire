@@ -84,11 +84,11 @@ fn run(cli: Cli) -> Result<()> {
         Command::Prefer(args) => cmd::prefer::prefer(args),
         Command::Rollback => {
             let started = std::time::Instant::now();
-            profile::rollback()?;
+            let id = profile::rollback()?;
             progress::report(&format!(
-                "restored in {} {}",
-                progress::strong(&format!("{:.2}s", started.elapsed().as_secs_f64())),
-                progress::faint("— nothing was rebuilt, nothing was lost"),
+                "rolled back to generation {} in {:.2}s",
+                progress::strong(&id.to_string()),
+                started.elapsed().as_secs_f64(),
             ));
             Ok(())
         }
@@ -96,9 +96,9 @@ fn run(cli: Cli) -> Result<()> {
             let started = std::time::Instant::now();
             if profile::activate_generation(args.id)? {
                 progress::report(&format!(
-                    "switched in {} {}",
-                    progress::strong(&format!("{:.2}s", started.elapsed().as_secs_f64())),
-                    progress::faint("— nothing was rebuilt, nothing was lost"),
+                    "switched to generation {} in {:.2}s",
+                    progress::strong(&args.id.to_string()),
+                    started.elapsed().as_secs_f64(),
                 ));
             }
             Ok(())
