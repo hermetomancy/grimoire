@@ -704,3 +704,72 @@ fn restore_reproduces_locked_set_on_a_fresh_root() {
     );
     assert_eq!(stdout(&run_shim(fresh_root, "app")).trim(), "app-0.1.0");
 }
+
+/// A package at the newest version whose rune was edited in place (same version, new
+/// content address) must not be reported "up to date" by `grm upgrade` — the upgrade is
+/// the convergence command: dry-run names the pending rebuild, and a real run re-realizes
+/// the package at its new address.
+#[test]
+fn upgrade_rebuilds_a_drifted_package_instead_of_claiming_up_to_date() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let tome = TempDir::new().unwrap();
+    let tome_path = tome.path();
+    let runes = tome_path.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome_path.join("tome.rn"),
+        "export const tome = {\n  name: 'updrift'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    let rune = |payload: &str| {
+        format!(
+            "export const package = {{\n  name: 'tool'\n  version: '0.1.0'\n \n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf '{payload}\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'tool')\n}}\n"
+        )
+    };
+    fs::write(runes.join("tool.rn"), rune("first")).unwrap();
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome_path.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add updrift",
+    );
+    assert_success(&run(root, &["install", "tool"]), "install tool");
+    assert_eq!(stdout(&run_shim(root, "tool")).trim(), "first");
+
+    // Same version, different content: the address drifts once the tome cache re-syncs.
+    fs::write(runes.join("tool.rn"), rune("second")).unwrap();
+    assert_success(&run(root, &["tome", "update", "updrift"]), "tome update");
+
+    let dry = run(root, &["upgrade", "tool", "--dry-run"]);
+    assert_success(&dry, "upgrade --dry-run with drift");
+    assert!(
+        stdout(&dry).contains("rebuild: address drifted"),
+        "dry-run must name the pending rebuild: {}",
+        stdout(&dry)
+    );
+    assert!(
+        !stdout(&dry).contains("is up to date"),
+        "a drifted package must not be reported up to date: {}",
+        stdout(&dry)
+    );
+
+    let upgrade = run(root, &["upgrade", "tool"]);
+    assert_success(&upgrade, "upgrade converges the drift");
+    assert_eq!(
+        stdout(&run_shim(root, "tool")).trim(),
+        "second",
+        "the rebuilt package must be live in the profile"
+    );
+
+    // Once converged, up to date means it again.
+    let again = run(root, &["upgrade", "tool", "--dry-run"]);
+    assert_success(&again, "upgrade --dry-run after convergence");
+    assert!(
+        !stdout(&again).contains("address drifted"),
+        "no drift after convergence: {}",
+        stdout(&again)
+    );
+}

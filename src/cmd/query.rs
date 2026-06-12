@@ -242,6 +242,21 @@ fn collect_upgrades(
     explicit: bool,
     dry_run: bool,
 ) -> Result<Vec<(String, Version, Version)>> {
+    // A package at the newest version can still be pending a rebuild: its expected
+    // content address drifted (rune edited, dependency re-addressed, build environment
+    // changed). Upgrade is the convergence command, so drifted packages are selected for
+    // re-realization at the same version — and never reported "up to date" while stale.
+    let states = crate::install::installed_states()?;
+    let targeted: Vec<crate::model::PackageState> = states
+        .into_iter()
+        .filter(|state| targets.contains(&state.name))
+        .collect();
+    let drifted: std::collections::HashSet<String> =
+        crate::store::closure::stale_installed(&targeted)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+
     let mut to_upgrade: Vec<(String, Version, Version)> = Vec::new();
     for name in targets {
         let Some(current) = installed.get(name) else {
@@ -270,6 +285,12 @@ fn collect_upgrades(
                 }
                 to_upgrade.push((name.clone(), current.clone(), newest));
             }
+            _ if drifted.contains(name.as_str()) => {
+                if !dry_run {
+                    progress::status(&format!("rebuilding {name} {current} (address drifted)"));
+                }
+                to_upgrade.push((name.clone(), current.clone(), current.clone()));
+            }
             _ => progress::report(&format!(
                 "{} {}",
                 progress::accent(name),
@@ -283,7 +304,11 @@ fn collect_upgrades(
 fn print_upgrade_plan(to_upgrade: &[(String, Version, Version)]) {
     println!("plan:");
     for (name, current, newest) in to_upgrade {
-        println!("  ~ {name} {current} → {newest}");
+        if current == newest {
+            println!("  ~ {name} {current} (rebuild: address drifted)");
+        } else {
+            println!("  ~ {name} {current} → {newest}");
+        }
     }
 }
 
