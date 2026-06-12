@@ -22,7 +22,7 @@ tome-core runes (`rust-stage0` + `rust` 1.96.0, llvm `LLVM_INSTALL_UTILS`)
 live outside this repo's history — `tome-core/` is gitignored; commit them
 in the tome repository.
 
-### Phase 1 — small correctness/UX fixes (each ≤ half a day)
+### Phase 1 — small correctness/UX fixes ✅ (2026-06-12)
 
 - **Early rune-subset validation.** Const extraction
   (`nu/runtime/eval.rs` bare-core context) accepts runes the build runner
@@ -47,7 +47,7 @@ in the tome repository.
   liblzma via pkg-config — a host dependency leak, and a blocker for the
   `grimoire` rune.
 
-### Phase 2 — rune metadata cache (performance)
+### Phase 2 — rune metadata cache ✅ (2026-06-12)
 
 Every staleness walk nu-evals the rune of every installed package; building
 a `CapabilityIndex` nu-evals every rune in every tome. Linear in installed
@@ -63,7 +63,7 @@ set × catalog size, paid per mutating command. Design:
 - Version-stamp the cache directory (rune-eval semantics may change across
   grimoire versions); `grm clean` wipes it like any cache.
 
-### Phase 3 — catalog-readiness (decide before the catalog grows)
+### Phase 3 — catalog-readiness ✅ (2026-06-12)
 
 - **Version policy: normalize, don't vercmp.** Keep `semver::Version` as
   the only internal ordering. Codify in rune-authoring.md: `version` must
@@ -83,7 +83,16 @@ set × catalog size, paid per mutating command. Design:
   become catalog-expressible (the `rust` → `rust-stage0` rename was free
   only because nothing was released).
 
-### Phase 4 — build pipeline
+### Phase 4 — build pipeline ✅ (2026-06-12, two user actions remain)
+
+Done except: (1) generate the minisign release keypair before the first tag
+(`minisign -GW`, `MINISIGN_SECRET_KEY` secret, public key in README) — a
+key-custody action only the maintainer can take; (2) pin a real commit +
+tarball hash into tome-core's `grimoire.rn` once these commits are pushed,
+and commit the rune in the tome repository. The tome-build.yml workflow is
+manual until Bootstrap stage 1 lands, then becomes a release gate.
+
+Original items for reference:
 
 - **Built-archive cache trust.** Remove → reinstall of a source-built
   package currently rebuilds from scratch (unrecorded store dirs are
