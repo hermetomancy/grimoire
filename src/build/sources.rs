@@ -15,7 +15,14 @@ pub(super) fn prepare_sources(
     let sources_dir = work_dir.join("sources");
     let mut prepared = BTreeMap::new();
     for (name, mut source) in sources {
-        if let Some(kind) = source_archive_kind(&source.url) {
+        // Extension first; for extensionless URLs (codeload commit tarballs), sniff the
+        // fetched bytes — the URL carries no filename to judge by.
+        let kind = source_archive_kind(&source.url).or_else(|| {
+            url_is_extensionless(&source.url)
+                .then(|| source_archive_kind_sniffed(&source.path))
+                .flatten()
+        });
+        if let Some(kind) = kind {
             let destination = sources_dir.join(&name);
             fs::create_dir_all(&destination)?;
             extract_source_archive(&source.path, &destination, kind)
@@ -51,6 +58,34 @@ pub(super) fn source_archive_kind(url: &str) -> Option<SourceArchiveKind> {
         return Some(SourceArchiveKind::TarXz);
     }
     None
+}
+
+/// Whether a URL names no file extension at all (final path segment has no `.`), like
+/// codeload.github.com commit tarballs (`.../tar.gz/<sha>`). Only such URLs are eligible
+/// for content sniffing — a URL with *any* extension (`.patch.gz`, `.txt`) keeps its
+/// extension-derived meaning, so a compressed-but-not-tar artifact never extracts.
+pub(super) fn url_is_extensionless(url: &str) -> bool {
+    let normalized = url.split(['?', '#']).next().unwrap_or(url);
+    normalized
+        .rsplit('/')
+        .next()
+        .is_some_and(|segment| !segment.contains('.'))
+}
+
+/// Detects the tarball container by magic bytes for URLs that name no extension. The tar
+/// layer is assumed, like everywhere else in source handling; a sniffed container that is
+/// not a tarball fails extraction loudly rather than passing through silently.
+pub(super) fn source_archive_kind_sniffed(path: &Path) -> Option<SourceArchiveKind> {
+    let mut magic = [0u8; 6];
+    let mut file = fs::File::open(path).ok()?;
+    use std::io::Read;
+    file.read_exact(&mut magic).ok()?;
+    match magic {
+        [0x1f, 0x8b, ..] => Some(SourceArchiveKind::TarGz),
+        [0xfd, b'7', b'z', b'X', b'Z', 0x00] => Some(SourceArchiveKind::TarXz),
+        [0x28, 0xb5, 0x2f, 0xfd, ..] => Some(SourceArchiveKind::TarZst),
+        _ => None,
+    }
 }
 
 pub(super) fn extract_source_archive(
@@ -93,5 +128,52 @@ pub(super) fn source_archive_reader(path: &Path, kind: SourceArchiveKind) -> Res
             zstd::stream::read::Decoder::new(file)
                 .with_context(|| format!("decode zstd source archive {}", path.display()))?,
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extensionless_urls_are_sniff_eligible_and_named_files_are_not() {
+        // codeload commit tarballs name no file — the whole reason sniffing exists.
+        assert!(url_is_extensionless(
+            "https://codeload.github.com/o/r/tar.gz/58b0188a7b8b90251a96b14513355594ac7ec949"
+        ));
+        assert!(url_is_extensionless("https://example.com/download?id=3"));
+        // Any extension keeps its meaning: a gzipped patch must not become a tarball.
+        assert!(!url_is_extensionless("https://example.com/fix.patch.gz"));
+        assert!(!url_is_extensionless("payload.txt"));
+        assert!(!url_is_extensionless(
+            "https://ftp.gnu.org/gnu/hello/hello-2.12.3.tar.gz"
+        ));
+    }
+
+    #[test]
+    fn sniffing_recognises_the_three_containers_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            fs::write(&path, bytes).unwrap();
+            path
+        };
+        let gz = write("gz", &[0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00]);
+        let xz = write("xz", &[0xfd, b'7', b'z', b'X', b'Z', 0x00]);
+        let zst = write("zst", &[0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x00]);
+        let txt = write("txt", b"verified source payload");
+        assert!(matches!(
+            source_archive_kind_sniffed(&gz),
+            Some(SourceArchiveKind::TarGz)
+        ));
+        assert!(matches!(
+            source_archive_kind_sniffed(&xz),
+            Some(SourceArchiveKind::TarXz)
+        ));
+        assert!(matches!(
+            source_archive_kind_sniffed(&zst),
+            Some(SourceArchiveKind::TarZst)
+        ));
+        assert!(source_archive_kind_sniffed(&txt).is_none());
     }
 }
