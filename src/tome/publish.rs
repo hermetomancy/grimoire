@@ -90,8 +90,8 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
         &mut catalog,
     )?;
 
-    report(&format!("registered in {}", index_path.display()));
-    report(&format!(
+    crate::util::progress::note(&format!("registered in {}", index_path.display()));
+    crate::util::progress::note(&format!(
         "publish: upload the contents of {} to the location in packages.repo",
         dist_dir.display()
     ));
@@ -115,41 +115,57 @@ pub(crate) fn build_runes(
     let current_target = target.unwrap_or(&host_target);
     let mut any_built = false;
     for name in rune_names {
-        if !force
-            && let Some(existing) = catalog
-                .entries
-                .values()
-                .find(|e| e.name == *name && e.target == current_target)
-        {
-            let archive_path = dist_dir.join(format!(
-                "{}-{}-{}.tar.zst",
-                existing.name, existing.version, existing.target
+        // A split group is one build with several outputs: skip only when *every* member is
+        // already registered with its archive present.
+        let output_names = group_output_names(root, name)?;
+        let already_built = !force
+            && output_names.iter().all(|output_name| {
+                catalog
+                    .entries
+                    .values()
+                    .find(|e| e.name == *output_name && e.target == current_target)
+                    .is_some_and(|existing| {
+                        dist_dir
+                            .join(format!(
+                                "{}-{}-{}.tar.zst",
+                                existing.name, existing.version, existing.target
+                            ))
+                            .exists()
+                    })
+            });
+        if already_built {
+            status(&format!(
+                "skipping {} (already built; pass --force to rebuild)",
+                output_names.join(", ")
             ));
-            if archive_path.exists() {
-                status(&format!(
-                    "skipping {} {} (already built; pass --force to rebuild)",
-                    existing.name, existing.version
-                ));
-                continue;
-            }
+            continue;
         }
-        let (store_hash, entry, archive) =
-            build_rune_into(root, name, dist_dir, bootstrap, target)?;
-        lint_archive_purity(&archive, strict)
-            .with_context(|| format!("purity lint for `{}`", entry.name))?;
-        report(&format!(
-            "built {} {} ({}) into {}",
-            entry.name,
-            entry.version,
-            entry.target,
-            archive.display()
-        ));
-        if all {
-            install::install_store_only(&archive, None, None, install::InstallOrigin::TomeBuild)
+        for (store_hash, entry, archive) in
+            build_rune_into(root, name, dist_dir, bootstrap, target)?
+        {
+            lint_archive_purity(&archive, strict)
+                .with_context(|| format!("purity lint for `{}`", entry.name))?;
+            report(&format!(
+                "built {} {}",
+                crate::util::progress::accent(&format!("{} {}", entry.name, entry.version)),
+                crate::util::progress::faint(&format!(
+                    "({}) into {}",
+                    entry.target,
+                    archive.display()
+                ))
+            ));
+            if all {
+                install::install_store_only(
+                    &archive,
+                    None,
+                    None,
+                    install::InstallOrigin::TomeBuild,
+                )
                 .with_context(|| format!("store-only install of {}", entry.name))?;
+            }
+            catalog.upsert(store_hash, entry);
+            any_built = true;
         }
-        catalog.upsert(store_hash, entry);
-        any_built = true;
     }
     // Write the index once, atomically, after all runes built successfully.
     // If any rune failed, the previous index and dist/ remain untouched.
@@ -214,21 +230,35 @@ fn lint_archive_purity(archive: &Path, strict: bool) -> Result<()> {
         );
     }
     for line in &listing {
-        report(&format!("! impure build output: {line}"));
+        crate::util::progress::warn(&format!("impure build output: {line}"));
     }
     Ok(())
 }
 
-/// Builds the rune named `name` (`runes/<name>.rn`) into `dist_dir`, returning the store hash,
-/// index entry describing the verified archive, and the archive path. Shared by single-package
-/// and `--all` builds so both register identical entries.
+/// The package names a rune's build produces: the split group's members when `name` belongs
+/// to one, otherwise just `name`. Used to decide whether a build can be skipped.
+fn group_output_names(root: &Path, name: &str) -> Result<Vec<String>> {
+    let rune_path = root.join("runes").join(format!("{name}.rn"));
+    if !rune_path.exists() {
+        return Ok(vec![name.to_owned()]);
+    }
+    match crate::build::split::group_for(&rune_path)? {
+        Some(group) => Ok(group.members().map(|member| member.name.clone()).collect()),
+        None => Ok(vec![name.to_owned()]),
+    }
+}
+
+/// Builds the rune named `name` (`runes/<name>.rn`) into `dist_dir`, returning one
+/// `(store_hash, entry, archive)` per produced package — one for a standalone rune, one per
+/// member for a split group. Shared by single-package and `--all` builds so both register
+/// identical entries.
 pub(crate) fn build_rune_into(
     root: &Path,
     name: &str,
     dist_dir: &Path,
     bootstrap: bool,
     target: Option<&str>,
-) -> Result<(String, IndexEntry, PathBuf)> {
+) -> Result<Vec<(String, IndexEntry, PathBuf)>> {
     validate_package_name(name)?;
     let rune_path = root.join("runes").join(format!("{name}.rn"));
     if !rune_path.exists() {
@@ -237,33 +267,38 @@ pub(crate) fn build_rune_into(
 
     let result =
         crate::build::build_package(&rune_path.to_string_lossy(), dist_dir, bootstrap, target)?;
-    let archive_hash = crate::archive::archive_hash(&result.archive)?;
-    let archive_file = result
-        .archive
-        .file_name()
-        .and_then(|name| name.to_str())
-        .with_context(|| {
-            format!(
-                "archive path has no file name: {}",
-                result.archive.display()
-            )
-        })?;
-
-    let metadata = EmbeddedNuRuntime.package_metadata(&rune_path)?;
     let resolved_target = target.map_or_else(paths::target_triple, |t| t.to_string());
-    let entry = IndexEntry {
-        name: metadata.name.clone(),
-        version: metadata.version.clone(),
-        target: resolved_target,
-        archive: archive_file.to_owned(),
-        archive_hash,
-        runtime_deps: metadata.deps.runtime.clone(),
-        provides: result.discovered_bins.keys().cloned().collect(),
-        libs: result.libs.clone(),
-        conflicts: metadata.conflicts.clone(),
-        replaces: metadata.replaces.clone(),
-    };
-    Ok((result.store_hash, entry, result.archive))
+
+    result
+        .products()
+        .map(|product| {
+            let archive_hash = crate::archive::archive_hash(&product.archive)?;
+            let archive_file = product
+                .archive
+                .file_name()
+                .and_then(|name| name.to_str())
+                .with_context(|| {
+                    format!(
+                        "archive path has no file name: {}",
+                        product.archive.display()
+                    )
+                })?;
+            let metadata = &product.metadata;
+            let entry = IndexEntry {
+                name: metadata.name.clone(),
+                version: metadata.version.clone(),
+                target: resolved_target.clone(),
+                archive: archive_file.to_owned(),
+                archive_hash,
+                runtime_deps: metadata.deps.runtime.clone(),
+                provides: metadata.provides.clone(),
+                libs: metadata.libs.clone(),
+                conflicts: metadata.conflicts.clone(),
+                replaces: metadata.replaces.clone(),
+            };
+            Ok((product.store_hash.clone(), entry, product.archive.clone()))
+        })
+        .collect()
 }
 
 /// Rebuilds the package index from every `.tar.zst` archive already present in `dist_dir`.
@@ -283,13 +318,20 @@ pub(crate) fn rebuild_index(dist_dir: &Path) -> Result<PackageIndex> {
         match read_archive_index_entry(&path) {
             Ok((store_hash, index_entry)) => {
                 report(&format!(
-                    "indexed {} {} ({}) from {}",
-                    index_entry.name, index_entry.version, index_entry.target, name
+                    "indexed {} {}",
+                    crate::util::progress::accent(&format!(
+                        "{} {}",
+                        index_entry.name, index_entry.version
+                    )),
+                    crate::util::progress::faint(&format!(
+                        "({}) from {}",
+                        index_entry.target, name
+                    ))
                 ));
                 entries.insert(store_hash, index_entry);
             }
             Err(e) => {
-                report(&format!("warning: skipping {}: {e}", path.display()));
+                crate::util::progress::warn(&format!("skipping {}: {e}", path.display()));
             }
         }
     }
@@ -308,6 +350,7 @@ pub(crate) fn read_archive_index_entry(path: &Path) -> Result<(String, IndexEntr
 
     let mut metadata = None;
     let mut rune_bytes = None;
+    let mut group_runes: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
     for entry in archive.entries().context("read archive entries")? {
         let mut entry = entry?;
@@ -325,6 +368,13 @@ pub(crate) fn read_archive_index_entry(path: &Path) -> Result<(String, IndexEntr
             let mut bytes = Vec::new();
             entry.read_to_end(&mut bytes)?;
             rune_bytes = Some(bytes);
+        } else if let Some(member) = normalized
+            .strip_prefix(".grimoire/group/")
+            .and_then(|rest| rest.strip_suffix(".rn"))
+        {
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes)?;
+            group_runes.insert(member.to_owned(), bytes);
         }
     }
 
@@ -338,8 +388,32 @@ pub(crate) fn read_archive_index_entry(path: &Path) -> Result<(String, IndexEntr
         anyhow::anyhow!("archive {} is missing .grimoire/rune.rn", path.display())
     })?;
 
-    let store_hash = crate::store::closure::store_hash_for_rune_bytes(&rune_bytes, &metadata)
-        .with_context(|| format!("compute store hash for {}", path.display()))?;
+    let store_hash = if group_runes.is_empty() {
+        crate::store::closure::store_hash_for_rune_bytes(&rune_bytes, &metadata)
+            .with_context(|| format!("compute store hash for {}", path.display()))?
+    } else {
+        // A split-group member: its address derives from the whole group, whose runes the
+        // archive carries under `.grimoire/group/`.
+        let group: Vec<(crate::model::PackageMetadata, Vec<u8>)> = group_runes
+            .into_iter()
+            .map(|(member, bytes)| {
+                let member_metadata = EmbeddedNuRuntime
+                    .package_metadata_from_bytes(&bytes, &format!("group rune `{member}`"))?;
+                Ok((member_metadata, bytes))
+            })
+            .collect::<Result<_>>()?;
+        crate::store::closure::split_member_hashes(&group)
+            .with_context(|| format!("compute split group hashes for {}", path.display()))?
+            .get(&metadata.name)
+            .cloned()
+            .with_context(|| {
+                format!(
+                    "archive {} names `{}`, which is not a member of its embedded group",
+                    path.display(),
+                    metadata.name
+                )
+            })?
+    };
 
     let archive_hash = crate::archive::archive_hash(path)
         .with_context(|| format!("hash archive {}", path.display()))?;
@@ -415,7 +489,35 @@ pub(crate) fn rune_names_ordered(root: &Path) -> Result<Vec<String>> {
         metadata_map.insert(name.clone(), metadata);
     }
 
-    let filtered_names: Vec<String> = metadata_map.keys().cloned().collect();
+    // Split members are not built directly: their parent's build produces them. Coalesce
+    // them under the parent — the parent is the buildable node, and a build dep on a member
+    // (e.g. `rust` needing `clang`) becomes an edge to the member's parent.
+    let mut alias: BTreeMap<String, String> = BTreeMap::new();
+    let mut skipped_members: Vec<String> = Vec::new();
+    for (name, metadata) in &metadata_map {
+        let Some(parent) = &metadata.split_from else {
+            continue;
+        };
+        if metadata_map.contains_key(parent) {
+            alias.insert(name.clone(), parent.clone());
+        } else if root.join("runes").join(format!("{parent}.rn")).exists() {
+            // The parent exists but was filtered out for this target; the member goes with it.
+            skipped_members.push(name.clone());
+        } else {
+            bail!(
+                "split member `{name}` names parent `{parent}`, which is not a rune in \
+                 this tome"
+            );
+        }
+    }
+    for name in skipped_members {
+        metadata_map.remove(&name);
+    }
+    let filtered_names: Vec<String> = metadata_map
+        .keys()
+        .filter(|name| !alias.contains_key(*name))
+        .cloned()
+        .collect();
 
     // Build adjacency list: dependent -> [its dependencies within this tome]
     let mut adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -427,8 +529,12 @@ pub(crate) fn rune_names_ordered(root: &Path) -> Result<Vec<String>> {
         let metadata = &metadata_map[name];
         let build_deps = metadata.deps.build_for(&target);
         for dep in build_deps {
-            if metadata_map.contains_key(&dep.name) {
-                adj.entry(dep.name.clone()).or_default().push(name.clone());
+            let dep_node = alias.get(&dep.name).unwrap_or(&dep.name);
+            if dep_node == name {
+                continue; // A dep on a sibling split member is satisfied by this very build.
+            }
+            if metadata_map.contains_key(dep_node) && !alias.contains_key(dep_node) {
+                adj.entry(dep_node.clone()).or_default().push(name.clone());
                 *in_degree.entry(name.clone()).or_insert(0) += 1;
             }
         }

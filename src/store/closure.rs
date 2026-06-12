@@ -7,12 +7,37 @@
 //! `store-hash` seam. The installer derives the same address incrementally from the store hashes of
 //! the dependencies it has already installed.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
 use crate::{build, build::toolchain, store, util::paths};
+
+/// One member's hash inputs when addressing a split group: its metadata and the sha256 of
+/// its rune bytes. Assembled from disk runes or from a member archive's embedded group.
+struct GroupPart {
+    name: String,
+    metadata: crate::model::PackageMetadata,
+    rune_hash: String,
+}
+
+fn disk_group_parts(group: &build::split::SplitGroup) -> Result<Vec<GroupPart>> {
+    let bytes = group.rune_bytes()?;
+    group
+        .members()
+        .map(|member| {
+            let rune_bytes = bytes.get(&member.name).with_context(|| {
+                format!("missing rune bytes for group member `{}`", member.name)
+            })?;
+            Ok(GroupPart {
+                name: member.name.clone(),
+                metadata: member.metadata.clone(),
+                rune_hash: store::hash_bytes(rune_bytes),
+            })
+        })
+        .collect()
+}
 
 /// Computes the content address (store hash) of the package named `name`, resolving its runtime
 /// dependency closure to store hashes.
@@ -37,12 +62,49 @@ pub fn store_hash_for_rune_with_target(rune: &Path, target: &str) -> Result<Stri
 
 /// Computes the store hash from already-read rune bytes and metadata.
 /// Avoids writing a temporary file when the bytes are already in memory.
+///
+/// Split group members cannot be addressed from a single rune: use
+/// [`store_hash_for_split_archive`], which takes the whole group.
 pub fn store_hash_for_rune_bytes(
     rune_bytes: &[u8],
     metadata: &crate::model::PackageMetadata,
 ) -> Result<String> {
+    if metadata.is_split_member() {
+        bail!(
+            "`{}` is a split member; its store hash is derived from the whole group",
+            metadata.name
+        );
+    }
     let mut walker = Walker::new()?;
     walker.of_rune_with_bytes(&metadata.name, metadata, rune_bytes)
+}
+
+/// The store hashes of every member of a split group, keyed by package name, for the host
+/// target. `group` carries each member's metadata and raw rune bytes (parent included), as
+/// read from disk or from a member archive's embedded `.grimoire/group/` copies.
+pub fn split_member_hashes(
+    group: &[(crate::model::PackageMetadata, Vec<u8>)],
+) -> Result<BTreeMap<String, String>> {
+    Walker::new()?.group_hashes(&group_parts(group))
+}
+
+/// Like [`split_member_hashes`], for an explicit target triple.
+pub fn split_member_hashes_with_target(
+    group: &[(crate::model::PackageMetadata, Vec<u8>)],
+    target: &str,
+) -> Result<BTreeMap<String, String>> {
+    Walker::with_target(target)?.group_hashes(&group_parts(group))
+}
+
+fn group_parts(group: &[(crate::model::PackageMetadata, Vec<u8>)]) -> Vec<GroupPart> {
+    group
+        .iter()
+        .map(|(metadata, bytes)| GroupPart {
+            name: metadata.name.clone(),
+            metadata: metadata.clone(),
+            rune_hash: store::hash_bytes(bytes),
+        })
+        .collect()
 }
 
 /// Computes the store hash for a rune whose dependency closure has already been resolved.
@@ -57,6 +119,19 @@ pub fn store_hash_for_rune_with_deps(
     build_env: &str,
 ) -> Result<String> {
     let metadata = build::read_rune_metadata(rune, build::tome_name_for_rune(rune)?.as_deref())?;
+
+    // A split group member's address folds the *whole group's* external deps, which the
+    // caller's positional list (the member's own deps) cannot supply. Fall back to the
+    // closure walk, which resolves the union deterministically — the same path the builder
+    // uses, so the addresses agree by construction.
+    if let Some(group) = build::split::group_for(rune)? {
+        let mut walker = Walker::with_target(target)?;
+        walker.build_env = build_env.to_string();
+        let hashes = walker.group_hashes(&disk_group_parts(&group)?)?;
+        return hashes.get(&metadata.name).cloned().with_context(|| {
+            format!("split group for `{}` did not yield its hash", metadata.name)
+        });
+    }
 
     let declared = metadata
         .deps
@@ -222,13 +297,98 @@ impl Walker {
     }
 
     fn of_rune(&mut self, name: &str, rune: &Path) -> Result<String> {
+        if let Some(hash) = self.cache.get(name) {
+            return Ok(hash.clone());
+        }
         if self.stack.iter().any(|entry| entry == name) {
             bail!("dependency cycle computing store hash for `{name}`");
+        }
+        // A rune may be a split group member (parent or split): its address derives from the
+        // group's shared build, not from the rune alone. Computing the group caches every
+        // member's hash, so each group is walked once. The group keys by *package* name —
+        // `name` may be a rune path (`grm store-hash <file.rn>`), so look up by metadata.
+        if let Some(group) = build::split::group_for(rune)? {
+            let package_name = self.metadata(rune)?.name;
+            let hashes = self.group_hashes(&disk_group_parts(&group)?)?;
+            let hash = hashes.get(&package_name).cloned().with_context(|| {
+                format!("split group for `{package_name}` did not yield its hash")
+            })?;
+            self.cache.insert(name.to_string(), hash.clone());
+            return Ok(hash);
         }
         let metadata = self.metadata(rune)?;
         let rune_bytes =
             std::fs::read(rune).with_context(|| format!("read rune {}", rune.display()))?;
         self.of_rune_with_bytes(name, &metadata, &rune_bytes)
+    }
+
+    /// Computes the derived store hash of every member of a split group: external runtime
+    /// deps (the union across all members, group-internal references excluded) resolve via
+    /// the normal closure walk, fold into the shared group hash, and each member's address
+    /// derives from that. All member hashes are cached before returning.
+    fn group_hashes(&mut self, parts: &[GroupPart]) -> Result<BTreeMap<String, String>> {
+        let parent = parts
+            .iter()
+            .find(|part| !part.metadata.is_split_member())
+            .context("split group has no parent metadata")?;
+        for part in parts {
+            if self.stack.contains(&part.name) {
+                bail!(
+                    "dependency cycle computing store hash for split group member `{}`",
+                    part.name
+                );
+            }
+        }
+        for part in parts {
+            self.stack.push(part.name.clone());
+        }
+        let dep_hashes_result: Result<Vec<String>> = (|| {
+            let mut dep_hashes = Vec::new();
+            for part in parts {
+                for dep in &part.metadata.deps.runtime {
+                    if !dep.matches_platform(&self.target) {
+                        continue;
+                    }
+                    if parts.iter().any(|member| member.name == dep.name) {
+                        continue;
+                    }
+                    let hash = self.of_name(&dep.name)?;
+                    if !dep_hashes.contains(&hash) {
+                        dep_hashes.push(hash);
+                    }
+                }
+            }
+            Ok(dep_hashes)
+        })();
+        for _ in parts {
+            self.stack.pop();
+        }
+        let dep_hashes = dep_hashes_result?;
+
+        let rune_hashes: BTreeMap<String, String> = parts
+            .iter()
+            .map(|part| (part.name.clone(), part.rune_hash.clone()))
+            .collect();
+        let group_hash = store::split_group_hash(
+            &parent.metadata,
+            &rune_hashes,
+            &dep_hashes,
+            &self.target,
+            &self.build_env,
+        );
+        let hashes: BTreeMap<String, String> = parts
+            .iter()
+            .map(|part| {
+                (
+                    part.name.clone(),
+                    store::split_member_hash(&group_hash, &part.name),
+                )
+            })
+            .collect();
+        for (name, hash) in &hashes {
+            self.cache.insert(name.clone(), hash.clone());
+        }
+        Ok(hashes)
     }
 
     fn of_rune_with_bytes(

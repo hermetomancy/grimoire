@@ -23,7 +23,6 @@ pub fn core_readiness_packages() -> &'static [&'static str] {
         &[
             "linux-headers",
             "musl",
-            "compiler-rt",
             "llvm",
             "clang",
             "cmake",
@@ -36,7 +35,6 @@ pub fn core_readiness_packages() -> &'static [&'static str] {
         &[
             "llvm",
             "clang",
-            "compiler-rt",
             "cmake",
             "python3",
             "make",

@@ -19,6 +19,13 @@ use crate::{
     util::progress::{status, success},
 };
 
+/// `group_runes` is empty for a standalone package. For a split group member it carries the
+/// raw rune source of *every* group member (parent included), embedded under
+/// `.grimoire/group/` — a member's store hash folds all group runes, so the archive must be
+/// self-contained for hash recomputation (and the full recipe set stays auditable).
+// Each argument is a distinct ingredient of the archive; a params struct would only obscure
+// what an archive is made of.
+#[allow(clippy::too_many_arguments)]
 pub fn pack_built_rune(
     rune: &Path,
     metadata: &PackageMetadata,
@@ -27,6 +34,7 @@ pub fn pack_built_rune(
     store_hash: &str,
     output: &Path,
     target: &str,
+    group_runes: &[(String, Vec<u8>)],
 ) -> Result<PathBuf> {
     let archive_name = format!("{}-{}-{target}.tar.zst", metadata.name, metadata.version);
     let archive_path = output.join(archive_name);
@@ -56,6 +64,13 @@ pub fn pack_built_rune(
     append_package_dir(&mut tar, package_payload_dir(package_dir, final_prefix)?)?;
     append_bytes(&mut tar, ".grimoire/package.nuon", package_nuon.as_bytes())?;
     append_bytes(&mut tar, ".grimoire/rune.rn", &rune_source)?;
+    for (member_name, bytes) in group_runes {
+        append_bytes(
+            &mut tar,
+            &format!(".grimoire/group/{member_name}.rn"),
+            bytes,
+        )?;
+    }
     let encoder = tar.into_inner()?;
     encoder.finish()?;
 

@@ -134,6 +134,53 @@ fn fixed_output_hash(
     truncate(hasher)
 }
 
+/// The shared input-address of a split group's single build: the parent's compiled-hash
+/// inputs, with the rune identity widened to every member rune (a glob edit in any member
+/// legitimately changes every member's content, including the parent's remainder) and the
+/// dependency fold widened to the union of all members' *external* runtime dep hashes
+/// (references between group members are the build itself, not inputs to it).
+pub fn split_group_hash(
+    parent: &PackageMetadata,
+    group_rune_hashes: &BTreeMap<String, String>,
+    external_dep_store_hashes: &[String],
+    target: &str,
+    build_env: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"grimoire-split-group-v1\0");
+    for (name, rune_hash) in group_rune_hashes {
+        hasher.update(name.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(rune_hash.as_bytes());
+        hasher.update(b"\0");
+    }
+    let combined_rune_hash = format!("{:x}", hasher.finalize());
+
+    compiled_hash(
+        &parent.name,
+        &parent.version,
+        &parent.sources_for(target),
+        &combined_rune_hash,
+        external_dep_store_hashes,
+        &parent.build_flags,
+        target,
+        build_env,
+    )
+}
+
+/// A group member's store hash, derived from the group's shared input-address. Every member
+/// (the parent included) is addressed this way, so rebuilding the group moves all members to
+/// new addresses together — they are one artifact set.
+pub fn split_member_hash(group_hash: &str, member: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"grimoire-split-member-v1\0");
+    hasher.update(group_hash.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(member.as_bytes());
+    hasher.update(b"\0");
+    truncate(hasher)
+}
+
 fn hash_sources(hasher: &mut Sha256, sources: &BTreeMap<String, Source>) {
     hasher.update(b"sources\0");
     for (source_name, source) in sources.iter() {
@@ -194,6 +241,8 @@ mod tests {
             upstream_version: None,
             conflicts: Vec::new(),
             replaces: Vec::new(),
+            split_from: None,
+            files: Vec::new(),
         }
     }
 
@@ -254,5 +303,61 @@ mod tests {
         let h1 = hash(&metadata("a", false), &[], "e");
         let h2 = hash(&metadata("b", false), &[], "e");
         assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn split_members_derive_distinct_hashes_from_one_group() {
+        let parent = metadata("core", false);
+        let rune_hashes = BTreeMap::from([
+            ("core".to_string(), "aaa".to_string()),
+            ("extra".to_string(), "bbb".to_string()),
+        ]);
+        let group = split_group_hash(&parent, &rune_hashes, &[], "linux-x86_64-gnu", "env");
+        let core = split_member_hash(&group, "core");
+        let extra = split_member_hash(&group, "extra");
+        assert_ne!(core, extra, "members must have distinct addresses");
+        assert_eq!(core.len(), 16);
+        assert_eq!(
+            core,
+            split_member_hash(&group, "core"),
+            "derivation is deterministic"
+        );
+    }
+
+    #[test]
+    fn any_member_rune_edit_moves_the_whole_group() {
+        let parent = metadata("core", false);
+        let before = BTreeMap::from([
+            ("core".to_string(), "aaa".to_string()),
+            ("extra".to_string(), "bbb".to_string()),
+        ]);
+        let after = BTreeMap::from([
+            ("core".to_string(), "aaa".to_string()),
+            // e.g. the member's `files` globs changed: the parent's remainder changes too.
+            ("extra".to_string(), "ccc".to_string()),
+        ]);
+        let g1 = split_group_hash(&parent, &before, &[], "linux-x86_64-gnu", "env");
+        let g2 = split_group_hash(&parent, &after, &[], "linux-x86_64-gnu", "env");
+        assert_ne!(g1, g2);
+        assert_ne!(
+            split_member_hash(&g1, "core"),
+            split_member_hash(&g2, "core"),
+            "a member edit must move the parent's address as well"
+        );
+    }
+
+    #[test]
+    fn external_deps_fold_into_the_group_hash() {
+        let parent = metadata("core", false);
+        let rune_hashes = BTreeMap::from([("core".to_string(), "aaa".to_string())]);
+        let without = split_group_hash(&parent, &rune_hashes, &[], "linux-x86_64-gnu", "env");
+        let with = split_group_hash(
+            &parent,
+            &rune_hashes,
+            &["dephash".to_string()],
+            "linux-x86_64-gnu",
+            "env",
+        );
+        assert_ne!(without, with);
     }
 }

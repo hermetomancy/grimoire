@@ -9,7 +9,6 @@ use crate::{
     model::{Dependency, PackageState},
     solve,
     util::paths,
-    util::progress::report,
 };
 
 use super::*;
@@ -53,7 +52,7 @@ pub(crate) fn ensure_build_deps_installed_inner(
         if let Some(state) = find_dep_state(&states, &dep.name)
             && stale.contains(&state.name)
         {
-            report(&format!(
+            crate::util::progress::warn(&format!(
                 "{} {} no longer matches its rune; reinstalling",
                 state.name, state.version
             ));
@@ -117,7 +116,7 @@ pub(crate) fn ensure_build_deps_installed_inner(
                 building.remove(&step.name);
                 continue;
             }
-            let build_deps = metadata.deps.build_for(&paths::target_triple());
+            let build_deps = build::effective_build_deps(rune, &metadata, &paths::target_triple())?;
             ensure_build_deps_installed_inner(&build_deps, building)
                 .with_context(|| format!("install build dependencies for `{}`", step.name))?;
             let env = build::build_env_for_target(
@@ -132,9 +131,9 @@ pub(crate) fn ensure_build_deps_installed_inner(
                 &store_hash,
             )?;
             install_store_only(
-                &result.archive,
+                &result.primary.archive,
                 None,
-                Some(&result.store_hash),
+                Some(&result.primary.store_hash),
                 InstallOrigin::BuildDep,
             )
         } else {

@@ -70,8 +70,10 @@ Every field Grimoire parses. Unknown keys are ignored, so informational conventi
 | `libs` | list\<string\> | no | Library base names (`foo` for `libfoo.so`). Like `provides`, replaced by discovery at pack time. |
 | `notes` | list\<string\> | no | User-facing post-install notes, printed once after install commits and replayed by `grm info`. |
 | `upstream_version` | string | no | The real upstream version string when `version` had to be normalized to semver (see [Version policy](#version-policy)). Display only — shown by `grm info`, never ordered. |
-| `conflicts` | list\<string\> | no | Installed packages this one cannot coexist with (bare names). Checked symmetrically when a linked install lands; the conflicting package must be removed first (or be replaced in the same command). Store-only installs are exempt. |
+| `conflicts` | list\<string\> | no | Installed packages this one cannot coexist with (bare names). Only *linked* coexistence conflicts, symmetrically — store-only packages on either side are cache, not environment, so a package may conflict with its own store-only build dep (`rust` vs `rust-stage0`). Checked when a linked install lands *and* when a store-only package is promoted into the linked set; the conflicting package must be removed first (or be replaced in the same command). |
 | `replaces` | list\<string\> | no | Package names this one supersedes. Installing this package removes them in the same transaction and migrates their requested/held intent. A bare `grm upgrade` treats an available replacer as the upgrade for the replaced name — this is how renames work. |
+| `split_from` | string | no | Declares this rune a **split member** of the named parent rune in the same `runes/` directory; see [Split packages](#split-packages). A split member must not declare `sources`, build deps, `build_flags`, `targets`, `fixed_output`, or a `build` function. |
+| `files` | list\<string\> | with `split_from` | Glob patterns claiming this member's files from the parent build's output, relative to the payload root. `*`/`?` stay within one path component; `**` crosses directories. Required (non-empty) exactly when `split_from` is set. |
 | `target` | string | (archives only) | The concrete triple an archive was built for. Written by `grm tome build` into archive metadata; not authored in runes. |
 | `store_path` | string | (archives only) | The content-addressed store basename embedded in archives. Not authored in runes. |
 
@@ -276,3 +278,45 @@ Keep platform logic in the rune, not in Rust — the Rust side only provides the
 A rune may declare `sources: {}` and generate all outputs in `build` (e.g.
 `toolchain-wrappers`, which writes wrapper scripts). Valid for meta-packages and pure-script
 tools.
+
+## Split packages
+
+One build can produce several packages: a parent rune builds normally, and **companion
+runes** in the same `runes/` directory carve their slice out of its output. The canonical
+example is `clang.rn` splitting from `llvm.rn` — one LLVM monorepo build, two packages.
+
+```rn
+# clang.rn — a complete package record, but no sources and no build function.
+export const package = {
+  name: "clang"
+  version: "19.1.0"          # must equal the parent's version
+  summary: "Clang C/C++ compiler"
+  split_from: "llvm"
+  files: ["bin/clang*" "lib/clang/**" "lib/libclang*" "include/clang/**"]
+  deps: { runtime: ["llvm"] }   # references to fellow group members are ordinary deps
+}
+```
+
+Semantics:
+
+- **Membership is discovered**, not declared by the parent: any rune in the directory with
+  `split_from: "llvm"` joins llvm's group. The parent rune does not mention its members.
+- **One build.** Building or installing any member runs the parent's `build` once (with the
+  parent's sources, build deps, and `build_flags`), then partitions the payload: each
+  member takes the files its globs claim, the parent keeps the remainder. Sibling archives
+  land in the build cache, so installing another member later reuses them.
+- **Partition errors are hard errors**: a file claimed by two members, a member whose globs
+  claim nothing at all (individual globs may match nothing), or a relative symlink whose
+  target was claimed away from it. Directories emptied by claims are pruned from the parent.
+- **Addressing is group-wide.** All members derive their store hashes from one group hash
+  covering the parent's inputs, every member's rune bytes, and the union of all members'
+  *external* runtime deps. Editing any member's rune (or globs) re-addresses the whole
+  group — correct, since the parent's remainder changes too. Member archives embed every
+  group rune under `.grimoire/group/` so their addresses are recomputable and auditable.
+- **Per-member metadata**: each member keeps its own summary, runtime deps, `provides`,
+  `notes`, and discovered bins/libs. Build deps, sources, `build_flags`, and `targets` live
+  on the parent only; declaring them on a member is a parse error.
+- **One prefix caveat**: the whole group configures against the *parent's* store prefix,
+  while each member's files install into its own store path. Members must locate shared
+  resources relative to their own binaries — absolute paths baked to the parent prefix
+  point at the remainder only.
