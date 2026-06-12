@@ -636,3 +636,54 @@ fn store_only_packages_stay_out_of_lock_upgrade_and_profile() {
         "a promoted package must surface in the new generation"
     );
 }
+
+#[test]
+fn doctor_ignores_store_only_bin_collisions() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'contesttome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    // The build dep ships a bin named like the app's — rust-stage0 vs rust in miniature.
+    fs::write(
+        runes.join("seedtool.rn"),
+        "export const package = {\n  name: 'seedtool'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'seed app\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'app')\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("app.rn"),
+        "export const package = {\n  name: 'app'\n  version: '0.1.0'\n  deps: { build: { default: ['seedtool'] }, runtime: [] }\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'app\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'app')\n}\n",
+    )
+    .unwrap();
+
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add contesttome",
+    );
+    assert_success(&run(root, &["install", "app"]), "install app");
+
+    // seedtool sits store-only with a colliding `app` bin: cache, not environment —
+    // doctor must not flag it and prefer must not list it as contested.
+    let doctor = run(root, &["doctor"]);
+    assert_success(&doctor, "doctor");
+    assert!(
+        !stderr(&doctor).contains("provided by multiple packages"),
+        "store-only bins must not be flagged contested: {}",
+        stderr(&doctor)
+    );
+    let prefer = run(root, &["prefer"]);
+    assert!(
+        !stdout(&prefer).contains("contested (no preference set):"),
+        "store-only bins must not appear contested in prefer: {}",
+        stdout(&prefer)
+    );
+}
