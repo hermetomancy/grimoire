@@ -16,6 +16,7 @@ pub fn setup(args: crate::cli::SetupArgs) -> Result<()> {
             "GRIMOIRE_ROOT is set; using {} as the store root. No system-wide setup needed.",
             root.display()
         );
+        ensure_profile_on_path(args.dry_run)?;
         return Ok(());
     }
     if args.dry_run {
@@ -26,6 +27,7 @@ pub fn setup(args: crate::cli::SetupArgs) -> Result<()> {
         );
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         println!("would create /grm (requires sudo) and chown it to the current user");
+        ensure_profile_on_path(true)?;
         println!(
             "would then add the {CORE_TOME_URL} tome (if no tome is configured) and \
              install grimoire through itself"
@@ -39,7 +41,100 @@ pub fn setup(args: crate::cli::SetupArgs) -> Result<()> {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     setup_linux()?;
 
+    ensure_profile_on_path(false)?;
     bootstrap_core()
+}
+
+/// Puts the active profile's `bin` on PATH by appending one line to the invoking shell's
+/// rc file — zsh, bash, and fish are recognised via `$SHELL`; anything else gets the line
+/// printed for manual setup. Idempotent: an rc file that already mentions the profile bin
+/// is left alone, as is a session whose PATH already contains it.
+fn ensure_profile_on_path(dry_run: bool) -> Result<()> {
+    let bin = crate::profile::current_profile_link()?.join("bin");
+    if env::var_os("PATH")
+        .map(|path| env::split_paths(&path).any(|entry| entry == bin))
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    let home = env::var("HOME").context("HOME is not set; cannot locate a shell rc file")?;
+    let line = path_line(&shell_name(), &display_with_home(&bin, &home));
+    let Some(rc) = rc_file(&shell_name(), Path::new(&home)) else {
+        println!("add the profile bin to your shell's PATH:");
+        println!("  {line}");
+        return Ok(());
+    };
+
+    if fs::read_to_string(&rc)
+        .map(|content| content.contains("profiles/current/bin"))
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    if dry_run {
+        println!("would append to {}: {line}", rc.display());
+        return Ok(());
+    }
+    if let Some(parent) = rc.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create rc directory {}", parent.display()))?;
+    }
+    let mut content = fs::read_to_string(&rc).unwrap_or_default();
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str("\n# grimoire: active profile bin\n");
+    content.push_str(&line);
+    content.push('\n');
+    fs::write(&rc, content).with_context(|| format!("append PATH line to {}", rc.display()))?;
+    println!(
+        "added the profile bin to PATH in {}; restart your shell (or `source` it) to use it",
+        rc.display()
+    );
+    Ok(())
+}
+
+/// The basename of `$SHELL`, lowercased; empty when unset.
+fn shell_name() -> String {
+    env::var("SHELL")
+        .ok()
+        .and_then(|shell| {
+            shell
+                .rsplit('/')
+                .next()
+                .map(|name| name.to_ascii_lowercase())
+        })
+        .unwrap_or_default()
+}
+
+/// The rc file setup appends the PATH line to, per shell. `None` for shells we do not
+/// recognise — the caller prints the line for manual setup instead of guessing.
+fn rc_file(shell: &str, home: &Path) -> Option<std::path::PathBuf> {
+    match shell {
+        "zsh" => Some(home.join(".zshrc")),
+        "bash" => Some(home.join(".bashrc")),
+        "fish" => Some(home.join(".config/fish/conf.d/grimoire.fish")),
+        _ => None,
+    }
+}
+
+/// The PATH line in the shell's own dialect.
+fn path_line(shell: &str, bin: &str) -> String {
+    match shell {
+        "fish" => format!("fish_add_path --global \"{bin}\""),
+        _ => format!("export PATH=\"{bin}:$PATH\""),
+    }
+}
+
+/// Renders `path` with the home directory abbreviated to `$HOME`, so the rc line stays
+/// portable across machines sharing dotfiles.
+fn display_with_home(path: &Path, home: &str) -> String {
+    let rendered = path.display().to_string();
+    match rendered.strip_prefix(home) {
+        Some(rest) => format!("$HOME{rest}"),
+        None => rendered,
+    }
 }
 
 const CORE_TOME_URL: &str = "https://github.com/grimoire-of-glass/tome-core";
@@ -244,5 +339,45 @@ mod tests {
     fn is_writable_detects_non_writable_directory() {
         // A non-existent path is not writable.
         assert!(!is_writable(Path::new("/does/not/exist/.grimoire-test")).unwrap());
+    }
+
+    #[test]
+    fn rc_file_per_shell_and_unknown_shells_get_none() {
+        let home = Path::new("/home/u");
+        assert_eq!(rc_file("zsh", home).unwrap(), home.join(".zshrc"));
+        assert_eq!(rc_file("bash", home).unwrap(), home.join(".bashrc"));
+        assert_eq!(
+            rc_file("fish", home).unwrap(),
+            home.join(".config/fish/conf.d/grimoire.fish")
+        );
+        assert!(rc_file("nu", home).is_none());
+        assert!(rc_file("", home).is_none());
+    }
+
+    #[test]
+    fn path_lines_speak_each_shells_dialect() {
+        assert_eq!(
+            path_line("zsh", "$HOME/.grimoire/profiles/current/bin"),
+            "export PATH=\"$HOME/.grimoire/profiles/current/bin:$PATH\""
+        );
+        assert_eq!(
+            path_line("fish", "$HOME/.grimoire/profiles/current/bin"),
+            "fish_add_path --global \"$HOME/.grimoire/profiles/current/bin\""
+        );
+    }
+
+    #[test]
+    fn home_prefix_abbreviates_for_portable_rc_lines() {
+        assert_eq!(
+            display_with_home(
+                Path::new("/home/u/.grimoire/profiles/current/bin"),
+                "/home/u"
+            ),
+            "$HOME/.grimoire/profiles/current/bin"
+        );
+        assert_eq!(
+            display_with_home(Path::new("/grm/profiles/u/bin"), "/home/u"),
+            "/grm/profiles/u/bin"
+        );
     }
 }
