@@ -210,6 +210,9 @@ mod tests {
             provides: Vec::new(),
             libs: Vec::new(),
             notes: Vec::new(),
+            upstream_version: None,
+            conflicts: Vec::new(),
+            replaces: Vec::new(),
         }
     }
 

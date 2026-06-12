@@ -69,8 +69,29 @@ Every field Grimoire parses. Unknown keys are ignored, so informational conventi
 | `provides` | list\<string\> | no | Capability names this package supplies beyond its bins. Used by the solver pre-build; **overwritten at pack time by discovered bin names** (see below), so declare it for capabilities the solver must know before any build exists. |
 | `libs` | list\<string\> | no | Library base names (`foo` for `libfoo.so`). Like `provides`, replaced by discovery at pack time. |
 | `notes` | list\<string\> | no | User-facing post-install notes, printed once after install commits and replayed by `grm info`. |
+| `upstream_version` | string | no | The real upstream version string when `version` had to be normalized to semver (see [Version policy](#version-policy)). Display only — shown by `grm info`, never ordered. |
+| `conflicts` | list\<string\> | no | Installed packages this one cannot coexist with (bare names). Checked symmetrically when a linked install lands; the conflicting package must be removed first (or be replaced in the same command). Store-only installs are exempt. |
+| `replaces` | list\<string\> | no | Package names this one supersedes. Installing this package removes them in the same transaction and migrates their requested/held intent. A bare `grm upgrade` treats an available replacer as the upgrade for the replaced name — this is how renames work. |
 | `target` | string | (archives only) | The concrete triple an archive was built for. Written by `grm tome build` into archive metadata; not authored in runes. |
 | `store_path` | string | (archives only) | The content-addressed store basename embedded in archives. Not authored in runes. |
+
+## Version policy
+
+`version` must be semver-orderable: every comparison in the solver, the lockfile, and
+`grm upgrade` goes through strict semver ordering, and there is no secondary ordering
+scheme. When the upstream scheme is not semver, normalize it and record the real string in
+`upstream_version` (and use the real one in the source `url`):
+
+| Upstream scheme | Example | Normalize as |
+|---|---|---|
+| letter suffix releases | `1.1.1w` | `1.1.1+w` is **wrong** (build metadata never orders); count the letter: `1.1.1` → 23rd letter patch ⇒ `1.1.123` or adopt the next upstream scheme at the bump |
+| date releases | `2025a`, `2024.07.02` | `2025.1.0`, `2024.7.2` |
+| `p`-suffix patches | `9.9p1` | `9.9.1` |
+
+The mapping is a per-package convention — pick one when the rune is first written and keep
+it monotonic; ordering correctness is the rune author's responsibility. Pre-release pins of
+unreleased software use semver prerelease (`0.1.0-dev.20260612`), which orders below the
+release and chronologically among themselves.
 
 ## Sources
 

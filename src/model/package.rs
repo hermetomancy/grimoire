@@ -48,6 +48,18 @@ pub struct PackageMetadata {
     /// function. Printed once after install and replayable via `grm info`.
     #[serde(default)]
     pub notes: Vec<String>,
+    /// The real upstream version string when `version` had to be normalized to semver
+    /// (e.g. upstream `2025a` recorded as `2025.1.0`). Display only — never ordered.
+    #[serde(default)]
+    pub upstream_version: Option<String>,
+    /// Installed packages this one cannot coexist with (bare names; checked symmetrically
+    /// at install time for linked installs).
+    #[serde(default)]
+    pub conflicts: Vec<String>,
+    /// Package names this one supersedes. Installing this package removes them in the same
+    /// transaction, migrating their requested/held intent onto this package.
+    #[serde(default)]
+    pub replaces: Vec<String>,
 }
 
 /// A declared source artifact for a source build. Every source must carry a checksum so
@@ -101,6 +113,9 @@ impl PackageMetadata {
         let provides = optional_string_list(&record, "provides")?;
         let libs = optional_string_list(&record, "libs")?;
         let notes = optional_string_list(&record, "notes")?;
+        let upstream_version = optional_string(&record, "upstream_version")?;
+        let conflicts = optional_string_list(&record, "conflicts")?;
+        let replaces = optional_string_list(&record, "replaces")?;
 
         Ok(Self {
             name,
@@ -117,6 +132,9 @@ impl PackageMetadata {
             provides,
             libs,
             notes,
+            upstream_version,
+            conflicts,
+            replaces,
         })
     }
 
@@ -192,6 +210,11 @@ impl PackageMetadata {
         record.push("provides", string_list_value(&self.provides));
         record.push("libs", string_list_value(&self.libs));
         record.push("notes", string_list_value(&self.notes));
+        if let Some(upstream) = &self.upstream_version {
+            record.push("upstream_version", Value::string(upstream, Span::unknown()));
+        }
+        record.push("conflicts", string_list_value(&self.conflicts));
+        record.push("replaces", string_list_value(&self.replaces));
 
         let mut sources = Record::new();
         for (name, source) in &self.sources {
@@ -399,6 +422,9 @@ mod tests {
             provides: Vec::new(),
             libs: Vec::new(),
             notes: Vec::new(),
+            upstream_version: None,
+            conflicts: Vec::new(),
+            replaces: Vec::new(),
         };
         let mac = metadata.sources_for("macos-aarch64-darwin");
         assert!(mac.contains_key("everywhere") && mac.contains_key("mac-only"));
@@ -436,6 +462,9 @@ mod tests {
             provides: Vec::new(),
             libs: Vec::new(),
             notes: Vec::new(),
+            upstream_version: None,
+            conflicts: Vec::new(),
+            replaces: Vec::new(),
         };
 
         let resolved: Vec<_> = meta.bins_for("linux-x86_64-musl").into_keys().collect();

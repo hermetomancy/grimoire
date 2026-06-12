@@ -197,6 +197,8 @@ pub(crate) fn build_rune_into(
         runtime_deps: metadata.deps.runtime.clone(),
         provides: result.discovered_bins.keys().cloned().collect(),
         libs: result.libs.clone(),
+        conflicts: metadata.conflicts.clone(),
+        replaces: metadata.replaces.clone(),
     };
     Ok((result.store_hash, entry, result.archive))
 }
@@ -299,6 +301,8 @@ pub(crate) fn read_archive_index_entry(path: &Path) -> Result<(String, IndexEntr
             runtime_deps: metadata.deps.runtime,
             provides: metadata.provides,
             libs: metadata.libs,
+            conflicts: metadata.conflicts,
+            replaces: metadata.replaces,
         },
     ))
 }

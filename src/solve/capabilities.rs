@@ -139,6 +139,9 @@ mod tests {
             provides: vec!["text-processor".to_owned()],
             libs: Vec::new(),
             notes: Vec::new(),
+            upstream_version: None,
+            conflicts: Vec::new(),
+            replaces: Vec::new(),
         };
         let mut map = HashMap::new();
         CapabilityIndex::record_capabilities_from_rune(&metadata, "linux-x86_64-musl", &mut map);

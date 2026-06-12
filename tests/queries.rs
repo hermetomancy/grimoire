@@ -627,3 +627,41 @@ fn walk_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     }
     files
 }
+
+#[test]
+fn upstream_version_is_displayed_by_info() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'uptome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    // openssh-style: upstream `9.9p1` normalized to semver `9.9.1`.
+    fs::write(
+        runes.join("ssh.rn"),
+        "export const package = {\n  name: 'ssh'\n  version: '9.9.1'\n  upstream_version: '9.9p1'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n}\n",
+    )
+    .unwrap();
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add uptome",
+    );
+
+    let info = run(root, &["info", "ssh"]);
+    assert_success(&info, "info ssh");
+    assert!(
+        stdout(&info).contains("version: 9.9.1")
+            && stdout(&info).contains("upstream version: 9.9p1"),
+        "info must show both the ordered and the upstream version: {}",
+        stdout(&info)
+    );
+}
