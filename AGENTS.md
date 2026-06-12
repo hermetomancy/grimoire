@@ -80,8 +80,11 @@ inherited host env vars unless Grimoire deliberately sets them.
 1. Declare every non-POSIX tool and every discoverable dependency the build needs in
    `deps.build`. Never rely on host env vars, Homebrew/MacPorts prefixes, language
    package-manager state, or the user's shell configuration.
-2. Do not declare POSIX utilities (`sed`, `grep`, `awk`, `find`, …) as build deps — the
-   ambient directories (or core toybox once bootstrapped) always provide them.
+2. Do not declare *generic* POSIX utilities (`sed`, `grep`, `awk`, `find`, …) as build deps —
+   the ambient directories (or core toybox once bootstrapped) always provide them. Declaring
+   a specific *implementation* (`gsed` when GNU sed semantics are required) is correct and
+   different: the declared dep outranks the floor, so plain `sed` then means GNU sed for
+   that build.
 
 ## 6. Dependencies
 
@@ -92,8 +95,11 @@ inherited host env vars unless Grimoire deliberately sets them.
 
 **Capability resolution:** any `bins` key that differs from the package name is a capability
 (`gawk` provides `gawk` and `awk`). Literal names resolve directly; capability names resolve
-to any provider, with `grm prefer` breaking ties. Depend on the capability (`awk`) when any
-implementation will do; on the literal name (`gawk`) when you need that implementation.
+to any provider, with `grm prefer` breaking ties (an explicit `grm install <capability>` with
+several providers and no preference asks the user and records the answer). Depend on the
+capability (`awk`) when any implementation will do; on the literal name (`gawk`) when you
+need that implementation. Multi-implementation standard utilities are packaged under their
+implementation name and ship both command names — the naming rule in rune-authoring.md.
 
 **Platform-conditional build deps:** `'name[platform-glob]'` includes the dep only when the
 target triple matches the glob — full triple or prefix (`linux-*`, `linux-*-musl`).

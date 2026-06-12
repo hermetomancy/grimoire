@@ -83,14 +83,14 @@ set × catalog size, paid per mutating command. Design:
   become catalog-expressible (the `rust` → `rust-stage0` rename was free
   only because nothing was released).
 
-### Phase 4 — build pipeline ✅ (2026-06-12, two user actions remain)
+### Phase 4 — build pipeline ✅ (2026-06-12, one user action remains)
 
-Done except: (1) generate the minisign release keypair before the first tag
+Done except: generate the minisign release keypair before the first tag
 (`minisign -GW`, `MINISIGN_SECRET_KEY` secret, public key in README) — a
-key-custody action only the maintainer can take; (2) pin a real commit +
-tarball hash into tome-core's `grimoire.rn` once these commits are pushed,
-and commit the rune in the tome repository. The tome-build.yml workflow is
-manual until Bootstrap stage 1 lands, then becomes a release gate.
+key-custody action only the maintainer can take. The `grimoire` rune is
+pinned and committed in tome-core (re-pin per the convention in the rune
+when main moves). The tome-build.yml workflow is manual until Bootstrap
+stage 1 lands, then becomes a release gate.
 
 Original items for reference:
 
@@ -426,11 +426,13 @@ pointing to the active generation's `bin/`. Current user-local
 
 ### Bootstrap stage 1: core on all targets
 
-Build the 7/5 core runes (`linux-headers`, `musl`, `llvm` (+`clang` split
-member with compiler-rt runtimes inside), `make`, `toybox`,
-`toolchain-wrappers`) from source on every supported target. Current status:
+Build the core runes (`linux-headers`, `musl`, `llvm` (+`clang` split
+member with compiler-rt runtimes inside), `gmake`, `toybox` (+`gsed` on
+BSD-userland hosts), `toolchain-wrappers`) from source on every supported
+target. Current status:
 
-- 🔄 macOS aarch64: in progress (M4 Pro)
+- ✅ macOS aarch64 (M4 Pro): full chain through rust 1.96 and grimoire
+  itself — the dogfood loop closed 2026-06-12
 - ⏳ Linux x86_64 glibc
 - ⏳ Linux aarch64 glibc
 - ⏳ Linux x86_64 musl

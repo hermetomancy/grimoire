@@ -19,6 +19,11 @@ when they do not, and manages package catalogs as ordinary git repositories call
 
 - **Imperative runes.** Package recipes are Nushell `build` functions — closer to PKGBUILDs or
 ebuilds than to a functional DSL.
+- **Split packages.** One parent build can produce several packages: companion runes claim
+their slice of the output by glob (`clang` is carved from the `llvm` monorepo build, with
+the compiler-rt runtimes inside).
+- **Decisions at plan time.** Conflicts, replacements, and the transitive build-dep closure
+resolve before anything is fetched or built; every mutating command takes `--dry-run`.
 - **Git-native catalogs.** Tomes are git repositories you can fork, diff, pin, and update.
 - **Binary-first installs.** Grimoire prefers a signed/checksum-verified prebuilt package and
 falls back to source builds when needed.
@@ -48,26 +53,31 @@ now-unneeded dependencies with it in the same transaction — file-ownership que
 | Build-time customization | `build_flags` | **Portage USE flags** |
 | Catalogs / overlays | tomes + addenda | **AUR / overlays** |
 | Contested commands | `grm prefer` | **update-alternatives / eselect** |
-| Build / trust | host-toolchain builds, signed binhost | **Pacman / Gentoo binhost** |
+| Build / trust | managed clang/LLVM toolchain, signed binhost | **Pacman / Gentoo binhost** |
 
 ## Install
 
 ```sh
-cargo install grimoire
+cargo install --git https://github.com/grimoire-of-glass/grimoire
+grm setup
 ```
 
-This installs the `grm` command.
+This installs the `grm` command. `grm setup` creates the fixed store (`/grm`), puts the
+active profile's `bin` on your shell's PATH, adds the core tome, and installs grimoire
+through itself — from then on `grm upgrade grimoire` is self-update.
 
 ## Quick Start
 
 ```sh
-# Add a package catalog
+# Add a package catalog (grm setup already adds the core tome)
 grm tome add https://github.com/grimoire-of-glass/tome-core --ref main
 
 # Search, inspect, install
 grm search hello
 grm info hello
+grm install hello --dry-run   # the full plan: steps, build deps, migrations
 grm install hello
+grm ls                        # the linked environment; --all includes cached build deps
 
 # Upgrade, hold, roll back
 grm upgrade
@@ -121,7 +131,8 @@ export const package = {
     }
   }
   deps: {
-    build: { default: ["make"] }
+    # build-env pulls the managed toolchain (compiler, gmake, cmake, python, toybox).
+    build: { default: ["build-env"] }
     runtime: []
   }
   bins: { default: { widget: "bin/widget" } }
@@ -158,7 +169,8 @@ profiles:
 └── state/grimoire.lock.nuon         # lockfile
 ```
 
-Put `~/.grimoire/profiles/current/bin` on your PATH.
+`grm setup` puts `~/.grimoire/profiles/current/bin` on your shell's PATH (zsh, bash, and
+fish are recognised); add it manually for other shells.
 
 ## Signing a Tome
 
