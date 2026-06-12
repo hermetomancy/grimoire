@@ -62,9 +62,11 @@ in-process and reads/writes NUON data.
 
 ## 5. Build environment
 
-Managed builds get a controlled `PATH`, in priority order: core package `bin/` dirs → declared
-build-dep `bin/` dirs → host compiler boundary symlinks (bootstrap only; skipped once
-`toolchain-wrappers` is installed) → POSIX ambient `/usr/bin` and `/bin`.
+Managed builds get a controlled `PATH`, in priority order: declared build-dep `bin/` dirs →
+core package `bin/` dirs → host compiler boundary symlinks (bootstrap only; skipped once
+`toolchain-wrappers` is installed) → POSIX ambient `/usr/bin` and `/bin`. Declared deps
+outrank the core floor deliberately: declaration is specificity, so a rune that declares
+`gsed` gets GNU sed as plain `sed` even though the floor (toybox) ships one too.
 
 The environment is sandboxed: host discovery variables (`CMAKE_PREFIX_PATH`,
 `PKG_CONFIG_PATH`, `CPATH`, `LIBRARY_PATH`, language package-manager roots, Homebrew prefixes,
