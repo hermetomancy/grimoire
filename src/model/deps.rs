@@ -89,6 +89,19 @@ impl Deps {
     }
 }
 
+/// Whether `version` satisfies `req`, with one deliberate deviation from semver: a bare
+/// requirement (`*`) also matches pre-release versions. The catalog pins unreleased
+/// software as `-dev.YYYYMMDD` prereleases (rune-authoring.md version policy), and a plain
+/// dependency on such a package must resolve — strict semver excludes prereleases from `*`,
+/// which would make prerelease-only packages uninstallable by name. Explicit requirements
+/// keep strict semver semantics: opting into a prerelease range stays deliberate.
+pub fn req_matches(req: &semver::VersionReq, version: &semver::Version) -> bool {
+    if *req == semver::VersionReq::STAR && !version.pre.is_empty() {
+        return true;
+    }
+    req.matches(version)
+}
+
 /// Returns `true` when `pattern` matches `target_triple`.
 ///
 /// * If `pattern` contains `-` or `*`, it is matched against the full target triple using simple

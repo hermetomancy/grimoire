@@ -129,7 +129,7 @@ impl Resolver<'_> {
         // Prefer an already-installed provider that satisfies the version constraint.
         for provider in &providers {
             if let Some(version) = self.installed.get(provider)
-                && dep.req.matches(version)
+                && crate::model::req_matches(&dep.req, version)
             {
                 return Dependency {
                     name: provider.clone(),
@@ -166,7 +166,7 @@ impl Resolver<'_> {
 
         // Already chosen for another requirement: it must satisfy this one too, then carry on.
         if let Some(node) = chosen.get(name) {
-            if req.matches(&node.version) {
+            if crate::model::req_matches(req, &node.version) {
                 return self.resolve_list(rest, chosen);
             }
             bail!(
@@ -179,7 +179,7 @@ impl Resolver<'_> {
         // are already present (so they are not expanded). If reuse leads to a dead end further
         // down the worklist, fall through and try fresh candidates instead.
         if let Some(version) = self.installed.get(name)
-            && req.matches(version)
+            && crate::model::req_matches(req, version)
         {
             let mut trial = chosen.clone();
             trial.insert(
@@ -200,7 +200,7 @@ impl Resolver<'_> {
         let target = paths::target_triple();
         let mut last_err = None;
         for candidate in candidates {
-            if !req.matches(&candidate.version) {
+            if !crate::model::req_matches(req, &candidate.version) {
                 continue;
             }
             // Expand capability names to concrete providers *here*, so the chosen node's dep
