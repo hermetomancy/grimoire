@@ -114,6 +114,40 @@ pub fn install(args: InstallArgs) -> Result<()> {
 
     let mut installer = Installer::new(installed, pins).with_dry_run(args.dry_run);
 
+    // Announce implied work before the first fetch: a one-line install can pull a long
+    // tail of missing or drifted build deps, and the user deserves the count (and the
+    // big names) up front rather than 40 minutes in. Best-effort and names-only — rune
+    // paths and local archives resolve too late to preview cheaply.
+    if !args.dry_run {
+        let plain: Vec<String> = args
+            .packages
+            .iter()
+            .filter(|package| {
+                !args.from_source
+                    && !package.ends_with(".rn")
+                    && !package.ends_with(".tar.zst")
+                    && !PathBuf::from(package).exists()
+            })
+            .cloned()
+            .collect();
+        if let Ok(extra) = estimate_extra_realizations(&plain)
+            && !extra.is_empty()
+        {
+            let shown: Vec<&str> = extra.iter().take(6).map(String::as_str).collect();
+            let ellipsis = if extra.len() > shown.len() {
+                ", …"
+            } else {
+                ""
+            };
+            crate::util::progress::note(&format!(
+                "+ {} build dep{} to realize: {}{ellipsis}",
+                crate::util::progress::strong(&extra.len().to_string()),
+                if extra.len() == 1 { "" } else { "s" },
+                shown.join(", ")
+            ));
+        }
+    }
+
     let mut root_names = Vec::new();
     for package in &args.packages {
         let name = if args.from_source || package.ends_with(".rn") {
@@ -527,16 +561,34 @@ fn print_plan_consequences(plan: &Plan, installed: &BTreeMap<String, Version>) -
         }
     }
 
-    // Walk source-built steps' build deps recursively, resolving each layer the way the
-    // build would. `seen` spans the whole walk so shared build deps print once.
+    for (for_name, dep_step) in build_dep_closure(&plan.steps, installed)? {
+        println!(
+            "  + {} {} ({}; build dep of {for_name}, store-only)",
+            dep_step.name,
+            dep_step.version,
+            describe_origin(&dep_step)
+        );
+    }
+    Ok(())
+}
+
+/// Walks the transitive build-dependency closure of every source-built step, resolving
+/// each layer the way the build would: deps already installed *and current* are reused
+/// and skipped; missing or drifted ones become steps. Returns each discovered step paired
+/// with the package that pulled it in; `seen` starts from the plan's own steps so shared
+/// build deps appear once.
+fn build_dep_closure(
+    roots: &[PlanStep],
+    installed: &BTreeMap<String, Version>,
+) -> Result<Vec<(String, PlanStep)>> {
     let target = paths::target_triple();
     let mut seen: std::collections::HashSet<String> =
-        plan.steps.iter().map(|step| step.name.clone()).collect();
-    let mut queue: Vec<(String, PathBuf)> = plan
-        .steps
+        roots.iter().map(|step| step.name.clone()).collect();
+    let mut queue: Vec<(String, PathBuf)> = roots
         .iter()
         .filter_map(|step| step.rune.clone().map(|rune| (step.name.clone(), rune)))
         .collect();
+    let mut closure = Vec::new();
     while let Some((for_name, rune)) = queue.pop() {
         let metadata =
             build::read_rune_metadata(&rune, build::tome_name_for_rune(&rune)?.as_deref())?;
@@ -550,18 +602,36 @@ fn print_plan_consequences(plan: &Plan, installed: &BTreeMap<String, Version>) -
             if !seen.insert(dep_step.name.clone()) {
                 continue;
             }
-            println!(
-                "  + {} {} ({}; build dep of {for_name}, store-only)",
-                dep_step.name,
-                dep_step.version,
-                describe_origin(&dep_step)
-            );
-            if let Some(dep_rune) = dep_step.rune {
-                queue.push((dep_step.name, dep_rune));
+            if let Some(dep_rune) = dep_step.rune.clone() {
+                queue.push((dep_step.name.clone(), dep_rune));
             }
+            closure.push((for_name.clone(), dep_step));
         }
     }
-    Ok(())
+    Ok(closure)
+}
+
+/// Best-effort preview of what realizing `names` pulls in beyond the named packages:
+/// missing or drifted build dependencies, walked transitively the way the build would
+/// resolve them. Feeds the "upgrading N packages" announcement, so a one-line upgrade
+/// that implies an llvm rebuild says so before the first fetch instead of surprising the
+/// user 40 minutes in. Best-effort by design — callers drop the preview on any error
+/// rather than failing the operation over an announcement.
+pub fn estimate_extra_realizations(names: &[String]) -> Result<Vec<String>> {
+    let mut installed = installed_versions_current()?;
+    for name in names {
+        installed.remove(name); // upgrades re-resolve the roots themselves
+    }
+    let deps: Vec<crate::model::Dependency> = names
+        .iter()
+        .map(|name| crate::model::Dependency::any(name.clone()))
+        .collect();
+    let plan = solve::resolve(&deps, &installed, None)?;
+    Ok(build_dep_closure(&plan.steps, &installed)?
+        .into_iter()
+        .map(|(_, step)| step.name)
+        .filter(|name| !names.contains(name))
+        .collect())
 }
 
 /// A human-readable summary of how a step will be realized. When both a prebuilt and a rune are
