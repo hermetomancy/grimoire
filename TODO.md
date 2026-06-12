@@ -42,12 +42,14 @@ to enumerate what actually leaks; passing runes are certified toybox-ambient, fa
 name what stage 2 must package. Folding "toybox-ambient or not" into `build_env_id` is
 the cheap interim fix if prebuilts ever come from heterogeneous builders.
 
-Related: `build_env_id` probes the *host* `cc` banner even after the managed boundary
-takes over compiling — so post-bootstrap addresses encode a compiler the build did not
-use (host Xcode upgrades re-address the store), while the managed compiler's identity
-only reaches hashes through toolchain-wrappers' runtime-dep closure. Once the managed
-boundary is active, derive `build_env_id` from the toolchain-wrappers / clang store
-hashes instead; re-addresses the world (fine pre-release).
+Related: `build_env_id` now derives from the installed toolchain-wrappers set itself
+(banner-probing the wrapper bins, never the user's PATH), falling back to the host PATH
+probe pre-bootstrap. One accepted consequence: a fresh full bootstrap builds llvm under
+the host identity, and the first command after the wrappers land sees every from-source
+address flip to the managed identity — the next build of any core package rebuilds it
+under the managed compiler (the honest self-hosting fixed point; llvm effectively builds
+twice on a virgin host). Revisit only if bootstrap time matters more than honest
+addressing.
 
 ## Known debts (not release-blocking)
 
