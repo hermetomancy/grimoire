@@ -172,6 +172,20 @@ profiles:
 `grm setup` puts `~/.grimoire/profiles/current/bin` on your shell's PATH (zsh, bash, and
 fish are recognised); add it manually for other shells.
 
+## Release Signing
+
+Official release artifacts and the core/world tome indexes are signed with the project
+minisign key:
+
+```
+untrusted comment: minisign public key D4CCD5A2669CAC7C
+RWR8rJxmotXM1NhQBsJZQfEeWtSP+3x67Nih78Tl7An5o7UQ8gWwmTt6
+```
+
+Verify a release file with `minisign -Vm <file> -P RWR8rJxmotXM1NhQBsJZQfEeWtSP+3x67Nih78Tl7An5o7UQ8gWwmTt6`.
+Tome syncs verify automatically: the key is declared in each tome's `tome.rn` and pinned
+on first sync.
+
 ## Signing a Tome
 
 ```sh

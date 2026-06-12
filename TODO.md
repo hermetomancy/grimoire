@@ -7,9 +7,6 @@ not here. When everything below is done and reflected in the design doc, delete 
 
 ### Release engineering
 
-- **Minisign release keypair** — generate before the first tag (`minisign -GW`,
-  `MINISIGN_SECRET_KEY` secret, public key in README). Key-custody action only the
-  maintainer can take.
 - **`CHANGELOG.md`** at the first tag.
 - **tome-build.yml** stays manual until Bootstrap stage 1 lands, then becomes a
   release-blocking `grm tome build --all` CI job per platform.
