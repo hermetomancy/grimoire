@@ -45,16 +45,22 @@ pub(crate) fn ensure_build_deps_installed_inner(
             Some(state) => satisfied.push(state.clone()),
         }
     }
-    let stale: HashSet<String> = crate::store::closure::stale_installed(&satisfied)
-        .into_iter()
-        .map(|(name, _)| name)
-        .collect();
+    let stale_info = crate::store::closure::stale_installed(&satisfied);
+    let stale: HashSet<String> = stale_info.iter().map(|s| s.name.clone()).collect();
     for dep in deps {
         if let Some(state) = find_dep_state(&states, &dep.name)
             && stale.contains(&state.name)
         {
+            let cause = stale_info
+                .iter()
+                .find(|s| s.name == state.name)
+                .and_then(|s| s.env_change.clone())
+                .map(|diff| format!("build environment changed: {diff}"))
+                .unwrap_or_else(|| {
+                    "its rune, a dependency, or the build environment changed".to_owned()
+                });
             crate::util::progress::warn(&format!(
-                "{} {} drifted from its expected address (its rune, a dependency, or the                  build environment changed); rebuilding",
+                "{} {} drifted from its expected address ({cause}); rebuilding",
                 state.name, state.version
             ));
             missing.push(dep.clone());

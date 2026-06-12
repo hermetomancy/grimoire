@@ -514,6 +514,7 @@ pub(crate) fn write_state(
         upstream_version: metadata.upstream_version.clone(),
         conflicts: metadata.conflicts.clone(),
         replaces: metadata.replaces.clone(),
+        build_env: crate::build::toolchain::build_env_id(),
     };
 
     // Capture the prior state so a later failure can restore it.

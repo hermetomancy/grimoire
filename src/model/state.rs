@@ -60,6 +60,11 @@ pub struct PackageState {
     /// Package names this one supersedes (from the package metadata).
     #[serde(default)]
     pub replaces: Vec<String>,
+    /// The build-environment identity (`build_env_id`) in effect when this package was
+    /// realized. Lets drift detection say *which* identity component moved instead of
+    /// just "address drifted". `None` for states written before recording started.
+    #[serde(default)]
+    pub build_env: Option<String>,
 }
 
 impl PackageState {
@@ -88,6 +93,7 @@ impl PackageState {
         let libs = optional_string_list(&record, "libs")?;
         let notes = optional_string_list(&record, "notes")?;
         let upstream_version = optional_string(&record, "upstream_version")?;
+        let build_env = optional_string(&record, "build_env")?;
         let conflicts = optional_string_list(&record, "conflicts")?;
         let replaces = optional_string_list(&record, "replaces")?;
 
@@ -110,6 +116,7 @@ impl PackageState {
             upstream_version,
             conflicts,
             replaces,
+            build_env,
         })
     }
 
@@ -155,6 +162,9 @@ impl PackageState {
         }
         record.push("conflicts", string_list_value(&self.conflicts));
         record.push("replaces", string_list_value(&self.replaces));
+        if let Some(build_env) = &self.build_env {
+            record.push("build_env", Value::string(build_env, Span::unknown()));
+        }
         Value::record(record, Span::unknown())
     }
 }

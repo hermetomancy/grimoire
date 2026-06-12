@@ -271,11 +271,14 @@ fn collect_upgrades(
         .into_iter()
         .filter(|state| targets.contains(&state.name))
         .collect();
+    let stale_info = crate::store::closure::stale_installed(&targeted);
     let drifted: std::collections::HashSet<String> =
-        crate::store::closure::stale_installed(&targeted)
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect();
+        stale_info.iter().map(|stale| stale.name.clone()).collect();
+    // When the drift comes from the build environment, every affected package shares the
+    // same cause — say it once instead of per line.
+    if let Some(diff) = stale_info.iter().find_map(|stale| stale.env_change.clone()) {
+        progress::note(&format!("build environment changed: {diff}"));
+    }
 
     let mut to_upgrade: Vec<(String, Version, Version)> = Vec::new();
     for name in targets {

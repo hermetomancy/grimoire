@@ -294,6 +294,7 @@ mod tests {
             upstream_version: None,
             conflicts: Vec::new(),
             replaces: Vec::new(),
+            build_env: None,
         }
     }
 

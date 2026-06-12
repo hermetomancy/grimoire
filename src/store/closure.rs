@@ -169,12 +169,22 @@ pub fn store_hash_for_rune_with_deps(
 /// from a local archive, or whose deps only resolve as capabilities) is never reported — there
 /// is nothing to rebuild it from; and a rune that moved to a *different* version is `grm
 /// upgrade`'s business, not drift. One walker memoizes the closure walk across the whole set.
-/// Returns `(name, expected store hash)` pairs so callers can report what the package
-/// would re-address to, not just that it drifted.
-pub fn stale_installed(states: &[crate::model::PackageState]) -> Vec<(String, String)> {
+/// One drifted install: the package, the address it would re-realize to, and — when the
+/// recorded build-environment identity differs from the current one — a human-readable
+/// rendering of exactly which identity components moved. `env_change: None` means the
+/// environment matches (the rune or a dependency changed instead) or the state predates
+/// identity recording.
+pub struct StaleInstall {
+    pub name: String,
+    pub expected: String,
+    pub env_change: Option<String>,
+}
+
+pub fn stale_installed(states: &[crate::model::PackageState]) -> Vec<StaleInstall> {
     let Ok(mut walker) = Walker::new() else {
         return Vec::new();
     };
+    let current_env = toolchain::build_env_id();
     let mut stale = Vec::new();
     for state in states {
         // A hold pins the installed bits, not just the version: a held package is never
@@ -195,10 +205,49 @@ pub fn stale_installed(states: &[crate::model::PackageState]) -> Vec<(String, St
             continue;
         };
         if expected != state.store_hash {
-            stale.push((state.name.clone(), expected));
+            let env_change = match (&state.build_env, &current_env) {
+                (Some(recorded), Some(current)) if recorded != current => {
+                    Some(diff_build_env(recorded, current))
+                }
+                _ => None,
+            };
+            stale.push(StaleInstall {
+                name: state.name.clone(),
+                expected,
+                env_change,
+            });
         }
     }
     stale
+}
+
+/// Renders the difference between two build-environment identities ("tool:banner" lists)
+/// as the changed components only: `ld: ld64-1167.5 → LLD 22.1.7`. Components present on
+/// one side only render against `(none)`.
+fn diff_build_env(recorded: &str, current: &str) -> String {
+    let parse = |id: &str| -> std::collections::BTreeMap<String, String> {
+        id.split(',')
+            .filter_map(|part| {
+                part.split_once(':')
+                    .map(|(tool, banner)| (tool.to_owned(), banner.to_owned()))
+            })
+            .collect()
+    };
+    let old_parts = parse(recorded);
+    let new_parts = parse(current);
+    let mut changes = Vec::new();
+    for tool in old_parts.keys().chain(new_parts.keys()) {
+        let old = old_parts.get(tool).map(String::as_str).unwrap_or("(none)");
+        let new = new_parts.get(tool).map(String::as_str).unwrap_or("(none)");
+        if old != new
+            && !changes
+                .iter()
+                .any(|c: &String| c.starts_with(tool.as_str()))
+        {
+            changes.push(format!("{tool}: {old} → {new}"));
+        }
+    }
+    changes.join("; ")
 }
 
 struct Walker {
@@ -432,5 +481,27 @@ impl Walker {
     fn metadata(&self, rune: &Path) -> Result<crate::model::PackageMetadata> {
         let tome_name = build::tome_name_for_rune(rune)?;
         build::read_rune_metadata(rune, tome_name.as_deref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::diff_build_env;
+
+    #[test]
+    fn diff_renders_only_changed_identity_components() {
+        let recorded = "as:llvm-as 22.1.7,cc:clang version 22.1.7,ld:ld64-1167.5,sdk:26.5";
+        let current = "as:llvm-as 22.1.7,cc:clang version 22.1.7,ld:LLD 22.1.7,sdk:26.5";
+        assert_eq!(
+            diff_build_env(recorded, current),
+            "ld: ld64-1167.5 → LLD 22.1.7"
+        );
+    }
+
+    #[test]
+    fn diff_renders_added_and_removed_components() {
+        let diff = diff_build_env("cc:clang 22,lipo:llvm-lipo", "cc:clang 22,sdk:26.5");
+        assert!(diff.contains("lipo: llvm-lipo → (none)"), "{diff}");
+        assert!(diff.contains("sdk: (none) → 26.5"), "{diff}");
     }
 }
