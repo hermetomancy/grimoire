@@ -2,6 +2,7 @@
 //! (`.tar.zst`/`.tar.gz`/`.tar.xz`) readers and the same entry validation installs use.
 
 use anyhow::{Context, Result};
+use bzip2::read::MultiBzDecoder;
 use flate2::read::GzDecoder;
 use std::{collections::BTreeMap, fs, fs::File, io::Read, path::Path};
 use xz2::read::XzDecoder;
@@ -37,6 +38,7 @@ pub(super) fn prepare_sources(
 #[derive(Debug, Clone, Copy)]
 #[allow(clippy::enum_variant_names)] // all source archives are tarballs; the prefix is meaningful
 pub(super) enum SourceArchiveKind {
+    TarBz2,
     TarGz,
     TarXz,
     TarZst,
@@ -56,6 +58,9 @@ pub(super) fn source_archive_kind(url: &str) -> Option<SourceArchiveKind> {
     }
     if normalized.ends_with(".tar.xz") || normalized.ends_with(".txz") {
         return Some(SourceArchiveKind::TarXz);
+    }
+    if normalized.ends_with(".tar.bz2") || normalized.ends_with(".tbz2") {
+        return Some(SourceArchiveKind::TarBz2);
     }
     None
 }
@@ -84,6 +89,7 @@ pub(super) fn source_archive_kind_sniffed(path: &Path) -> Option<SourceArchiveKi
         [0x1f, 0x8b, ..] => Some(SourceArchiveKind::TarGz),
         [0xfd, b'7', b'z', b'X', b'Z', 0x00] => Some(SourceArchiveKind::TarXz),
         [0x28, 0xb5, 0x2f, 0xfd, ..] => Some(SourceArchiveKind::TarZst),
+        [b'B', b'Z', b'h', ..] => Some(SourceArchiveKind::TarBz2),
         _ => None,
     }
 }
@@ -122,6 +128,7 @@ pub(super) fn source_archive_reader(path: &Path, kind: SourceArchiveKind) -> Res
     let file =
         File::open(path).with_context(|| format!("open source archive {}", path.display()))?;
     match kind {
+        SourceArchiveKind::TarBz2 => Ok(Box::new(MultiBzDecoder::new(file))),
         SourceArchiveKind::TarGz => Ok(Box::new(GzDecoder::new(file))),
         SourceArchiveKind::TarXz => Ok(Box::new(XzDecoder::new(file))),
         SourceArchiveKind::TarZst => Ok(Box::new(
@@ -161,6 +168,7 @@ mod tests {
         let gz = write("gz", &[0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00]);
         let xz = write("xz", &[0xfd, b'7', b'z', b'X', b'Z', 0x00]);
         let zst = write("zst", &[0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x00]);
+        let bz = write("bz", b"BZh91AY&SY");
         let txt = write("txt", b"verified source payload");
         assert!(matches!(
             source_archive_kind_sniffed(&gz),
@@ -173,6 +181,10 @@ mod tests {
         assert!(matches!(
             source_archive_kind_sniffed(&zst),
             Some(SourceArchiveKind::TarZst)
+        ));
+        assert!(matches!(
+            source_archive_kind_sniffed(&bz),
+            Some(SourceArchiveKind::TarBz2)
         ));
         assert!(source_archive_kind_sniffed(&txt).is_none());
     }
