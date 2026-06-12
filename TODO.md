@@ -443,6 +443,17 @@ member with compiler-rt runtimes inside), `make`, `toybox`,
 Add `cmake` and `python3` to `core` so no non-POSIX host tools are required
 for bootstrap. Removes the need for `host_tool_dirs()`.
 
+The host *userland* link is shadowed, never severed: `/usr/bin` + `/bin`
+are unconditionally appended to managed build PATH (`posix_ambient_dirs`),
+so anything toybox does not ship (perl, m4, bash-isms) falls through to the
+host silently — an unhashed build input, same class as the Homebrew-zstd
+leak. Path to severance is empirical: a hermetic build mode (`tome build
+--hermetic`?) that drops the ambient tail, run per rune to enumerate what
+actually leaks; passing runes are certified toybox-ambient, failures name
+what stage 2 must package. Folding "toybox-ambient or not" into
+`build_env_id` is the cheap interim fix if prebuilts ever come from
+heterogeneous builders.
+
 
 ## Deletion criteria
 
