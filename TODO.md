@@ -189,6 +189,64 @@ pointing to the active generation's `bin/`. Current user-local
 
 ## Completed
 
+### Generations describe the environment; clean reclaims the cache
+
+- Generation metadata (`packages`, `store_paths`) and the state snapshot now cover only
+  the *linked* set. Store-only packages (cached build deps, residue) are cache: never GC
+  roots, so `grm clean` reclaims their state **and** their store dirs in one pass instead
+  of every retained generation pinning them forever. Activation carries live cache
+  records over untouched (only the abandoned environment's linked closure is dropped —
+  semantic rollback unchanged); a record whose store dir is gone is not carried.
+- Generations created before this change still pin cache dirs until they age out of the
+  retention window.
+
+### `grm setup` dogfoods
+
+- After the store is usable (on macOS: the post-reboot rerun), setup adds the tome-core
+  tome when none is configured and installs `grimoire` through itself — best-effort with
+  warnings, since the store setup already succeeded. The bootstrap takes the install-root
+  lock; `--dry-run` describes all of it.
+
+### Dry-run everywhere + linked-only `list`
+
+- Every mutating command previews with `--dry-run` (alias `--explain`), and dry runs skip
+  the install-root lock: install/upgrade (already had it), remove (target/demotion
+  decisions plus a pure simulation of the orphan cascade), clean (sweep simulation,
+  `profile::plan_garbage`, size-only cache walk, `would reclaim N`), restore (per-package
+  plans plus what the lock doesn't account for), rollback (target generation and the
+  snapshot-vs-state package diff), hold/unhold, prefer set/unset (notes whether a relink
+  would happen), setup, and tome/addendum add/update/remove.
+- `grm list` shows only the linked environment by default; `--all` includes store-only
+  packages (cached build deps, residue). The terminal summary notes hidden store-only
+  counts; piped output keeps the tab format for whatever set is shown.
+
+### Split packages (companion runes)
+
+- One build, several packages: a rune with `split_from: "<parent>"` + `files`
+  globs is a split member whose payload is carved from the parent rune's
+  build output (the parent keeps the remainder). Membership is discovered by
+  scanning the parent's `runes/` dir; groups never cross tomes or chain.
+- Addressing is group-wide: one group hash (parent inputs + every member's
+  rune bytes + the union of external runtime-dep hashes, sibling refs
+  excluded) with per-member derived store hashes — editing any member rune
+  re-addresses the whole group. Member archives embed all group runes under
+  `.grimoire/group/` so `tome build --index` recomputes their addresses.
+- Partition is glob-based and strict: overlapping claims, a member claiming
+  nothing, and symlinks separated from their targets are hard errors;
+  emptied parent directories are pruned. `*` stays within a path component.
+- Pipeline: `grm build`/`tome build`/install all build a group once and
+  produce one archive per member; sibling archives land in `cache/builds`
+  so later member installs reuse them; `tome build --all` coalesces members
+  under the parent and routes build deps on a member to its parent.
+- First user: `clang.rn` splits from `llvm.rn` — one
+  `LLVM_ENABLE_PROJECTS="clang;lld"` monorepo build instead of two full
+  LLVM source builds. clang runtime-depends on llvm (lld, llvm bin tools);
+  its vestigial compiler-rt build dep was dropped.
+- Known limitation (follow-up): the solver's positional dep-hash path falls
+  back to a deterministic closure walk for split members instead of using
+  resolver-chosen versions; fine while groups resolve unambiguously, revisit
+  if a group member ever has multiple installable versions in flight.
+
 ### Stale-plan duplicate realization fix
 
 - Overlapping build-dependency plans no longer realize a shared package once per
@@ -204,9 +262,18 @@ pointing to the active generation's `bin/`. Current user-local
 
 ### CLI output restyle
 
-- One result-line vocabulary in `util/progress` (AGENTS.md §12.4): `✦` confirmations, `!`
-  cautions (`warn`), `strong`/`faint` inline emphasis, `→` for version transitions; piped
-  output stays plain.
+- One result-line vocabulary in `util/progress` (AGENTS.md §12.4), three tiers: `✦`
+  headline results (`report`) with `accent` (bold green) subjects and `faint` em-dash
+  detail; dimmed unprefixed `note` context lines (`generation 4 is now current`,
+  `switching profile…`) with `strong` embedded subjects; `!` cautions (`warn`) — all
+  hand-rolled `warning:`/`!` prefixes inside reports were converted to real warns. `→`
+  for version transitions; piped output stays plain.
+- List-style data (`list`, `search`, `tome list`, `addendum list`, `prefer`) renders as
+  aligned, styled columns on a terminal via `util/table` (strong subjects, faint detail,
+  yellow `held`), with a faint summary footer on `list` and a no-matches line on `search`;
+  piped output keeps the historical tab-separated bytes. `info` and `doctor` get faint
+  keys / strong subjects through the same piped-safe helpers; doctor problems print as a
+  yellow `!` on a terminal (the plain `grimoire: ` prefix when piped).
 - Install result lines name their origin (`prebuilt, checksum verified` / `built from
   source` / `local archive` / store-only variants) via `InstallOrigin` threaded through
   `install_archive`/`install_store_only`.
@@ -359,9 +426,9 @@ pointing to the active generation's `bin/`. Current user-local
 
 ### Bootstrap stage 1: core on all targets
 
-Build the 8/6 core runes (`linux-headers`, `musl`, `compiler-rt`, `llvm`,
-`clang`, `make`, `toybox`, `toolchain-wrappers`) from source on every
-supported target. Current status:
+Build the 7/5 core runes (`linux-headers`, `musl`, `llvm` (+`clang` split
+member with compiler-rt runtimes inside), `make`, `toybox`,
+`toolchain-wrappers`) from source on every supported target. Current status:
 
 - 🔄 macOS aarch64: in progress (M4 Pro)
 - ⏳ Linux x86_64 glibc
