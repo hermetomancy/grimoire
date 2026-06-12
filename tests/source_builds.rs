@@ -626,3 +626,35 @@ fn held_package_is_not_re_realized_for_rune_drift() {
         "the released package must be re-realized from the edited rune"
     );
 }
+
+#[test]
+fn reinstall_after_remove_reuses_the_cached_build_archive() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let src = TempDir::new().unwrap();
+    let src = src.path();
+
+    let rune = src.join("cachedsrc.rn");
+    fs::write(
+        &rune,
+        "export const package = {\n  name: 'cachedsrc'\n  version: '0.1.0'\n  bins: {default: { cachedsrc: 'bin/cachedsrc' }}\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'v1\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'cachedsrc')\n}\n",
+    )
+    .unwrap();
+
+    assert_success(
+        &run(root, &["install", rune.to_str().unwrap()]),
+        "initial source install",
+    );
+    assert_success(&run(root, &["remove", "cachedsrc"]), "remove cachedsrc");
+
+    // Same inputs, same content address: the verified archive in cache/builds is reused, so
+    // the reinstall never re-runs the build.
+    let reinstall = run(root, &["install", rune.to_str().unwrap()]);
+    assert_success(&reinstall, "reinstall from cached archive");
+    assert!(
+        stdout(&reinstall).contains("cached archive"),
+        "the reinstall must come from the build cache: {}",
+        stdout(&reinstall)
+    );
+    assert_eq!(stdout(&run_shim(root, "cachedsrc")).trim(), "v1");
+}

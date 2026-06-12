@@ -306,6 +306,17 @@ impl Installer {
                 ),
                 None => None,
             };
+            // A prior build of these exact inputs may still sit in cache/builds (e.g. the
+            // package was removed and is being reinstalled). Its content address is verified
+            // like any substitute's, so reusing it skips the whole rebuild safely.
+            if let Some(archive) = cached_build_archive(&metadata, store_hash) {
+                return install_archive(
+                    &archive,
+                    expected_hash,
+                    Some(store_hash),
+                    InstallOrigin::CachedBuild,
+                );
+            }
             let build_deps = metadata.deps.build_for(&paths::target_triple());
             self.install_deps(&build_deps)
                 .with_context(|| format!("install build dependencies for `{}`", metadata.name))?;

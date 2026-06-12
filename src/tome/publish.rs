@@ -85,6 +85,7 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
         args.bootstrap,
         args.target.as_deref(),
         args.force,
+        args.strict,
         &rune_names,
         &mut catalog,
     )?;
@@ -106,6 +107,7 @@ pub(crate) fn build_runes(
     bootstrap: bool,
     target: Option<&str>,
     force: bool,
+    strict: bool,
     rune_names: &[String],
     catalog: &mut PackageIndex,
 ) -> Result<()> {
@@ -133,6 +135,8 @@ pub(crate) fn build_runes(
         }
         let (store_hash, entry, archive) =
             build_rune_into(root, name, dist_dir, bootstrap, target)?;
+        lint_archive_purity(&archive, strict)
+            .with_context(|| format!("purity lint for `{}`", entry.name))?;
         report(&format!(
             "built {} {} ({}) into {}",
             entry.name,
@@ -152,6 +156,65 @@ pub(crate) fn build_runes(
     if any_built {
         nuon_io::write_nuon(index_path, &catalog.to_value())
             .with_context(|| format!("update index {}", index_path.display()))?;
+    }
+    Ok(())
+}
+
+/// Post-build purity lint: scans every archive member for absolute host paths that should
+/// never be baked into a store package — host package-manager prefixes and macOS's ephemeral
+/// staging tree. A hit usually means the build linked a host library, baked a host tool
+/// path, or embedded its own temp directory instead of the final store prefix. Warns by
+/// default; `--strict` makes it fatal. The `.grimoire/` members (embedded rune source) are
+/// exempt — comments legitimately mention such paths.
+fn lint_archive_purity(archive: &Path, strict: bool) -> Result<()> {
+    const IMPURE: &[&str] = &[
+        "/usr/local/",
+        "/opt/homebrew/",
+        "/opt/local/",
+        "/nix/store/",
+        "/var/folders/",
+    ];
+    let file = fs::File::open(archive)?;
+    let decoder = zstd::stream::read::Decoder::new(file)?;
+    let mut tar = tar::Archive::new(decoder);
+    let mut hits: Vec<(String, &str)> = Vec::new();
+    for entry in tar.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.display().to_string();
+        if path.starts_with(".grimoire/") || path.starts_with("./.grimoire/") {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        use std::io::Read;
+        entry.read_to_end(&mut bytes)?;
+        for pattern in IMPURE {
+            if bytes
+                .windows(pattern.len())
+                .any(|window| window == pattern.as_bytes())
+            {
+                hits.push((path.clone(), pattern));
+                break;
+            }
+        }
+        if hits.len() >= 5 {
+            break;
+        }
+    }
+    if hits.is_empty() {
+        return Ok(());
+    }
+    let listing: Vec<String> = hits
+        .iter()
+        .map(|(path, pattern)| format!("{path} contains `{pattern}`"))
+        .collect();
+    if strict {
+        bail!(
+            "impure build output ({}); the package bakes host paths that will not exist on              other machines",
+            listing.join("; ")
+        );
+    }
+    for line in &listing {
+        report(&format!("! impure build output: {line}"));
     }
     Ok(())
 }
