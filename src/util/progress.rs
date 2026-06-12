@@ -10,7 +10,7 @@
 //!   `println!` output of `list`/`search`/`info`/`doctor`) and errors still print.
 //!
 //! Progress goes to stderr so stdout carries only command results/data (AGENTS.md §12.1). Color and
-//! the `::`/`✓` decorations are only emitted when the target stream is a real terminal and
+//! the `✦`/`!`/`✓` decorations are only emitted when the target stream is a real terminal and
 //! `NO_COLOR` is unset, so piped or captured output stays plain and byte-stable. The spinner uses
 //! [`indicatif`], which draws to stderr and auto-hides when stderr is not a terminal.
 
@@ -265,6 +265,36 @@ fn purple(symbol: &str) -> String {
     symbol.bold().purple().to_string()
 }
 
+fn yellow(symbol: &str) -> String {
+    symbol.bold().yellow().to_string()
+}
+
+/// Whether stdout result lines may carry inline styling: only on a real terminal with
+/// `NO_COLOR` unset, so piped or captured output stays plain and byte-stable.
+fn stdout_styled() -> bool {
+    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
+/// Emphasizes the subject of a result line (a package name and version, a generation id) on a
+/// terminal. Plain text when stdout is piped or `NO_COLOR` is set.
+pub fn strong(text: &str) -> String {
+    if stdout_styled() {
+        text.bold().to_string()
+    } else {
+        text.to_owned()
+    }
+}
+
+/// De-emphasizes trailing detail on a result line (`— prebuilt, checksum verified`) on a
+/// terminal. Plain text when stdout is piped or `NO_COLOR` is set.
+pub fn faint(text: &str) -> String {
+    if stdout_styled() {
+        text.dimmed().to_string()
+    } else {
+        text.to_owned()
+    }
+}
+
 fn dim_build_log_line(line: &str) -> String {
     if std::env::var_os("NO_COLOR").is_some() || !std::io::stderr().is_terminal() {
         line.to_owned()
@@ -345,7 +375,22 @@ pub fn report(message: &str) {
     }
     clear_spinner();
     clear_live_build_log();
-    match prefix(std::io::stdout().is_terminal(), "::", purple) {
+    match prefix(std::io::stdout().is_terminal(), "✦", purple) {
+        Some(p) => println!("{p} {message}"),
+        None => println!("{message}"),
+    }
+}
+
+/// Prints a cautionary result line to stdout unless `--quiet` is set: a `!` on a terminal,
+/// plain otherwise. For surprises that deserve a glance but do not stop the command — a
+/// major-version upgrade, a skipped held package.
+pub fn warn(message: &str) {
+    if verbosity() == Verbosity::Quiet {
+        return;
+    }
+    clear_spinner();
+    clear_live_build_log();
+    match prefix(std::io::stdout().is_terminal(), "!", yellow) {
         Some(p) => println!("{p} {message}"),
         None => println!("{message}"),
     }

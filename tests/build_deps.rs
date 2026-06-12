@@ -344,3 +344,58 @@ fn platform_conditional_build_deps_only_set_matching_prefix() {
         "SKIPDEP_PREFIX should not be set for non-matching platform dep: {env_text}"
     );
 }
+
+#[test]
+fn shared_build_dependency_realizes_once_across_overlapping_plans() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    // `top` build-depends on [mid, shared] and `mid` build-depends on [shared]. The plan for
+    // top's build deps is resolved before mid's nested build installs `shared`, so by the time
+    // the plan's own `shared` step executes it is stale — the package already landed. That
+    // step must be reused, not rebuilt.
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'sharedtome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("shared.rn"),
+        "export const package = {\n  name: 'shared'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'shared\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'shared')\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("mid.rn"),
+        "export const package = {\n  name: 'mid'\n  version: '0.1.0'\n  deps: { build: { default: ['shared'] }, runtime: [] }\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'mid\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'mid')\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("top.rn"),
+        "export const package = {\n  name: 'top'\n  version: '0.1.0'\n  deps: { build: { default: ['mid' 'shared'] }, runtime: [] }\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'top\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'top')\n}\n",
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "add shared-dep tome");
+
+    let install = run(root, &["install", "top"]);
+    assert_success(&install, "install top");
+    let out = stdout(&install);
+    assert_eq!(
+        out.matches("shared 0.1.0 — built from source").count(),
+        1,
+        "the shared build dep must be built exactly once: {out}"
+    );
+    assert_eq!(
+        out.matches("mid 0.1.0 — built from source").count(),
+        1,
+        "mid must be built exactly once: {out}"
+    );
+}

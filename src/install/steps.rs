@@ -63,7 +63,12 @@ impl Installer {
             self.dry_run_local_root(package)?;
             return Ok(package.to_owned());
         }
-        let installed = install_archive(&PathBuf::from(package), sha256, None)?;
+        let installed = install_archive(
+            &PathBuf::from(package),
+            sha256,
+            None,
+            InstallOrigin::LocalArchive,
+        )?;
         let name = installed.name.clone();
         let runtime = installed.runtime_deps.clone();
         self.record(installed);
@@ -164,11 +169,32 @@ impl Installer {
                 step.name
             );
         }
+        if self.reuse_realized_step(&step)? {
+            return Ok(());
+        }
         let installed = self
             .realize_step(&step)
             .with_context(|| format!("install `{}` {}", step.name, step.version))?;
         self.record(installed);
         Ok(())
+    }
+
+    /// Skips a stale plan step whose package already landed — same name, version, and content
+    /// address, with the store path still present — because a deeper build-dependency
+    /// recursion installed it after this step's plan was resolved. Without this check an
+    /// overlapping build-dep graph (two packages sharing a dependency) realizes the shared
+    /// package once per plan that listed it, rebuilding it from source each time.
+    fn reuse_realized_step(&mut self, step: &PlanStep) -> Result<bool> {
+        if !step_already_realized(step)? {
+            return Ok(false);
+        }
+        status(&format!(
+            "{} {} is already in the store; reusing",
+            step.name, step.version
+        ));
+        self.installed
+            .insert(step.name.clone(), step.version.clone());
+        Ok(true)
     }
 
     /// Realizes a resolved step by querying its prebuilt substitutes by store hash, falling back to
@@ -241,6 +267,7 @@ impl Installer {
             &archive,
             Some(sub.entry.archive_hash.clone()),
             Some(&sub.store_hash),
+            InstallOrigin::Prebuilt,
         )
     }
 
@@ -293,7 +320,12 @@ impl Installer {
                 &env,
                 store_hash,
             )?;
-            install_archive(&result.archive, expected_hash, Some(&result.store_hash))
+            install_archive(
+                &result.archive,
+                expected_hash,
+                Some(&result.store_hash),
+                InstallOrigin::Source,
+            )
         })();
         self.building.remove(&metadata.name);
         result

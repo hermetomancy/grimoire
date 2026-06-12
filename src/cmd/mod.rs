@@ -4,6 +4,7 @@
 pub(crate) mod clean;
 pub(crate) mod doctor;
 pub(crate) mod files;
+pub(crate) mod generations;
 pub(crate) mod man;
 pub(crate) mod prefer;
 pub(crate) mod query;
