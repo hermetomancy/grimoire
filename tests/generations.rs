@@ -223,3 +223,91 @@ fn doctor_flags_state_generation_divergence() {
         stderr(&doctor)
     );
 }
+
+/// An install whose generation build *refuses* (a contested bin with no preference) commits
+/// its package transactions first, leaving state saying "installed" while the environment
+/// still shows the old generation. The re-run must converge — retry the link, not report
+/// "already installed and up to date" over the stale environment.
+#[test]
+fn failed_generation_link_is_retried_by_the_next_install() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let tome = TempDir::new().unwrap();
+    let tome_path = tome.path();
+    let runes = tome_path.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome_path.join("tome.rn"),
+        "export const tome = {\n  name: 'wedgetome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    // Two packages both shipping an `awk` bin: linking them together contests the name.
+    for provider in ["gawk", "mawk"] {
+        fs::write(
+            runes.join(format!("{provider}.rn")),
+            format!(
+                "export const package = {{\n  name: '{provider}'\n  version: '0.1.0'\n  bins: {{ default: {{ {provider}: 'bin/{provider}', awk: 'bin/{provider}' }} }}\n \n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf '{provider}\\n'\\n\" | save ($ctx.package_dir | path join 'bin' '{provider}')\n}}\n"
+            ),
+        )
+        .unwrap();
+    }
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome_path.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add wedgetome",
+    );
+
+    assert_success(&run(root, &["install", "gawk"]), "install gawk (gen 1)");
+
+    // Installing mawk commits its transaction, then the generation build refuses on the
+    // contested `awk` bin — the command fails with state already saying mawk is installed.
+    let wedge = run(root, &["install", "mawk"]);
+    assert!(
+        !wedge.status.success(),
+        "install mawk should refuse on the contested bin"
+    );
+    assert!(
+        stderr(&wedge).contains("provided by multiple installed packages"),
+        "expected the contested-bin refusal: {}",
+        stderr(&wedge)
+    );
+
+    // The wedge: a re-run resolves no steps. It must detect the stale generation and retry
+    // the link (repeating the real error), not claim "already installed and up to date".
+    let rerun = run(root, &["install", "mawk"]);
+    assert!(
+        !rerun.status.success(),
+        "re-run must retry the failed generation link, not report success: {}",
+        stdout(&rerun)
+    );
+    assert!(
+        !stdout(&rerun).contains("already installed and up to date"),
+        "re-run must not report up to date over a stale environment: {}",
+        stdout(&rerun)
+    );
+    assert!(
+        stderr(&rerun).contains("provided by multiple installed packages"),
+        "re-run should repeat the contested-bin refusal: {}",
+        stderr(&rerun)
+    );
+
+    // Settling the contest unwedges the same re-run: it relinks and the environment
+    // finally contains mawk.
+    assert_success(&run(root, &["prefer", "awk", "gawk"]), "prefer awk gawk");
+    assert_success(
+        &run(root, &["install", "mawk"]),
+        "install mawk after preference relinks",
+    );
+    let mawk = run_shim(root, "mawk");
+    assert_success(&mawk, "run mawk from the relinked generation");
+    assert_eq!(stdout(&mawk).trim(), "mawk", "mawk bin output");
+    let awk = run_shim(root, "awk");
+    assert_eq!(
+        stdout(&awk).trim(),
+        "gawk",
+        "awk goes to the preferred provider"
+    );
+}
