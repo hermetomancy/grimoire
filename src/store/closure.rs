@@ -169,7 +169,9 @@ pub fn store_hash_for_rune_with_deps(
 /// from a local archive, or whose deps only resolve as capabilities) is never reported — there
 /// is nothing to rebuild it from; and a rune that moved to a *different* version is `grm
 /// upgrade`'s business, not drift. One walker memoizes the closure walk across the whole set.
-pub fn stale_installed(states: &[crate::model::PackageState]) -> Vec<String> {
+/// Returns `(name, expected store hash)` pairs so callers can report what the package
+/// would re-address to, not just that it drifted.
+pub fn stale_installed(states: &[crate::model::PackageState]) -> Vec<(String, String)> {
     let Ok(mut walker) = Walker::new() else {
         return Vec::new();
     };
@@ -193,7 +195,7 @@ pub fn stale_installed(states: &[crate::model::PackageState]) -> Vec<String> {
             continue;
         };
         if expected != state.store_hash {
-            stale.push(state.name.clone());
+            stale.push((state.name.clone(), expected));
         }
     }
     stale

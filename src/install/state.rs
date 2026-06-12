@@ -285,6 +285,7 @@ pub(crate) fn installed_versions_current() -> Result<BTreeMap<String, Version>> 
     let states = installed_states()?;
     let stale: HashSet<String> = crate::store::closure::stale_installed(&states)
         .into_iter()
+        .map(|(name, _)| name)
         .collect();
     let mut versions = BTreeMap::new();
     for state in states {

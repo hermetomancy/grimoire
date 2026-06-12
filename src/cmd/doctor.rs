@@ -88,6 +88,7 @@ pub fn doctor() -> Result<()> {
     problems += check_state_generation_divergence()?;
     problems += check_tomes()?;
     problems += check_packages()?;
+    check_address_drift()?;
     problems += check_duplicate_bins()?;
     problems += check_generation_snapshots()?;
     problems += check_stale_backups()?;
@@ -407,6 +408,38 @@ fn check_packages() -> Result<usize> {
         }
     }
     Ok(problems)
+}
+
+/// Informational, not a problem: installed from-source packages whose expected content
+/// address no longer matches what their rune would produce today — the rune was edited, a
+/// runtime dependency re-addressed, or the build environment identity changed. The next
+/// install or upgrade that needs them rebuilds at the new address; surfacing the pending
+/// drift here makes that rebuild predictable instead of surprising ("X is up to date"
+/// followed by a 40-minute source build).
+fn check_address_drift() -> Result<()> {
+    let states = install::installed_states()?;
+    let drifted = crate::store::closure::stale_installed(&states);
+    if drifted.is_empty() {
+        return Ok(());
+    }
+    let by_name: std::collections::BTreeMap<&str, &crate::model::PackageState> =
+        states.iter().map(|s| (s.name.as_str(), s)).collect();
+    for (name, expected) in &drifted {
+        let installed = by_name
+            .get(name.as_str())
+            .map(|s| s.store_hash.as_str())
+            .unwrap_or("?");
+        progress::note(&format!(
+            "{} drifted: installed {installed}, expected {expected}",
+            progress::strong(name)
+        ));
+    }
+    progress::note(&format!(
+        "{} package(s) will rebuild at their new address the next time an install or \
+         upgrade needs them (rune, dependency, or build environment changed)",
+        drifted.len()
+    ));
+    Ok(())
 }
 
 fn check_lock(problems: &mut usize) -> Result<()> {
