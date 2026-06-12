@@ -562,3 +562,68 @@ fn rune_outside_the_command_subset_fails_at_query_time() {
         stderr(&add)
     );
 }
+
+#[test]
+fn rune_metadata_cache_populates_and_self_heals() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'cachetome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("cachedpkg.rn"),
+        "export const package = {\n  name: 'cachedpkg'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n}\n",
+    )
+    .unwrap();
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add cachetome",
+    );
+
+    let info = run(root, &["info", "cachedpkg"]);
+    assert_success(&info, "info populates the cache");
+    let cache_root = root.join("cache").join("rune-meta");
+    let entries: Vec<_> = walk_files(&cache_root);
+    assert!(
+        !entries.is_empty(),
+        "rune-meta cache must be populated after a metadata read"
+    );
+
+    // Corrupt every cache entry: reads must fall back to a fresh parse and overwrite.
+    for entry in &entries {
+        fs::write(entry, b"not nuon at all").unwrap();
+    }
+    let again = run(root, &["info", "cachedpkg"]);
+    assert_success(&again, "info self-heals a corrupt cache");
+    assert!(
+        stdout(&again).contains("cachedpkg"),
+        "metadata must still be correct: {}",
+        stdout(&again)
+    );
+}
+
+fn walk_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return files;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(walk_files(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
