@@ -395,3 +395,16 @@ fn filters_platform_conditional_deps_that_do_not_match_glob() {
         "unmatched-dep should be filtered out: {steps:?}"
     );
 }
+
+#[test]
+fn bare_requirement_resolves_a_prerelease_only_package() {
+    // The catalog pins unreleased software as `-dev.` prereleases; a plain dependency
+    // (`*`) must accept them even though strict semver excludes prereleases from `*`.
+    let src = source(&[("grimoire", vec![cand("0.1.0-dev.20260612", &[])])]);
+    let resolved = plan(&[Dependency::any("grimoire")], &src)
+        .expect("prerelease-only package resolves under a bare requirement");
+    assert_eq!(
+        resolved,
+        vec![("grimoire".to_owned(), "0.1.0-dev.20260612".to_owned())]
+    );
+}
