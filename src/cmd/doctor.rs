@@ -424,14 +424,19 @@ fn check_address_drift() -> Result<()> {
     }
     let by_name: std::collections::BTreeMap<&str, &crate::model::PackageState> =
         states.iter().map(|s| (s.name.as_str(), s)).collect();
-    for (name, expected) in &drifted {
+    for stale in &drifted {
         let installed = by_name
-            .get(name.as_str())
+            .get(stale.name.as_str())
             .map(|s| s.store_hash.as_str())
             .unwrap_or("?");
+        let cause = match &stale.env_change {
+            Some(diff) => format!(" (build environment changed: {diff})"),
+            None => String::new(),
+        };
         progress::note(&format!(
-            "{} drifted: installed {installed}, expected {expected}",
-            progress::strong(name)
+            "{} drifted: installed {installed}, expected {}{cause}",
+            progress::strong(&stale.name),
+            stale.expected
         ));
     }
     progress::note(&format!(

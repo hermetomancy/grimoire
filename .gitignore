@@ -1,6 +1,4 @@
 /target
 .DS_Store
-
-# I'm just keeping this in here for convenience, doesn't need to be a submodule.
 /tome-core
 /tome-world
