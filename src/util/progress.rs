@@ -285,6 +285,42 @@ pub fn strong(text: &str) -> String {
     }
 }
 
+/// Accents the subject of a `✦` headline result (the package and version that was installed,
+/// the outcome of a rollback) in bold green on a terminal. Plain text when stdout is piped or
+/// `NO_COLOR` is set. `strong` is for subjects embedded in [`note`] context lines; `accent`
+/// is for the headline outcomes themselves.
+pub fn accent(text: &str) -> String {
+    if stdout_styled() {
+        text.bold().green().to_string()
+    } else {
+        text.to_owned()
+    }
+}
+
+/// Prints a persistent secondary confirmation — a context or transition line (`generation 4
+/// is now current`, `switching profile to generation 4…`) that frames the `✦` headline
+/// results without competing with them. Dimmed and unprefixed on a terminal (embed [`strong`]
+/// subjects *inside* the message; they read through the dimming), plain when piped,
+/// suppressed under `--quiet`.
+pub fn note(message: &str) {
+    if verbosity() == Verbosity::Quiet {
+        return;
+    }
+    clear_spinner();
+    clear_live_build_log();
+    if stdout_styled() {
+        // Hand-rolled SGR so embedded [`strong`] subjects survive the dimming: clear the dim
+        // flag before an embedded bold starts, and re-open dim after its reset — otherwise
+        // the subject's `\x1b[0m` would un-dim the rest of the line.
+        let message = message
+            .replace("\x1b[1m", "\x1b[22m\x1b[1m")
+            .replace("\x1b[0m", "\x1b[0m\x1b[2m");
+        println!("\x1b[2m{message}\x1b[0m");
+    } else {
+        println!("{message}");
+    }
+}
+
 /// De-emphasizes trailing detail on a result line (`— prebuilt, checksum verified`) on a
 /// terminal. Plain text when stdout is piped or `NO_COLOR` is set.
 pub fn faint(text: &str) -> String {

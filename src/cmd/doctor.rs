@@ -6,6 +6,9 @@
 use anyhow::{Context, Result};
 use std::{collections::BTreeMap, fs, path::Path};
 
+use owo_colors::OwoColorize;
+use std::io::IsTerminal;
+
 use crate::{
     build::toolchain,
     catalog::sync_common,
@@ -15,12 +18,29 @@ use crate::{
     nu::nuon_io,
     profile, tome,
     util::paths,
+    util::progress,
 };
+
+/// An environment/health field line: faint key, plain value — identical bytes when piped,
+/// so scripts and tests keep parsing `key: value`.
+fn field(key: &str, value: &str) {
+    println!("{} {value}", progress::faint(&format!("{key}:")));
+}
+
+/// A per-item problem on stderr: a yellow `!` on a terminal, the historical plain
+/// `grimoire: ` prefix when piped. Problems are diagnostics the user explicitly asked for,
+/// so they print regardless of verbosity.
+fn problem(message: &str) {
+    if std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
+        eprintln!("{} {message}", "!".bold().yellow());
+    } else {
+        eprintln!("grimoire: {message}");
+    }
+}
 
 const CORE_USERLAND_TOOLS_LINUX: &[&str] = &[
     "linux-headers",
     "musl",
-    "compiler-rt",
     "llvm",
     "clang",
     "cmake",
@@ -33,7 +53,6 @@ const CORE_USERLAND_TOOLS_LINUX: &[&str] = &[
 const CORE_USERLAND_TOOLS_NON_LINUX: &[&str] = &[
     "llvm",
     "clang",
-    "compiler-rt",
     "cmake",
     "python3",
     "make",
@@ -54,14 +73,14 @@ fn core_userland_tools() -> &'static [&'static str] {
 /// run reports zero problems; problems are diagnostics, not a hard error.
 pub fn doctor() -> Result<()> {
     let root = paths::install_root().context("resolve install root")?;
-    println!("grimoire: {}", env!("CARGO_PKG_VERSION"));
-    println!("target: {}", paths::target_triple());
-    println!("install root: {}", root.display());
+    field("grimoire", env!("CARGO_PKG_VERSION"));
+    field("target", &paths::target_triple());
+    field("install root", &root.display().to_string());
 
     let mut problems = 0_usize;
     if let Some(msg) = paths::fixed_store_setup_instructions() {
         problems += 1;
-        eprintln!("grimoire: {msg}");
+        problem(&msg);
     }
     problems += check_install_root(&root);
     problems += check_current_symlink()?;
@@ -76,9 +95,9 @@ pub fn doctor() -> Result<()> {
     check_lock(&mut problems)?;
 
     if problems == 0 {
-        println!("health: ok");
+        field("health", &progress::strong("ok"));
     } else {
-        println!("health: {problems} problem(s) found");
+        field("health", &format!("{problems} problem(s) found"));
     }
     Ok(())
 }
@@ -87,11 +106,11 @@ pub fn doctor() -> Result<()> {
 /// tool paths into Makefiles, which split at the space.
 fn check_install_root(root: &Path) -> usize {
     if root.to_string_lossy().chars().any(char::is_whitespace) {
-        eprintln!(
-            "grimoire: install root `{}` contains whitespace, which breaks source builds; \
+        problem(&format!(
+            "install root `{}` contains whitespace, which breaks source builds; \
              set GRIMOIRE_ROOT to a space-free path",
             root.display()
-        );
+        ));
         return 1;
     }
     0
@@ -101,10 +120,10 @@ fn check_install_root(root: &Path) -> usize {
 fn check_current_symlink() -> Result<usize> {
     let link = profile::current_profile_link()?;
     if fs::symlink_metadata(&link).is_ok() && fs::metadata(&link).is_err() {
-        eprintln!(
-            "grimoire: `{}` points at a generation that no longer exists; run `grm rollback <id>`",
+        problem(&format!(
+            "`{}` points at a generation that no longer exists; run `grm rollback <id>`",
             link.display()
-        );
+        ));
         return Ok(1);
     }
     Ok(0)
@@ -126,10 +145,10 @@ fn check_state_files() -> Result<usize> {
         let parsed = nuon_io::read_nuon(&path).and_then(PackageState::from_value);
         if let Err(e) = parsed {
             problems += 1;
-            eprintln!(
-                "grimoire: package state file `{}` is corrupt: {e:#}",
+            problem(&format!(
+                "package state file `{}` is corrupt: {e:#}",
                 path.display()
-            );
+            ));
         }
     }
     Ok(problems)
@@ -159,11 +178,11 @@ fn check_state_generation_divergence() -> Result<usize> {
         .map(|s| format!("{} {}", s.name, s.version))
         .collect();
     if !diverged.is_empty() {
-        eprintln!(
-            "grimoire: state/packages diverges from active generation {id} ({}); interrupted \
+        problem(&format!(
+            "state/packages diverges from active generation {id} ({}); interrupted \
              activation? run `grm rollback <id>` to converge",
             diverged.join(", ")
-        );
+        ));
         return Ok(1);
     }
     Ok(0)
@@ -191,11 +210,11 @@ fn check_duplicate_bins() -> Result<usize> {
             .is_some_and(|p| claimants.iter().any(|c| c == p));
         if !resolved {
             problems += 1;
-            eprintln!(
-                "grimoire: bin `{bin}` is provided by multiple packages ({}); run \
+            problem(&format!(
+                "bin `{bin}` is provided by multiple packages ({}); run \
                  `grm prefer {bin} <package>` before the next install",
                 claimants.join(", ")
-            );
+            ));
         }
     }
     Ok(problems)
@@ -221,12 +240,12 @@ fn check_generation_snapshots() -> Result<usize> {
             .collect();
         if !missing.is_empty() {
             problems += 1;
-            eprintln!(
-                "grimoire: generation {} snapshot references missing store path(s) for {}; \
+            problem(&format!(
+                "generation {} snapshot references missing store path(s) for {}; \
                  rolling back to it would restore state for packages whose bits are gone",
                 generation.id,
                 missing.join(", ")
-            );
+            ));
         }
     }
     Ok(problems)
@@ -251,10 +270,10 @@ fn check_stale_backups() -> Result<usize> {
                 .is_some_and(|n| n.ends_with(".grimoire-old"))
             {
                 problems += 1;
-                eprintln!(
-                    "grimoire: stale transaction backup `{}` (safe to delete)",
+                problem(&format!(
+                    "stale transaction backup `{}` (safe to delete)",
                     path.display()
-                );
+                ));
             }
         }
     }
@@ -263,13 +282,16 @@ fn check_stale_backups() -> Result<usize> {
 
 fn check_source_build_readiness() -> Result<usize> {
     let readiness = toolchain::source_build_readiness()?;
-    println!(
-        "source builds: host compiler boundary {}",
-        if readiness.is_ready() {
-            "ok"
-        } else {
-            "missing"
-        }
+    field(
+        "source builds",
+        &format!(
+            "host compiler boundary {}",
+            if readiness.is_ready() {
+                "ok"
+            } else {
+                "missing"
+            }
+        ),
     );
     report_managed_core_readiness()?;
 
@@ -277,10 +299,10 @@ fn check_source_build_readiness() -> Result<usize> {
         return Ok(0);
     }
 
-    eprintln!(
-        "grimoire: source builds need a host compiler boundary for now; missing {}",
+    problem(&format!(
+        "source builds need a host compiler boundary for now; missing {}",
         readiness.missing_required.join(", ")
-    );
+    ));
     Ok(1)
 }
 
@@ -289,15 +311,18 @@ fn report_managed_core_readiness() -> Result<()> {
     let missing = missing_core_tools()?;
     let installed = tools.len() - missing.len();
     if missing.is_empty() {
-        println!(
-            "managed core userland: ready ({installed}/{total})",
-            total = tools.len()
+        field(
+            "managed core userland",
+            &format!("ready ({installed}/{total})", total = tools.len()),
         );
     } else {
-        println!(
-            "managed core userland: incomplete ({installed}/{total}, missing {missing})",
-            total = tools.len(),
-            missing = missing.join(", ")
+        field(
+            "managed core userland",
+            &format!(
+                "incomplete ({installed}/{total}, missing {missing})",
+                total = tools.len(),
+                missing = missing.join(", ")
+            ),
         );
     }
     Ok(())
@@ -315,23 +340,23 @@ fn missing_core_tools() -> Result<Vec<String>> {
 
 fn check_tomes() -> Result<usize> {
     let tomes = tome::load_tomes()?;
-    println!("tomes: {}", tomes.len());
+    field("tomes", &tomes.len().to_string());
 
     let mut problems = 0;
     for state in &tomes {
         let cache = sync_common::cache_path("tomes", &state.name)?;
         if !cache.exists() {
             problems += 1;
-            eprintln!(
-                "grimoire: tome `{}` is not synced (run `grm tome update {}`)",
+            problem(&format!(
+                "tome `{}` is not synced (run `grm tome update {}`)",
                 state.name, state.name
-            );
+            ));
         } else if !cache.join("runes").exists() {
             problems += 1;
-            eprintln!(
-                "grimoire: tome `{}` cache is missing its runes directory",
+            problem(&format!(
+                "tome `{}` cache is missing its runes directory",
                 state.name
-            );
+            ));
         }
     }
     Ok(problems)
@@ -342,7 +367,7 @@ fn check_packages() -> Result<usize> {
     let active_packages = profile::current_generation_packages()?;
     let active_set: std::collections::BTreeSet<String> =
         active_packages.unwrap_or_default().into_iter().collect();
-    println!("installed packages: {}", states.len());
+    field("installed packages", &states.len().to_string());
 
     let bin_dir = profile::current_profile_link()?.join("bin");
     let mut problems = 0;
@@ -351,12 +376,12 @@ fn check_packages() -> Result<usize> {
         let package_dir = std::path::PathBuf::from(&state.store_path);
         if !package_dir.exists() {
             problems += 1;
-            eprintln!(
-                "grimoire: package `{}` {} is recorded but its files are missing ({})",
+            problem(&format!(
+                "package `{}` {} is recorded but its files are missing ({})",
                 state.name,
                 state.version,
                 package_dir.display()
-            );
+            ));
         }
 
         // Only expect profile links for packages in the active generation;
@@ -369,12 +394,12 @@ fn check_packages() -> Result<usize> {
             let link = bin_dir.join(bin);
             if !link.exists() {
                 problems += 1;
-                eprintln!(
-                    "grimoire: package `{}` is missing its `{}` profile link ({})",
+                problem(&format!(
+                    "package `{}` is missing its `{}` profile link ({})",
                     state.name,
                     bin,
                     link.display()
-                );
+                ));
             }
         }
     }
@@ -384,12 +409,12 @@ fn check_packages() -> Result<usize> {
 fn check_lock(problems: &mut usize) -> Result<()> {
     let path = lock::lock_path()?;
     if path.exists() {
-        println!("lockfile: {}", path.display());
+        field("lockfile", &path.display().to_string());
     } else if install::installed_states()?.is_empty() {
-        println!("lockfile: none (no packages installed)");
+        field("lockfile", "none (no packages installed)");
     } else {
         *problems += 1;
-        eprintln!("grimoire: lockfile is missing despite installed packages");
+        problem("lockfile is missing despite installed packages");
     }
     Ok(())
 }

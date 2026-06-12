@@ -17,6 +17,7 @@ use crate::{
     util::fs_util,
     util::paths,
     util::progress,
+    util::table::{self, Cell},
 };
 
 /// Returns `true` when `url` is a local directory containing `manifest_name`.
@@ -207,7 +208,7 @@ pub fn capture_signer(
     if !sets_match {
         if signing::verify_detached(manifest_path, existing).is_ok() {
             progress::report(&format!(
-                "{entity_kind} `{name}` rotated signing keys ({} -> {})",
+                "{entity_kind} `{name}` rotated signing keys ({} → {})",
                 existing.len(),
                 advertised.len(),
             ));
@@ -265,15 +266,27 @@ pub fn remove_catalog<C: Catalog>(name: &str, remove_cache: bool) -> anyhow::Res
             fs::remove_dir_all(&cache_path)?;
         }
     }
-    progress::report(&format!("removed {} {name}", C::ENTITY_KIND));
+    progress::report(&format!(
+        "removed {} {}",
+        C::ENTITY_KIND,
+        progress::accent(name)
+    ));
     Ok(())
 }
 
 /// Lists every catalog of a given kind.
 pub fn list_catalogs<C: Catalog>() -> anyhow::Result<()> {
-    for state in load_catalogs::<C>()? {
-        println!("{}\t{}\t{}", state.name(), state.url(), state.ref_name());
-    }
+    let rows = load_catalogs::<C>()?
+        .iter()
+        .map(|state| {
+            vec![
+                Cell::strong(state.name()),
+                Cell::plain(state.url()),
+                Cell::faint(state.ref_name()),
+            ]
+        })
+        .collect();
+    table::print_rows(rows);
     Ok(())
 }
 

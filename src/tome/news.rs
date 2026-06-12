@@ -102,7 +102,7 @@ pub fn surface_after_sync(tome_name: &str, cache: &Path, first_sync: bool) -> Re
         for item in fresh {
             print_item(tome_name, item, Some(NEWS_UPDATE_BODY_LINES));
         }
-        report(&format!(
+        crate::util::progress::note(&format!(
             "run `grm tome news {tome_name}` to read items in full"
         ));
     }
@@ -113,17 +113,22 @@ pub fn surface_after_sync(tome_name: &str, cache: &Path, first_sync: bool) -> Re
 const NEWS_UPDATE_BODY_LINES: usize = 10;
 
 fn print_item(tome_name: &str, item: &NewsItem, body_line_cap: Option<usize>) {
-    report(&format!("news [{tome_name}] {}", item.title));
+    use crate::util::progress::{faint, note, strong};
+    report(&format!(
+        "{} {}",
+        faint(&format!("news [{tome_name}]")),
+        strong(&item.title)
+    ));
     if item.body.is_empty() {
         return;
     }
     let lines: Vec<&str> = item.body.lines().collect();
     let cap = body_line_cap.unwrap_or(lines.len());
     for line in lines.iter().take(cap) {
-        report(&format!("  {line}"));
+        note(&format!("  {line}"));
     }
     if lines.len() > cap {
-        report(&format!("  … ({} more lines)", lines.len() - cap));
+        note(&format!("  … ({} more lines)", lines.len() - cap));
     }
 }
 
