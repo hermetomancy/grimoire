@@ -20,10 +20,13 @@ use crate::{
     cli::CleanArgs,
     install, profile,
     util::paths,
-    util::progress::{report, status},
+    util::progress::{accent, faint, report, status},
 };
 
 pub fn clean(args: CleanArgs) -> Result<()> {
+    if args.dry_run {
+        return dry_run_clean(&args);
+    }
     // Orphaned dependency state first, so the generation built from the swept set is the one
     // garbage collection measures reachability against.
     status("sweeping unused dependencies");
@@ -87,10 +90,67 @@ pub fn clean(args: CleanArgs) -> Result<()> {
         ));
     }
     report(&format!(
-        "cleaned {} ({})",
-        parts.join(", "),
-        format_bytes(store_bytes + cache_bytes)
+        "cleaned {} {}",
+        accent(&parts.join(", ")),
+        faint(&format!("({})", format_bytes(store_bytes + cache_bytes)))
     ));
+    Ok(())
+}
+
+/// `clean --dry-run`: every phase computed, nothing deleted. The sweep is simulated on an
+/// in-memory copy of state, garbage collection through [`profile::plan_garbage`], and the
+/// caches by a size-only walk.
+fn dry_run_clean(args: &CleanArgs) -> Result<()> {
+    let states = install::installed_states()?;
+    let seeds: Vec<String> = states
+        .iter()
+        .filter(|state| !state.requested && !state.held)
+        .map(|state| state.name.clone())
+        .collect();
+    let swept = install::simulate_orphan_sweep(&states, &[], &seeds);
+    let (doomed_stores, old_generations, store_bytes) = profile::plan_garbage(args.keep)?;
+
+    let root = paths::install_root()?;
+    let targets: [(&str, PathBuf); 5] = [
+        ("cache/sources", paths::source_cache_dir()?),
+        ("cache/archives", paths::archive_cache_dir()?),
+        ("cache/builds", paths::build_output_dir()?),
+        ("cache/rune-meta", root.join("cache").join("rune-meta")),
+        ("transactions", root.join("transactions")),
+    ];
+    let mut cache_bytes = 0u64;
+    let mut cache_entries = 0u64;
+    for (_, dir) in &targets {
+        if !dir.exists() {
+            continue;
+        }
+        for entry in fs::read_dir(dir)? {
+            cache_bytes += path_size(&entry?.path());
+            cache_entries += 1;
+        }
+    }
+
+    if swept.is_empty() && doomed_stores.is_empty() && old_generations == 0 && cache_entries == 0 {
+        report("nothing to clean");
+        return Ok(());
+    }
+    println!("plan:");
+    for name in &swept {
+        println!("  - {name} (unused dependency)");
+    }
+    if old_generations > 0 {
+        println!("  - {old_generations} old generation(s)");
+    }
+    for basename in &doomed_stores {
+        println!("  - store/{basename}");
+    }
+    if cache_entries > 0 {
+        println!(
+            "  - {cache_entries} cache entr{}",
+            if cache_entries == 1 { "y" } else { "ies" }
+        );
+    }
+    println!("would reclaim {}", format_bytes(store_bytes + cache_bytes));
     Ok(())
 }
 

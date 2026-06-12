@@ -12,7 +12,7 @@ use crate::{
     cli::{TomeAddArgs, TomeRemoveArgs, TomeUpdateArgs},
     model::{Catalog, TomeState, validate_tome_name, validate_tome_ref, validate_tome_url},
     nu::{nuon_io, runtime::EmbeddedNuRuntime},
-    util::progress::report,
+    util::progress::{report, warn},
 };
 
 use super::*;
@@ -21,6 +21,13 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
     validate_tome_url(&args.git_url)?;
     validate_tome_ref(&args.ref_name)?;
     sync_common::validate_local_source(&args.git_url, "tome.rn")?;
+    if args.dry_run {
+        println!(
+            "would clone {} (ref {}) and register the tome under its manifest name",
+            args.git_url, args.ref_name
+        );
+        return Ok(());
+    }
 
     // The tome names itself: read the `name` from its manifest rather than asking the user
     // to repeat it on the command line. Remote sources are cloned to a temp dir to read it.
@@ -58,7 +65,10 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
         last_seen_news: None,
     };
     nuon_io::write_nuon(&state_path, &state.to_value())?;
-    report(&format!("added tome {name}"));
+    report(&format!(
+        "added tome {}",
+        crate::util::progress::accent(&name)
+    ));
     Ok(())
 }
 
@@ -80,6 +90,13 @@ pub fn update(args: TomeUpdateArgs) -> Result<()> {
     }
 
     for tome in tomes {
+        if args.dry_run {
+            println!(
+                "would sync tome `{}` from {} (ref {})",
+                tome.name, tome.url, tome.ref_name
+            );
+            continue;
+        }
         let line = sync_tome_cache(&tome)?;
         report(&line);
     }
@@ -95,13 +112,25 @@ pub fn update_all_configured() -> Result<()> {
 }
 
 pub fn remove(args: TomeRemoveArgs) -> Result<()> {
+    if args.dry_run {
+        let orphaned = installed_from_tome(&args.name).unwrap_or_default();
+        println!("would remove tome `{}` and its cache", args.name);
+        if !orphaned.is_empty() {
+            println!(
+                "  installed packages losing their runes (stay installed, no longer \
+                 rebuildable or drift-checked): {}",
+                orphaned.join(", ")
+            );
+        }
+        return Ok(());
+    }
     // Installed packages whose runes resolve from this tome keep working, but silently lose
     // drift detection and the ability to be rebuilt from source ("no rune → treated fresh").
     // Warn before the cache disappears, while resolution can still attribute them.
     let orphaned = installed_from_tome(&args.name).unwrap_or_default();
     if !orphaned.is_empty() {
-        report(&format!(
-            "! installed packages resolve from tome `{}`: {} — they stay installed but can \
+        warn(&format!(
+            "installed packages resolve from tome `{}`: {} — they stay installed but can \
              no longer be rebuilt or drift-checked until a tome provides their runes again",
             args.name,
             orphaned.join(", ")
@@ -198,7 +227,7 @@ pub(crate) fn sync_tome_cache(tome: &TomeState) -> Result<String> {
     let first_sync = tome.checked_ref.is_none();
     let cache_path = sync_common::cache_path(TomeState::SUBDIR, &tome.name)?;
     if let Err(e) = news::surface_after_sync(&tome.name, &cache_path, first_sync) {
-        report(&format!("warning: could not surface tome news: {e}"));
+        warn(&format!("could not surface tome news: {e}"));
     }
     Ok(sync_report_line(
         &tome.name,

@@ -45,17 +45,17 @@ pub enum Command {
     /// it is removed automatically once nothing needs it. Store contents are untouched (so
     /// rollback still works); `grm clean` reclaims the disk space.
     #[command(visible_aliases = ["rm", "uninstall"])]
-    Remove(PackageArg),
+    Remove(MutatePackagesArgs),
     /// Upgrade installed packages to the latest available version. Packages held with
     /// `grm hold` are skipped (or, if named explicitly, refused with an error).
     #[command(visible_alias = "up")]
     Upgrade(UpgradeArgs),
     /// Hold an installed package back from `grm upgrade` until it is released.
     #[command(visible_alias = "pin")]
-    Hold(PackageArg),
+    Hold(MutatePackagesArgs),
     /// Release a held package so it is eligible for `grm upgrade` again.
     #[command(visible_alias = "unpin")]
-    Unhold(PackageArg),
+    Unhold(MutatePackagesArgs),
     /// Restore the package set a lockfile records: install every requested package at its
     /// pinned version and hash, restore requested/held intent, and sweep anything the lock
     /// does not account for. Tomes must already be configured (and, for git tomes, synced at
@@ -70,9 +70,10 @@ pub enum Command {
     // -----------------------------------------------------------------------
     // Query
     // -----------------------------------------------------------------------
-    /// List installed packages with their versions and targets.
+    /// List installed packages with their versions and targets. By default only the linked
+    /// environment is shown; `--all` includes store-only packages (cached build deps).
     #[command(visible_alias = "ls")]
-    List,
+    List(ListArgs),
     /// Search configured tomes for packages.
     #[command(visible_aliases = ["s", "find"])]
     Search(QueryArg),
@@ -112,7 +113,7 @@ pub enum Command {
     /// On Linux this creates the directory and adjusts ownership. On macOS it registers
     /// the directory in /etc/synthetic.conf and prompts for a reboot.
     #[command(visible_alias = "st")]
-    Setup,
+    Setup(SetupArgs),
 
     // -----------------------------------------------------------------------
     // Catalogs
@@ -215,6 +216,33 @@ pub struct RestoreArgs {
     /// Lockfile to restore from. Defaults to the install root's `state/grimoire.lock.nuon`.
     #[arg(long)]
     pub lockfile: Option<std::path::PathBuf>,
+    /// Show what would be restored and swept without changing anything.
+    #[arg(long, visible_alias = "explain")]
+    pub dry_run: bool,
+}
+
+/// Packages named for a mutating command, plus the shared preview flag.
+#[derive(Debug, Args)]
+pub struct MutatePackagesArgs {
+    pub packages: Vec<String>,
+    /// Show what would change without changing anything.
+    #[arg(long, visible_alias = "explain")]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ListArgs {
+    /// Include store-only packages (cached build deps, residue kept for reuse) alongside the
+    /// linked environment.
+    #[arg(short, long)]
+    pub all: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SetupArgs {
+    /// Show what setup would do without touching the system.
+    #[arg(long, visible_alias = "explain")]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -223,6 +251,9 @@ pub struct PreferArgs {
     pub capability: Option<String>,
     /// Package that should provide the capability.
     pub package: Option<String>,
+    /// Show what the preference change would do without applying it.
+    #[arg(long, visible_alias = "explain")]
+    pub dry_run: bool,
     /// Clear the preference for the capability instead of setting one.
     #[arg(long)]
     pub unset: bool,
@@ -260,6 +291,9 @@ pub struct UpgradeArgs {
 pub struct RollbackArgs {
     /// Generation ID to activate. Omit to roll back to the previous generation.
     pub generation: Option<u64>,
+    /// Show the target generation and the package diff without switching.
+    #[arg(long, visible_alias = "explain")]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -268,6 +302,9 @@ pub struct CleanArgs {
     /// is always kept.
     #[arg(short, long, default_value = "5")]
     pub keep: usize,
+    /// Show what would be reclaimed without deleting anything.
+    #[arg(long, visible_alias = "explain")]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -375,18 +412,27 @@ pub struct TomeAddArgs {
     /// May be given multiple times for multi-key setups.
     #[arg(long = "signer", action = clap::ArgAction::Append)]
     pub signer: Vec<String>,
+    /// Show what would be added without cloning or registering anything.
+    #[arg(long, visible_alias = "explain")]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct TomeUpdateArgs {
     /// Tome to update. If omitted, every configured tome is updated.
     pub name: Option<String>,
+    /// Show what would be synced without fetching anything.
+    #[arg(long, visible_alias = "explain")]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct TomeRemoveArgs {
     /// Name of the configured tome to remove.
     pub name: String,
+    /// Show what removal would affect without removing anything.
+    #[arg(long, visible_alias = "explain")]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Subcommand)]

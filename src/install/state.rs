@@ -8,61 +8,124 @@ use std::{
 };
 
 use crate::{
-    cli::PackageArg,
     model::{PackageState, parse_version_relaxed},
     nu::nuon_io,
     util::paths,
-    util::progress::{report, status},
+    util::progress::{self, report, status},
+    util::table::{self, Cell},
 };
 
 use super::*;
 
-pub fn list() -> Result<()> {
+pub fn list(args: crate::cli::ListArgs) -> Result<()> {
     let states = installed_states()?;
     if states.is_empty() {
-        println!("No packages are currently installed.");
+        println!("no packages installed");
         return Ok(());
     }
     let linked = linked_set(&states);
-    for state in states {
-        let flag = if state.held {
-            "held"
-        } else if !linked.contains(&state.name) {
-            // Present in the store for reuse (build dep, residue) but not part of the
-            // user's environment.
-            "store-only"
-        } else {
-            ""
-        };
-        println!(
-            "{}\t{}\t{}\t{}",
-            state.name,
-            state.version,
-            state.target.as_deref().unwrap_or(""),
-            flag
-        );
+    // The environment is what `list` answers for; store-only packages are cache and only
+    // appear under `--all`.
+    let hidden = states
+        .iter()
+        .filter(|state| !linked.contains(&state.name))
+        .count();
+    let shown: Vec<_> = states
+        .iter()
+        .filter(|state| args.all || linked.contains(&state.name))
+        .collect();
+    let (total, mut held, mut store_only) = (shown.len(), 0usize, 0usize);
+    let rows = shown
+        .iter()
+        .map(|state| {
+            let flag = if state.held {
+                held += 1;
+                Cell::caution("held")
+            } else if !linked.contains(&state.name) {
+                // Present in the store for reuse (build dep, residue) but not part of the
+                // user's environment.
+                store_only += 1;
+                Cell::faint("store-only")
+            } else {
+                Cell::plain("")
+            };
+            vec![
+                Cell::strong(&state.name),
+                Cell::plain(&state.version),
+                Cell::faint(state.target.as_deref().unwrap_or("")),
+                flag,
+            ]
+        })
+        .collect();
+    table::print_rows(rows);
+
+    // A terminal gets a closing summary; piped output stays rows-only for scripts.
+    if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        let mut summary = format!("{total} package{}", if total == 1 { "" } else { "s" });
+        let linked_count = total - held - store_only;
+        let mut parts = vec![format!("{linked_count} linked")];
+        if held > 0 {
+            parts.push(format!("{held} held"));
+        }
+        if store_only > 0 {
+            parts.push(format!("{store_only} store-only"));
+        }
+        summary.push_str(&format!(" — {}", parts.join(", ")));
+        if !args.all && hidden > 0 {
+            summary.push_str(&format!(", {hidden} store-only hidden (--all)"));
+        }
+        println!("{}", progress::faint(&summary));
     }
     Ok(())
 }
 
 /// Marks `name` as held so `grm upgrade` skips it. Idempotent: holding a held package is a
 /// no-op that still reports success. Fails when the package is not installed.
-pub fn hold(args: PackageArg) -> Result<()> {
+pub fn hold(args: crate::cli::MutatePackagesArgs) -> Result<()> {
     if args.packages.is_empty() {
         bail!("specify at least one package to hold");
     }
     for package in &args.packages {
-        set_hold(package, true, true)?;
+        if args.dry_run {
+            dry_run_hold(package, true)?;
+        } else {
+            set_hold(package, true, true)?;
+        }
     }
     Ok(())
 }
 
-pub fn unhold(args: PackageArg) -> Result<()> {
+pub fn unhold(args: crate::cli::MutatePackagesArgs) -> Result<()> {
     if args.packages.is_empty() {
         bail!("specify at least one package to unhold");
     }
     for package in &args.packages {
-        set_hold(package, false, true)?;
+        if args.dry_run {
+            dry_run_hold(package, false)?;
+        } else {
+            set_hold(package, false, true)?;
+        }
+    }
+    Ok(())
+}
+
+/// Validates the target like a real hold/release would, then says what would change.
+fn dry_run_hold(name: &str, held: bool) -> Result<()> {
+    let states = installed_states()?;
+    let Some(state) = states.iter().find(|state| state.name == name) else {
+        bail!("package `{name}` is not installed");
+    };
+    if state.held == held {
+        println!(
+            "{name} is already {}; nothing to do",
+            if held { "held" } else { "not held" }
+        );
+    } else {
+        println!(
+            "would {} {name} {}",
+            if held { "hold" } else { "release" },
+            state.version
+        );
     }
     Ok(())
 }
@@ -92,7 +155,8 @@ pub(crate) fn set_hold(name: &str, held: bool, announce: bool) -> Result<()> {
     lock::rebuild()?;
     if announce {
         report(&format!(
-            "{name} {}",
+            "{} {}",
+            progress::accent(name),
             if held { "held" } else { "released" }
         ));
     }
@@ -110,6 +174,12 @@ pub(crate) fn set_requested(name: &str, requested: bool, announce: bool) -> Resu
         bail!("package `{name}` is not installed");
     };
     let mut state = found.clone();
+    // Promoting a store-only package pulls it (and its closure) into the linked set without
+    // re-realizing it, so the linked-conflict gate must run here just like it does for a
+    // fresh linked install. An already-linked package was checked when it landed.
+    if requested && !state.requested && !linked_set(&states).contains(&state.name) {
+        refuse_linked_conflicts(&states, &state.name, &state.conflicts, &state.replaces)?;
+    }
     let state_path = paths::install_root()?
         .join("state")
         .join("packages")

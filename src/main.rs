@@ -66,8 +66,8 @@ fn run(cli: Cli) -> Result<()> {
         Command::Install(args) => install::install(args),
         Command::Remove(args) => install::remove(args),
         Command::Clean(args) => cmd::clean::clean(args),
-        Command::Setup => cmd::setup::setup(),
-        Command::List => install::list(),
+        Command::Setup(args) => cmd::setup::setup(args),
+        Command::List(args) => install::list(args),
         Command::Doctor => cmd::doctor::doctor(),
         Command::Search(args) => cmd::query::search(args),
         Command::Info(args) => cmd::query::info(args),
@@ -80,23 +80,32 @@ fn run(cli: Cli) -> Result<()> {
         Command::Provides(args) => cmd::files::provides(args),
         Command::Prefer(args) => cmd::prefer::prefer(args),
         Command::Rollback(args) => {
+            if args.dry_run {
+                return profile::dry_run_activation(args.generation);
+            }
             let started = std::time::Instant::now();
             match args.generation {
                 Some(id) => {
                     if profile::activate_generation(id)? {
                         progress::report(&format!(
-                            "switched to generation {} in {:.2}s",
-                            progress::strong(&id.to_string()),
-                            started.elapsed().as_secs_f64(),
+                            "{} {}",
+                            progress::accent(&format!(
+                                "switched to generation {id} in {:.2}s",
+                                started.elapsed().as_secs_f64(),
+                            )),
+                            progress::faint("— nothing was rebuilt, nothing was lost"),
                         ));
                     }
                 }
                 None => {
                     let id = profile::rollback()?;
                     progress::report(&format!(
-                        "rolled back to generation {} in {:.2}s",
-                        progress::strong(&id.to_string()),
-                        started.elapsed().as_secs_f64(),
+                        "{} {}",
+                        progress::accent(&format!(
+                            "rolled back to generation {id} in {:.2}s",
+                            started.elapsed().as_secs_f64(),
+                        )),
+                        progress::faint("— nothing was rebuilt, nothing was lost"),
                     ));
                 }
             }
@@ -137,28 +146,28 @@ fn mutates_install_root(command: &Command) -> bool {
         Command::Install(args) => !args.dry_run,
         Command::Upgrade(args) => !args.dry_run,
         // Bare `grm prefer` only lists; setting or unsetting mutates state and may relink.
-        Command::Prefer(args) => args.capability.is_some(),
-        Command::Remove(_)
-        | Command::Clean(_)
-        | Command::Hold(_)
-        | Command::Unhold(_)
-        | Command::Restore(_)
-        | Command::Rollback(_) => true,
+        Command::Prefer(args) => args.capability.is_some() && !args.dry_run,
+        Command::Remove(args) | Command::Hold(args) | Command::Unhold(args) => !args.dry_run,
+        Command::Clean(args) => !args.dry_run,
+        Command::Restore(args) => !args.dry_run,
+        Command::Rollback(args) => !args.dry_run,
         Command::Tome { command } => match command {
-            TomeCommand::Add(_) | TomeCommand::Update(_) | TomeCommand::Remove(_) => true,
+            TomeCommand::Add(args) => !args.dry_run,
+            TomeCommand::Update(args) => !args.dry_run,
+            TomeCommand::Remove(args) => !args.dry_run,
             TomeCommand::Build(args) => args.all,
             // Default `tome news` advances the seen marker; `--all` is a pure read.
             TomeCommand::News(args) => !args.all,
             _ => false,
         },
-        Command::Addendum { command } => matches!(
-            command,
-            cli::AddendumCommand::Add(_)
-                | cli::AddendumCommand::Update(_)
-                | cli::AddendumCommand::Remove(_)
-        ),
+        Command::Addendum { command } => match command {
+            cli::AddendumCommand::Add(args) => !args.dry_run,
+            cli::AddendumCommand::Update(args) => !args.dry_run,
+            cli::AddendumCommand::Remove(args) => !args.dry_run,
+            cli::AddendumCommand::List => false,
+        },
         Command::Build(_) => true,
-        Command::List
+        Command::List(_)
         | Command::Files(_)
         | Command::Owns(_)
         | Command::Provides(_)
@@ -169,6 +178,6 @@ fn mutates_install_root(command: &Command) -> bool {
         | Command::StoreHash(_)
         | Command::Completions(_)
         | Command::Man(_)
-        | Command::Setup => false,
+        | Command::Setup(_) => false,
     }
 }

@@ -14,6 +14,7 @@ use std::{
 };
 
 use crate::{
+    build,
     cli::InstallArgs,
     profile,
     solve::{self, Plan, PlanStep},
@@ -222,11 +223,28 @@ pub fn restore(args: crate::cli::RestoreArgs) -> Result<()> {
     // Reuse an installed package only when it already matches its pin, like `--locked`.
     let mut installed = installed_versions_current()?;
     installed.retain(|name, version| pins.get(name).is_some_and(|pin| &pin.version == version));
-    let mut installer = Installer::new(installed, Some(pins));
+    let mut installer = Installer::new(installed, Some(pins)).with_dry_run(args.dry_run);
     for name in &requested {
         installer
             .install_named(name)
             .with_context(|| format!("restore `{name}`"))?;
+    }
+    if args.dry_run {
+        // The lock is the blueprint: after the per-package plans, say what falls outside it.
+        let recorded: std::collections::HashSet<&str> =
+            packages.iter().map(|pkg| pkg.name.as_str()).collect();
+        let states = installed_states()?;
+        let strays: Vec<String> = states
+            .iter()
+            .filter(|state| !recorded.contains(state.name.as_str()))
+            .filter(|state| !state.requested && !state.held)
+            .map(|state| state.name.clone())
+            .collect();
+        let swept = simulate_orphan_sweep(&states, &[], &strays);
+        for name in swept {
+            println!("  - {name} (not recorded in the lock; would be swept)");
+        }
+        return Ok(());
     }
 
     // Restore the recorded intent for every locked package that is now installed, then sweep
@@ -248,9 +266,12 @@ pub fn restore(args: crate::cli::RestoreArgs) -> Result<()> {
     installer.finalize()?;
     installer.report_notes();
     report(&format!(
-        "restored {} requested package(s) from {}",
-        requested.len(),
-        lock_file.display()
+        "{} {}",
+        crate::util::progress::accent(&format!(
+            "restored {} requested package(s)",
+            requested.len()
+        )),
+        crate::util::progress::faint(&format!("from {}", lock_file.display()))
     ));
     Ok(())
 }
@@ -339,13 +360,55 @@ pub fn upgrade_packages(names: &[String]) -> Result<()> {
 
 /// Prints a complete solver plan (header + body). For a `--dry-run` whose root step is the
 /// solver-resolved package itself.
-fn print_plan(plan: &Plan) {
+/// Plan-time mirror of the realize-time conflict gate: refuses the plan while a *linked*
+/// installed package (or another planned step) conflicts with a step, before anything is
+/// fetched or built. Packages a step replaces are exempt — the migration removes them in
+/// the same transaction. Store-only packages never conflict (cache, not environment).
+fn refuse_plan_conflicts(plan: &Plan) -> Result<()> {
+    let states = installed_states()?;
+    let mut linked = linked_set(&states);
+    let replaced: std::collections::HashSet<&str> = plan
+        .steps
+        .iter()
+        .flat_map(|step| step.replaces.iter().map(String::as_str))
+        .collect();
+    linked.retain(|name| !replaced.contains(name.as_str()));
+
+    for step in &plan.steps {
+        if let Some(hit) = states.iter().find(|state| {
+            state.name != step.name
+                && linked.contains(&state.name)
+                && (step.conflicts.contains(&state.name) || state.conflicts.contains(&step.name))
+        }) {
+            bail!(
+                "cannot install `{}`: it conflicts with installed `{}`; remove `{}` first",
+                step.name,
+                hit.name,
+                hit.name
+            );
+        }
+        if let Some(other) = plan.steps.iter().find(|other| {
+            other.name != step.name
+                && (step.conflicts.contains(&other.name) || other.conflicts.contains(&step.name))
+        }) {
+            bail!(
+                "cannot install `{}` and `{}` together: they conflict",
+                step.name,
+                other.name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn print_plan(plan: &Plan, installed: &BTreeMap<String, Version>) -> Result<()> {
     if plan.steps.is_empty() {
         println!("plan: already satisfied (no install steps)");
-        return;
+        return Ok(());
     }
     println!("plan:");
     print_plan_body(plan);
+    print_plan_consequences(plan, installed)
 }
 
 /// Prints just the bullet list of plan steps, without the header — used when a `--dry-run`
@@ -359,6 +422,57 @@ fn print_plan_body(plan: &Plan) {
             describe_origin(step)
         );
     }
+}
+
+/// Prints everything a plan would pull in *beyond* its own steps: migrations of installed
+/// packages a step replaces, and the transitive build-dependency closure of every step that
+/// may build from source (installed store-only, never linked).
+fn print_plan_consequences(plan: &Plan, installed: &BTreeMap<String, Version>) -> Result<()> {
+    let states = installed_states()?;
+    let linked = linked_set(&states);
+    for step in &plan.steps {
+        for old in &step.replaces {
+            if old != &step.name && linked.contains(old) {
+                println!("  ~ {old} → {} (replaced)", step.name);
+            }
+        }
+    }
+
+    // Walk source-built steps' build deps recursively, resolving each layer the way the
+    // build would. `seen` spans the whole walk so shared build deps print once.
+    let target = paths::target_triple();
+    let mut seen: std::collections::HashSet<String> =
+        plan.steps.iter().map(|step| step.name.clone()).collect();
+    let mut queue: Vec<(String, PathBuf)> = plan
+        .steps
+        .iter()
+        .filter_map(|step| step.rune.clone().map(|rune| (step.name.clone(), rune)))
+        .collect();
+    while let Some((for_name, rune)) = queue.pop() {
+        let metadata =
+            build::read_rune_metadata(&rune, build::tome_name_for_rune(&rune)?.as_deref())?;
+        let build_deps = build::effective_build_deps(&rune, &metadata, &target)?;
+        if build_deps.is_empty() {
+            continue;
+        }
+        let dep_plan = solve::resolve(&build_deps, installed, None)
+            .with_context(|| format!("plan build dependencies for `{for_name}`"))?;
+        for dep_step in dep_plan.steps {
+            if !seen.insert(dep_step.name.clone()) {
+                continue;
+            }
+            println!(
+                "  + {} {} ({}; build dep of {for_name}, store-only)",
+                dep_step.name,
+                dep_step.version,
+                describe_origin(&dep_step)
+            );
+            if let Some(dep_rune) = dep_step.rune {
+                queue.push((dep_step.name, dep_rune));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A human-readable summary of how a step will be realized. When both a prebuilt and a rune are
