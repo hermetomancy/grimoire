@@ -9,7 +9,7 @@ use std::{
 };
 
 use crate::{
-    model::PackageState, model::preferences::Preferences, util::paths, util::progress::report,
+    model::PackageState, model::preferences::Preferences, util::paths, util::progress::warn,
 };
 
 /// Subdirectories scanned for human-facing artifacts (man pages, completions, desktop files)
@@ -90,8 +90,8 @@ pub(crate) fn link_package_into_generation(
         }
         let src = store_path.join(bin_path);
         if !src.exists() {
-            report(&format!(
-                "warning: declared bin `{bin_name}` points to missing file `{}` in {}",
+            warn(&format!(
+                "declared bin `{bin_name}` points to missing file `{}` in {}",
                 bin_path,
                 store_path.display()
             ));

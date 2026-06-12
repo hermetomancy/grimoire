@@ -18,6 +18,7 @@ use crate::{
     solve, tome,
     util::paths,
     util::progress,
+    util::table::{self, Cell},
 };
 
 #[derive(Debug, Clone)]
@@ -41,15 +42,25 @@ pub fn search(args: QueryArg) -> Result<()> {
     }
 
     progress::finish();
-    for package in matches {
-        println!(
-            "{}\t{}\t{}\t{}",
-            package.metadata.name,
-            package.metadata.version,
-            package.tome,
-            package.metadata.summary.as_deref().unwrap_or("")
-        );
+    if matches.is_empty() {
+        // Data-less result: say so on a terminal; piped output stays empty for scripts.
+        if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+            println!("{}", progress::faint(&format!("no matches for `{query}`")));
+        }
+        return Ok(());
     }
+    let rows = matches
+        .iter()
+        .map(|package| {
+            vec![
+                Cell::strong(&package.metadata.name),
+                Cell::plain(&package.metadata.version),
+                Cell::faint(&package.tome),
+                Cell::plain(package.metadata.summary.as_deref().unwrap_or("")),
+            ]
+        })
+        .collect();
+    table::print_rows(rows);
     Ok(())
 }
 
@@ -74,7 +85,7 @@ pub fn info(args: PackageArg) -> Result<()> {
         }
 
         if !first {
-            println!("\n---\n");
+            println!("\n{}\n", progress::faint("---"));
         }
         first = false;
 
@@ -181,10 +192,18 @@ pub fn upgrade(args: UpgradeArgs) -> Result<()> {
 
     let mut names: Vec<String> = to_upgrade.into_iter().map(|(name, _, _)| name).collect();
     for (old, new) in renames {
-        progress::report(&format!("{new} replaces {old}"));
+        progress::report(&format!(
+            "{} {}",
+            progress::accent(new.as_str()),
+            progress::faint(&format!("replaces {old}"))
+        ));
         names.push(new);
     }
-    progress::status(&format!("upgrading {} package(s)…", names.len()));
+    progress::note(&format!(
+        "upgrading {} package{}…",
+        progress::strong(&names.len().to_string()),
+        if names.len() == 1 { "" } else { "s" }
+    ));
     install::upgrade_packages(&names)
 }
 
@@ -251,7 +270,11 @@ fn collect_upgrades(
                 }
                 to_upgrade.push((name.clone(), current.clone(), newest));
             }
-            _ => progress::report(&format!("{name} is up to date ({current})")),
+            _ => progress::report(&format!(
+                "{} {}",
+                progress::accent(name),
+                progress::faint(&format!("is up to date ({current})"))
+            )),
         }
     }
     Ok(to_upgrade)
@@ -310,25 +333,31 @@ fn rune_files(runes_dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(runes)
 }
 
+/// An `info` field line: faint key, plain value — identical bytes when piped (the styling
+/// helpers are no-ops off-terminal), so scripts and tests keep parsing `  key: value`.
+fn field(key: &str, value: &str) {
+    println!("{} {value}", progress::faint(&format!("  {key}:")));
+}
+
 fn print_installed(state: &PackageState) {
-    println!("installed:");
-    println!("  name: {}", state.name);
-    println!("  version: {}", state.version);
+    println!("{}", progress::strong("installed:"));
+    field("name", &progress::strong(&state.name));
+    field("version", &state.version);
     if let Some(upstream) = &state.upstream_version {
-        println!("  upstream version: {upstream}");
+        field("upstream version", upstream);
     }
     if let Some(target) = &state.target {
-        println!("  target: {target}");
+        field("target", target);
     }
-    println!("  archive_hash: {}", state.archive_hash);
+    field("archive_hash", &state.archive_hash);
     if !state.bins.is_empty() {
-        println!("  bins:");
+        println!("{}", progress::faint("  bins:"));
         for (name, path) in &state.bins {
-            println!("    {name}: {path}");
+            println!("    {name}: {}", progress::faint(path));
         }
     }
     if !state.notes.is_empty() {
-        println!("  notes:");
+        println!("{}", progress::faint("  notes:"));
         for note in &state.notes {
             println!("    {note}");
         }
@@ -336,27 +365,30 @@ fn print_installed(state: &PackageState) {
 }
 
 fn print_available(package: &TomePackage) {
-    println!("available:");
-    println!("  name: {}", package.metadata.name);
-    println!("  version: {}", package.metadata.version);
+    println!("{}", progress::strong("available:"));
+    field("name", &progress::strong(&package.metadata.name));
+    field("version", &package.metadata.version);
     if let Some(upstream) = &package.metadata.upstream_version {
-        println!("  upstream version: {upstream}");
+        field("upstream version", upstream);
     }
-    println!("  tome: {}", package.tome);
-    println!("  rune: {}", package.rune.display());
+    field("tome", &package.tome);
+    field("rune", &package.rune.display().to_string());
+    if let Some(parent) = &package.metadata.split_from {
+        field("split from", &progress::strong(parent));
+    }
     if let Some(summary) = &package.metadata.summary {
-        println!("  summary: {summary}");
+        field("summary", summary);
     }
     let target = paths::target_triple();
     let bins = package.metadata.bins_for(&target);
     if !bins.is_empty() {
-        println!("  bins:");
+        println!("{}", progress::faint("  bins:"));
         for (name, path) in &bins {
-            println!("    {name}: {path}");
+            println!("    {name}: {}", progress::faint(path));
         }
     }
     if !package.metadata.notes.is_empty() {
-        println!("  notes:");
+        println!("{}", progress::faint("  notes:"));
         for note in &package.metadata.notes {
             println!("    {note}");
         }

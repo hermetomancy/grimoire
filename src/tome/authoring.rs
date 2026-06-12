@@ -39,8 +39,13 @@ pub fn init(args: TomeInitArgs) -> Result<()> {
         fs::write(&gitignore_path, "/dist/\n")?;
     }
 
-    report(&format!("created tome {} in {}", args.name, root.display()));
+    use crate::util::progress::{accent, faint, note};
     report(&format!(
+        "created tome {} {}",
+        accent(&args.name),
+        faint(&format!("in {}", root.display()))
+    ));
+    note(&format!(
         "next: add a package with `grm tome rune <name> --path {}`",
         root.display()
     ));
@@ -67,9 +72,9 @@ pub fn rune(args: TomeRuneArgs) -> Result<()> {
 
     fs::write(&rune_path, rune_template(&args.name, &args.version))?;
     report(&format!(
-        "created rune {} in {}",
-        args.name,
-        rune_path.display()
+        "created rune {} {}",
+        crate::util::progress::accent(&args.name),
+        crate::util::progress::faint(&format!("in {}", rune_path.display()))
     ));
     Ok(())
 }
