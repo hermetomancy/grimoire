@@ -97,6 +97,19 @@ pointing to the active generation's `bin/`. Current user-local
 
 ## Completed
 
+### Stale-plan duplicate realization fix
+
+- Overlapping build-dependency plans no longer realize a shared package once per
+  plan: `execute_step` and `ensure_build_deps_installed_inner` skip a step whose
+  exact install already landed (`step_already_realized`: state matches the step's
+  name, version, and content address, and the recorded store path still exists).
+  Previously `grm install` could rebuild llvm from source multiple times in one
+  command because clang's build-dep plan was resolved before compiler-rt's nested
+  recursion installed llvm. Regression test: shared build dep builds exactly once.
+- Store directories without a matching state record are deliberately not adopted:
+  state is written only after hash verification (AGENTS.md §10.1), so unrecorded
+  residue still realizes normally.
+
 ### CLI output restyle
 
 - One result-line vocabulary in `util/progress` (AGENTS.md §12.4): `✦` confirmations, `!`

@@ -49,6 +49,13 @@ pub(crate) fn ensure_build_deps_installed_inner(
         if installed.contains_key(&step.name) {
             continue;
         }
+        // The recursion below installs the build deps of anything built from source, so a
+        // later step in this plan may have landed since the plan was resolved; reuse it
+        // instead of realizing it twice (same staleness as `Installer::reuse_realized_step`).
+        if step_already_realized(&step)? {
+            installed.insert(step.name.clone(), step.version.clone());
+            continue;
+        }
         if !building.insert(step.name.clone()) {
             bail!("build dependency cycle detected involving `{}`", step.name);
         }
