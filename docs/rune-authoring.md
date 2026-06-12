@@ -207,6 +207,14 @@ on Alpine, toybox once the managed userland is bootstrapped):
 Single-implementation tools (`cmake`, `python3`, `llvm`) keep their upstream names — there
 is no "which cmake" question to encode.
 
+The same no-assumptions rule applies to **libraries**: the only host floor a build may
+lean on is libc and, on macOS, the platform SDK. Anything else a build links — zlib,
+bzip2, ncurses, readline — must come from the store as a declared dep (or be explicitly
+disabled at configure time), never picked up from whatever the host happens to ship. A
+statically linked library is a build dep only; one whose store path survives into the
+output (a shared library, or a compiled-in data path like ncurses' default terminfo
+directory) must also be a runtime dep so GC keeps it alive.
+
 ## The `ctx` record
 
 | Field | Type | Meaning |

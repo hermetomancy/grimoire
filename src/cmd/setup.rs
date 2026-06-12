@@ -29,8 +29,8 @@ pub fn setup(args: crate::cli::SetupArgs) -> Result<()> {
         println!("would create /grm (requires sudo) and chown it to the current user");
         ensure_profile_on_path(true)?;
         println!(
-            "would then add the {CORE_TOME_URL} tome (if no tome is configured) and \
-             install grimoire through itself"
+            "would then add the {CORE_TOME_URL} and {WORLD_TOME_URL} tomes (if no tome \
+             is configured) and install grimoire through itself"
         );
         return Ok(());
     }
@@ -138,11 +138,12 @@ fn display_with_home(path: &Path, home: &str) -> String {
 }
 
 const CORE_TOME_URL: &str = "https://github.com/grimoire-of-glass/tome-core";
+const WORLD_TOME_URL: &str = "https://github.com/grimoire-of-glass/tome-world";
 
-/// The dogfooding tail of `grm setup`: once the store is usable, configure the core tome
-/// (when none is configured yet) and install `grimoire` through itself. Best-effort — the
-/// store setup already succeeded, so a bootstrap problem warns instead of failing setup,
-/// and an already-bootstrapped system is a quiet no-op.
+/// The dogfooding tail of `grm setup`: once the store is usable, configure the core and
+/// world tomes (when none are configured yet) and install `grimoire` through itself.
+/// Best-effort — the store setup already succeeded, so a bootstrap problem warns instead
+/// of failing setup, and an already-bootstrapped system is a quiet no-op.
 fn bootstrap_core() -> Result<()> {
     let store = Path::new("/grm");
     if !store.exists() || !is_writable(store)? {
@@ -155,17 +156,21 @@ fn bootstrap_core() -> Result<()> {
     let _lock = crate::util::process_lock::acquire()?;
 
     if crate::tome::load_tomes()?.is_empty() {
-        crate::util::progress::note(&format!("adding the core tome from {CORE_TOME_URL}…"));
-        if let Err(e) = crate::tome::add(crate::cli::TomeAddArgs {
-            git_url: CORE_TOME_URL.to_owned(),
-            ref_name: "main".to_owned(),
-            signer: Vec::new(),
-            dry_run: false,
-        }) {
-            crate::util::progress::warn(&format!(
-                "could not add the core tome: {e:#}; add one with `grm tome add`"
-            ));
-            return Ok(());
+        for (name, url) in [("core", CORE_TOME_URL), ("world", WORLD_TOME_URL)] {
+            crate::util::progress::note(&format!("adding the {name} tome from {url}…"));
+            if let Err(e) = crate::tome::add(crate::cli::TomeAddArgs {
+                git_url: url.to_owned(),
+                ref_name: "main".to_owned(),
+                signer: Vec::new(),
+                dry_run: false,
+            }) {
+                crate::util::progress::warn(&format!(
+                    "could not add the {name} tome: {e:#}; add it with `grm tome add {url}`"
+                ));
+                if name == "core" {
+                    return Ok(()); // without core, the grimoire install below cannot work
+                }
+            }
         }
     }
 
