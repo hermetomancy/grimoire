@@ -45,6 +45,16 @@ pub fn build_output_dir() -> Result<PathBuf> {
     Ok(install_root()?.join("cache").join("builds"))
 }
 
+/// On-disk rune metadata cache: parsed `export const package` values keyed by the sha256 of
+/// the rune bytes. Versioned by crate release because the cached value reflects this
+/// grimoire's Nushell parsing semantics.
+pub fn rune_meta_cache_dir() -> Result<PathBuf> {
+    Ok(install_root()?
+        .join("cache")
+        .join("rune-meta")
+        .join(env!("CARGO_PKG_VERSION")))
+}
+
 /// Directory for full build logs written during source builds.
 pub fn build_log_dir() -> Result<PathBuf> {
     Ok(install_root()?.join("logs").join("builds"))

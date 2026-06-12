@@ -42,10 +42,13 @@ pub fn clean(args: CleanArgs) -> Result<()> {
     let (freed_stores, freed_generations, store_bytes) = profile::collect_garbage(args.keep)?;
 
     let root = paths::install_root()?;
-    let targets: [(&str, PathBuf); 4] = [
+    let targets: [(&str, PathBuf); 5] = [
         ("cache/sources", paths::source_cache_dir()?),
         ("cache/archives", paths::archive_cache_dir()?),
         ("cache/builds", paths::build_output_dir()?),
+        // The whole rune-meta tree, not just this version's subdirectory: stale versions'
+        // entries are pure dead weight.
+        ("cache/rune-meta", root.join("cache").join("rune-meta")),
         ("transactions", root.join("transactions")),
     ];
 

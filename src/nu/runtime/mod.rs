@@ -20,6 +20,7 @@ use crate::{
 
 mod env;
 mod eval;
+mod meta_cache;
 
 pub use env::*;
 pub(crate) use eval::*;
@@ -29,7 +30,7 @@ pub struct EmbeddedNuRuntime;
 
 impl EmbeddedNuRuntime {
     pub fn package_metadata(&self, rune: &Path) -> Result<PackageMetadata> {
-        PackageMetadata::from_value(exported_const(rune, "package")?, false)
+        PackageMetadata::from_value(meta_cache::cached_package_const(rune)?, false)
             .with_context(|| format!("parse package metadata from {}", rune.display()))
     }
 
