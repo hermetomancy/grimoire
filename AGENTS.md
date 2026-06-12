@@ -144,13 +144,16 @@ Grimoire has no database. Durability is explicit transaction directories plus at
    rune at a *different* version is `grm upgrade`'s business, and a package with no resolvable
    rune (local archive) stays reusable.
 6. Local state is inspectable NUON under the install root. No databases.
-7. **Activation is semantic.** Every generation embeds a full `state.nuon` snapshot of the
-   package state it was built from. `grm rollback` restores `state/packages/`
-   and the lockfile from that snapshot *before* flipping the `current` symlink, so the
-   active generation and the recorded state always describe the same world — rolling back
-   really rolls back, and the next mutating command builds on the activated set instead of
-   resurrecting the abandoned one. Re-activating the current generation is the repair path
-   for an interrupted activation; `grm doctor` flags divergence.
+7. **Activation is semantic.** Every generation embeds a `state.nuon` snapshot of the
+   *linked* package state it was built from — the environment, not the cache. Store-only
+   packages (cached build deps, residue) appear in neither the snapshot nor the
+   generation's GC roots, so `grm clean` can reclaim them; activation preserves their live
+   records untouched. `grm rollback` restores `state/packages/` and the lockfile from the
+   snapshot *before* flipping the `current` symlink, so the active generation and the
+   recorded state always describe the same world — rolling back really rolls back, and the
+   next mutating command builds on the activated set instead of resurrecting the abandoned
+   one. Re-activating the current generation is the repair path for an interrupted
+   activation; `grm doctor` flags divergence.
 
 ## 10. Security invariants
 
@@ -183,10 +186,19 @@ depends on a POSIX userland at `/usr/bin` and `/bin`. Default target triples:
 2. Error messages are for humans. Say what failed and, where possible, what to do.
 3. The CLI is imperative and explicit. Commands accept multiple positional packages where
    semantically reasonable; multi-package mutations are one all-or-nothing transaction (§9.3).
-4. **Result lines share one vocabulary** (`util/progress`): `✦` prefixes confirmations
-   (`report`), `!` prefixes cautions (`warn`), subjects are emphasized with `strong`, trailing
-   detail is de-emphasized with `faint` after an em dash (`ripgrep 14.1.0 — prebuilt, checksum
-   verified`), and version transitions use `→`. Decorations and styling appear only on a
+4. **Result lines share one vocabulary** (`util/progress`), in three tiers:
+   - `✦` headline results (`report`): the outcomes the user asked for. Their subject (package
+     and version, the rollback outcome) is emphasized with `accent` (bold green); trailing
+     detail is de-emphasized with `faint` after an em dash (`ripgrep 14.1.0 — prebuilt,
+     checksum verified`).
+   - dimmed, unprefixed context lines (`note`): secondary confirmations and transitions that
+     frame the headlines (`generation 4 is now current`, `switching profile to generation 4…`)
+     — embed `strong` (bold) subjects inside them.
+   - `!` cautions (`warn`): surprises that deserve a glance (`postgres 16.3 → 17.0 — major
+     version`). Never hand-roll a `!` or `warning:` prefix into a `report`.
+
+   Version transitions use `→`. List-style data renders through `util/table` (aligned styled
+   columns on a terminal, tab-separated when piped). Decorations and styling appear only on a
    terminal with `NO_COLOR` unset; piped output stays plain and byte-stable. Phrasing is
    lowercase and calm: say what happened, not how hard it was.
 
