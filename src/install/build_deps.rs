@@ -47,13 +47,14 @@ pub(crate) fn ensure_build_deps_installed_inner(
     }
     let stale: HashSet<String> = crate::store::closure::stale_installed(&satisfied)
         .into_iter()
+        .map(|(name, _)| name)
         .collect();
     for dep in deps {
         if let Some(state) = find_dep_state(&states, &dep.name)
             && stale.contains(&state.name)
         {
             crate::util::progress::warn(&format!(
-                "{} {} no longer matches its rune; reinstalling",
+                "{} {} drifted from its expected address (its rune, a dependency, or the                  build environment changed); rebuilding",
                 state.name, state.version
             ));
             missing.push(dep.clone());
