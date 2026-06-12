@@ -85,6 +85,11 @@ inherited host env vars unless Grimoire deliberately sets them.
    a specific *implementation* (`gsed` when GNU sed semantics are required) is correct and
    different: the declared dep outranks the floor, so plain `sed` then means GNU sed for
    that build.
+3. The only *library* floor is libc and, on macOS, the platform SDK. Everything else a
+   build links (zlib, bzip2, ncurses, readline, …) must be a declared dep from the store
+   or explicitly disabled at configure time — never auto-detected from the host.
+   Statically linked → build dep only; a store path surviving into the output (shared
+   library, compiled-in data path) → runtime dep too.
 
 ## 6. Dependencies
 
