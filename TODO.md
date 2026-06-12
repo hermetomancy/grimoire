@@ -30,8 +30,10 @@ dogfood loop 2026-06-12 (full chain through rust 1.96 and grimoire itself); rema
 
 ### Bootstrap stage 2: full self-hosting
 
-Add `cmake` and `python3` to `core` so no non-POSIX host tools are required for
-bootstrap. Removes the need for `host_tool_dirs()`.
+The toolchain is already self-hosted (every build driver — cmake, python3, gmake, the
+compiler boundary — is a core package; the host compiler seeds bootstrap only and
+`host_tool_dirs()` drops out once toolchain-wrappers exists). What remains is the
+ambient userland.
 
 The host *userland* link is shadowed, never severed: `/usr/bin` + `/bin` are
 unconditionally appended to managed build PATH (`posix_ambient_dirs`), so anything toybox
@@ -41,15 +43,6 @@ hermetic build mode (`tome build --hermetic`?) that drops the ambient tail, run 
 to enumerate what actually leaks; passing runes are certified toybox-ambient, failures
 name what stage 2 must package. Folding "toybox-ambient or not" into `build_env_id` is
 the cheap interim fix if prebuilts ever come from heterogeneous builders.
-
-Related: `build_env_id` now derives from the installed toolchain-wrappers set itself
-(banner-probing the wrapper bins, never the user's PATH), falling back to the host PATH
-probe pre-bootstrap. One accepted consequence: a fresh full bootstrap builds llvm under
-the host identity, and the first command after the wrappers land sees every from-source
-address flip to the managed identity — the next build of any core package rebuilds it
-under the managed compiler (the honest self-hosting fixed point; llvm effectively builds
-twice on a virgin host). Revisit only if bootstrap time matters more than honest
-addressing.
 
 ## Known debts (not release-blocking)
 
