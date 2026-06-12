@@ -42,6 +42,20 @@ pub(crate) struct Candidate {
     pub(crate) runtime: Vec<Dependency>,
     pub(crate) rune: Option<PathBuf>,
     pub(crate) substitutes: Vec<Substitute>,
+    /// `conflicts`/`replaces` metadata for this version (rune-authoritative, else from the
+    /// index entry), carried into the plan so install decisions resolve before realization.
+    pub(crate) conflicts: Vec<String>,
+    pub(crate) replaces: Vec<String>,
+}
+
+/// A source-rune candidate: the version it defines plus the plan-relevant metadata read
+/// from it.
+pub(crate) struct RuneCandidate {
+    version: Version,
+    runtime: Vec<Dependency>,
+    conflicts: Vec<String>,
+    replaces: Vec<String>,
+    path: PathBuf,
 }
 
 /// Prebuilt substitutes grouped by version, paired with the runtime deps the index entry declares.
@@ -96,8 +110,8 @@ pub(crate) fn gather_candidates(name: &str, target: &str) -> Result<Vec<Candidat
     let rune = gather_rune_candidate(name, target)?;
 
     let mut versions: BTreeSet<Version> = by_version.keys().cloned().collect();
-    if let Some((version, _, _)) = &rune {
-        versions.insert(version.clone());
+    if let Some(rc) = &rune {
+        versions.insert(rc.version.clone());
     }
 
     let mut candidates: Vec<Candidate> = versions
@@ -107,23 +121,34 @@ pub(crate) fn gather_candidates(name: &str, target: &str) -> Result<Vec<Candidat
                 .get(&version)
                 .map(|(_, subs)| subs.clone())
                 .unwrap_or_default();
-            let (rune_path, runtime) = match &rune {
-                Some((rune_version, runtime, path)) if *rune_version == version => {
-                    (Some(path.clone()), runtime.clone())
-                }
-                _ => (
-                    None,
-                    by_version
+            let (rune_path, runtime, conflicts, replaces) = match &rune {
+                Some(rc) if rc.version == version => (
+                    Some(rc.path.clone()),
+                    rc.runtime.clone(),
+                    rc.conflicts.clone(),
+                    rc.replaces.clone(),
+                ),
+                _ => {
+                    let runtime = by_version
                         .get(&version)
                         .map(|(deps, _)| deps.clone())
-                        .unwrap_or_default(),
-                ),
+                        .unwrap_or_default();
+                    let entry = substitutes.first().map(|sub| &sub.entry);
+                    (
+                        None,
+                        runtime,
+                        entry.map(|e| e.conflicts.clone()).unwrap_or_default(),
+                        entry.map(|e| e.replaces.clone()).unwrap_or_default(),
+                    )
+                }
             };
             Candidate {
                 version,
                 runtime,
                 rune: rune_path,
                 substitutes,
+                conflicts,
+                replaces,
             }
         })
         .collect();
@@ -163,10 +188,7 @@ pub(crate) fn gather_index_candidates(name: &str, target: &str) -> Result<Versio
     Ok(by_version)
 }
 
-pub(crate) fn gather_rune_candidate(
-    name: &str,
-    target: &str,
-) -> Result<Option<(Version, Vec<Dependency>, PathBuf)>> {
+pub(crate) fn gather_rune_candidate(name: &str, target: &str) -> Result<Option<RuneCandidate>> {
     let Some(rune) = build::find_rune(name)? else {
         return Ok(None);
     };
@@ -179,7 +201,13 @@ pub(crate) fn gather_rune_candidate(
         .into_iter()
         .filter(|d| d.matches_platform(target))
         .collect();
-    Ok(Some((version, runtime, rune)))
+    Ok(Some(RuneCandidate {
+        version,
+        runtime,
+        conflicts: metadata.conflicts,
+        replaces: metadata.replaces,
+        path: rune,
+    }))
 }
 
 /// The newest version of `name` installable from any configured tome (binary or source), or

@@ -47,6 +47,10 @@ pub struct PlanStep {
     pub store_hash: Option<String>,
     /// Runtime dependency names, used for hash computation.
     pub runtime_deps: Vec<String>,
+    /// `conflicts`/`replaces` metadata for the resolved version, so linked-coexistence
+    /// decisions resolve at plan time (and surface in `--dry-run`) instead of mid-install.
+    pub conflicts: Vec<String>,
+    pub replaces: Vec<String>,
 }
 
 /// An ordered set of install steps: dependencies appear before the packages that need them.

@@ -29,6 +29,8 @@ fn cand(version: &str, deps: &[Dependency]) -> Candidate {
         runtime: deps.to_vec(),
         rune: Some(PathBuf::from(format!("{version}.rn"))),
         substitutes: Vec::new(),
+        conflicts: Vec::new(),
+        replaces: Vec::new(),
     }
 }
 
