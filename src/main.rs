@@ -65,7 +65,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Build(args) => build::build(args),
         Command::Install(args) => install::install(args),
         Command::Remove(args) => install::remove(args),
-        Command::Clean => cmd::clean::clean(),
+        Command::Clean(args) => cmd::clean::clean(args),
         Command::Setup => cmd::setup::setup(),
         Command::List => install::list(),
         Command::Doctor => cmd::doctor::doctor(),
@@ -74,38 +74,35 @@ fn run(cli: Cli) -> Result<()> {
         Command::Upgrade(args) => cmd::query::upgrade(args),
         Command::Hold(args) => install::hold(args),
         Command::Unhold(args) => install::unhold(args),
-        Command::Unrequest(args) => install::unrequest(args),
         Command::Restore(args) => install::restore(args),
-        Command::Orphans => install::orphans(),
         Command::Files(args) => cmd::files::files(args),
         Command::Owns(args) => cmd::files::owns(args),
         Command::Provides(args) => cmd::files::provides(args),
-        Command::Autoremove => install::autoremove(),
         Command::Prefer(args) => cmd::prefer::prefer(args),
-        Command::Rollback => {
+        Command::Rollback(args) => {
             let started = std::time::Instant::now();
-            let id = profile::rollback()?;
-            progress::report(&format!(
-                "rolled back to generation {} in {:.2}s",
-                progress::strong(&id.to_string()),
-                started.elapsed().as_secs_f64(),
-            ));
-            Ok(())
-        }
-        Command::Switch(args) => {
-            let started = std::time::Instant::now();
-            if profile::activate_generation(args.id)? {
-                progress::report(&format!(
-                    "switched to generation {} in {:.2}s",
-                    progress::strong(&args.id.to_string()),
-                    started.elapsed().as_secs_f64(),
-                ));
+            match args.generation {
+                Some(id) => {
+                    if profile::activate_generation(id)? {
+                        progress::report(&format!(
+                            "switched to generation {} in {:.2}s",
+                            progress::strong(&id.to_string()),
+                            started.elapsed().as_secs_f64(),
+                        ));
+                    }
+                }
+                None => {
+                    let id = profile::rollback()?;
+                    progress::report(&format!(
+                        "rolled back to generation {} in {:.2}s",
+                        progress::strong(&id.to_string()),
+                        started.elapsed().as_secs_f64(),
+                    ));
+                }
             }
             Ok(())
         }
         Command::Generations => cmd::generations::generations(),
-        Command::CollectGarbage(args) => profile::gc(args.keep),
-        Command::DeleteGeneration(args) => profile::delete_generation(args.id),
         Command::Tome { command } => match command {
             TomeCommand::Init(args) => tome::init(args),
             TomeCommand::Rune(args) => tome::rune(args),
@@ -142,16 +139,11 @@ fn mutates_install_root(command: &Command) -> bool {
         // Bare `grm prefer` only lists; setting or unsetting mutates state and may relink.
         Command::Prefer(args) => args.capability.is_some(),
         Command::Remove(_)
-        | Command::Clean
+        | Command::Clean(_)
         | Command::Hold(_)
         | Command::Unhold(_)
-        | Command::Unrequest(_)
         | Command::Restore(_)
-        | Command::Autoremove
-        | Command::Rollback
-        | Command::Switch(_)
-        | Command::CollectGarbage(_)
-        | Command::DeleteGeneration(_) => true,
+        | Command::Rollback(_) => true,
         Command::Tome { command } => match command {
             TomeCommand::Add(_) | TomeCommand::Update(_) | TomeCommand::Remove(_) => true,
             TomeCommand::Build(args) => args.all,
@@ -167,7 +159,6 @@ fn mutates_install_root(command: &Command) -> bool {
         ),
         Command::Build(_) => true,
         Command::List
-        | Command::Orphans
         | Command::Files(_)
         | Command::Owns(_)
         | Command::Provides(_)

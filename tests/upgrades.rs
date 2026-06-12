@@ -468,15 +468,25 @@ fn clean_empties_caches_and_transactions() {
     fs::create_dir_all(&nested).unwrap();
     fs::write(nested.join("payload.bin"), vec![0u8; 8192]).unwrap();
 
-    // Things `clean` must leave alone, so we can assert it does not touch installed state.
+    // Things `clean` must leave alone, so we can assert it does not touch installed state:
+    // a requested package's state record and its store directory. (`clean` reads installed
+    // state to sweep unused dependencies, so the record has to be a real one.)
     let state_dir = root.join("state").join("packages");
     fs::create_dir_all(&state_dir).unwrap();
     let state_file = state_dir.join("keep.nuon");
-    fs::write(&state_file, b"keep me\n").unwrap();
-    let packages_file = root
+    let store_dir = root
         .join("store")
-        .join(fake_store_basename("keep", "0.1.0"))
-        .join("file");
+        .join(fake_store_basename("keep", "0.1.0"));
+    fs::write(
+        &state_file,
+        format!(
+            "{{format: 1, name: \"keep\", version: \"0.1.0\", archive_hash: \"{}\", store_hash: \"cafef00dcafef00d\", store_path: \"{}\", requested: true}}\n",
+            "0".repeat(64),
+            store_dir.display()
+        ),
+    )
+    .unwrap();
+    let packages_file = store_dir.join("file");
     fs::create_dir_all(packages_file.parent().unwrap()).unwrap();
     fs::write(&packages_file, b"keep me too\n").unwrap();
 
@@ -514,7 +524,7 @@ fn clean_empties_caches_and_transactions() {
     assert_success(&again, "second clean");
     let again_out = stdout(&again);
     assert!(
-        again_out.contains("cleaned 0 entries"),
+        again_out.contains("nothing to clean"),
         "second clean reports nothing freed: {again_out}"
     );
 }

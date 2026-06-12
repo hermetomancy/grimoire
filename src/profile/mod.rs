@@ -116,12 +116,22 @@ pub fn create_generation(states: &[PackageState]) -> Result<u64> {
 
     status(&format!("building generation {next_id}"));
 
-    // Resolve contested bin names across the whole set before linking anything, so the
-    // outcome does not depend on package iteration order.
-    let skip_bins = contested_bin_skips(states)?;
+    // Only the linked set is surfaced: requested/held packages and their runtime closure.
+    // Store-only packages — cached build deps, residue from a failed install — stay in the
+    // snapshot and in `store_paths` (so gc keeps their dirs and semantic activation restores
+    // their records) but never reach `bin/` or `share/`, and never contest a bin name.
+    let linked_names = crate::install::linked_set(states);
+    let linked: Vec<&PackageState> = states
+        .iter()
+        .filter(|state| linked_names.contains(&state.name))
+        .collect();
+
+    // Resolve contested bin names across the whole linked set before linking anything, so
+    // the outcome does not depend on package iteration order.
+    let skip_bins = contested_bin_skips(&linked)?;
     let no_skips = BTreeSet::new();
 
-    for state in states {
+    for state in linked {
         let store_path = PathBuf::from(&state.store_path);
         if !store_path.exists() {
             report(&format!(
@@ -164,7 +174,7 @@ pub fn create_generation(states: &[PackageState]) -> Result<u64> {
 ///
 /// The state restore lands before the symlink flip: the flip is the user-visible commit
 /// point, and a crash between the two leaves state describing the target generation — which
-/// the next mutating command or `grm switch` converges, and `grm doctor` flags.
+/// the next mutating command or `grm rollback <id>` converges, and `grm doctor` flags.
 ///
 /// Returns `true` when the profile actually switched, `false` when `id` was already active
 /// (the repair path), so callers can word their result line accordingly.

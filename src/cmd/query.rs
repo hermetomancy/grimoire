@@ -103,6 +103,10 @@ pub fn upgrade(args: UpgradeArgs) -> Result<()> {
         .iter()
         .map(|state| (state.name.clone(), state.held))
         .collect();
+    // A bare `grm upgrade` covers the user's environment — the linked set — not the
+    // store-only cache: nobody asked for a cached build dep, so nobody asked for a newer
+    // one. Naming a store-only package explicitly still upgrades it.
+    let linked = install::linked_set(&states);
     let installed: BTreeMap<String, Version> = states
         .into_iter()
         .filter_map(|state| {
@@ -116,7 +120,11 @@ pub fn upgrade(args: UpgradeArgs) -> Result<()> {
     let targets = if explicit {
         args.packages.clone()
     } else {
-        installed.keys().cloned().collect::<Vec<_>>()
+        installed
+            .keys()
+            .filter(|name| linked.contains(*name))
+            .cloned()
+            .collect::<Vec<_>>()
     };
 
     if targets.is_empty() {

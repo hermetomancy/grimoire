@@ -37,7 +37,7 @@ pub struct PackageState {
     #[serde(default)]
     pub held: bool,
     /// `true` when the user asked for this package by name; `false` when the solver pulled it
-    /// in as a dependency. Non-requested packages are candidates for `grm autoremove` once
+    /// in as a dependency. Non-requested packages are swept out of the install the moment
     /// nothing references them.
     #[serde(default)]
     pub requested: bool,

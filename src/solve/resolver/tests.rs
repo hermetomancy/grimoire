@@ -102,12 +102,13 @@ fn preference_overrides_installed_provider() {
 #[test]
 fn stale_preference_falls_back_to_default_provider() {
     // The preferred package no longer provides the capability at all: warn and fall
-    // through to the first provider rather than failing the resolve.
+    // through to the first provider *by name* (deterministic — the choice folds into
+    // dependents' store hashes) rather than failing the resolve.
     let installed = BTreeMap::new();
     let preferences = BTreeMap::from([("awk".to_owned(), "nawk".to_owned())]);
     assert_eq!(
         expand("awk", &["mawk", "gawk"], &installed, &preferences),
-        "mawk"
+        "gawk"
     );
 }
 

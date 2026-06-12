@@ -1,24 +1,27 @@
-//! Reclaiming space: generation retention, store-path reachability from retained
-//! generations, and explicit generation deletion.
+//! Reclaiming space: generation retention and store-path reachability from retained
+//! generations. The `grm clean` half that touches durable state; the cache half lives in
+//! `cmd::clean`.
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use std::{collections::BTreeSet, fs, path::Path};
 
 use crate::{util::paths, util::progress::report};
 
 use super::*;
 
-/// Garbage-collects unreferenced store paths and old generations.
+/// Collects unreferenced store paths and old generations, returning
+/// `(freed_store_paths, freed_generations, bytes_freed)`.
 ///
-/// Keeps the `keep` most recent generations (including the current one), deletes older
-/// generations, then deletes any store path not referenced by a retained generation.
-pub fn gc(keep: usize) -> Result<()> {
+/// Keeps the `keep` most recent generations (including the current one and the rollback
+/// target), deletes older generations, then deletes any store path not referenced by a
+/// retained generation. With no generations at all nothing is touched: store reachability is
+/// derived from generation metadata, so an empty registry must not condemn the whole store.
+pub fn collect_garbage(keep: usize) -> Result<(usize, usize, u64)> {
     let mut generations = list_generations()?;
     generations.sort_by_key(|b| std::cmp::Reverse(b.id));
 
     if generations.is_empty() {
-        report("no generations to collect");
-        return Ok(());
+        return Ok((0, 0, 0));
     }
 
     let current = current_generation_id()?;
@@ -40,10 +43,9 @@ pub fn gc(keep: usize) -> Result<()> {
     let freed_generations = delete_old_generations(&generations, &to_retain, current)?;
     prune_registry()?;
     let referenced = collect_referenced_paths(&to_retain)?;
-    let freed_stores = collect_unreferenced_stores(&referenced)?;
+    let (freed_stores, freed_bytes) = collect_unreferenced_stores(&referenced)?;
 
-    report_gc_result(freed_stores, freed_generations);
-    Ok(())
+    Ok((freed_stores, freed_generations, freed_bytes))
 }
 
 pub(crate) fn delete_old_generations(
@@ -100,14 +102,14 @@ pub(crate) fn collect_referenced_paths(to_retain: &BTreeSet<u64>) -> Result<BTre
     Ok(referenced)
 }
 
-pub(crate) fn collect_unreferenced_stores(referenced: &BTreeSet<String>) -> Result<usize> {
+pub(crate) fn collect_unreferenced_stores(referenced: &BTreeSet<String>) -> Result<(usize, u64)> {
     let store_root = paths::store_root()?;
     if !store_root.exists() {
-        report("store root does not exist, nothing to collect");
-        return Ok(0);
+        return Ok((0, 0));
     }
 
     let mut freed = 0;
+    let mut bytes = 0u64;
     for entry in fs::read_dir(&store_root)? {
         let entry = entry?;
         let path = entry.path();
@@ -123,51 +125,9 @@ pub(crate) fn collect_unreferenced_stores(referenced: &BTreeSet<String>) -> Resu
             size as f64 / (1024.0 * 1024.0)
         ));
         freed += 1;
+        bytes += size;
     }
-    Ok(freed)
-}
-
-pub(crate) fn report_gc_result(freed_stores: usize, freed_generations: usize) {
-    if freed_stores == 0 && freed_generations == 0 {
-        report("nothing to collect");
-    } else {
-        report(&format!(
-            "gc complete: removed {freed_stores} store path(s) and {freed_generations} generation(s)"
-        ));
-    }
-}
-
-/// Deletes a specific generation by ID.
-///
-/// Fails if the generation does not exist or if it is the currently active generation.
-/// Removes the generation directory and syncs the registry.
-pub fn delete_generation(id: u64) -> Result<()> {
-    let gen_dir = generation_dir(id)?;
-    if !gen_dir.exists() {
-        bail!("generation {id} does not exist");
-    }
-    if current_generation_id()? == Some(id) {
-        bail!(
-            "cannot delete generation {id}: it is the currently active generation; \
-             switch to another generation first"
-        );
-    }
-    fs::remove_dir_all(&gen_dir)
-        .with_context(|| format!("remove generation directory {}", gen_dir.display()))?;
-
-    let mut registry = read_registry().unwrap_or_default();
-    let before = registry.len();
-    registry.retain(|g| g.id != id);
-    if registry.len() != before
-        && let Err(e) = write_registry(&registry)
-    {
-        report(&format!(
-            "warning: could not write generations registry: {e}"
-        ));
-    }
-
-    report(&format!("deleted generation {id}"));
-    Ok(())
+    Ok((freed, bytes))
 }
 
 // ---------------------------------------------------------------------------

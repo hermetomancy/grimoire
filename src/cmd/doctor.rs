@@ -101,7 +101,7 @@ fn check_current_symlink() -> Result<usize> {
     let link = profile::current_profile_link()?;
     if fs::symlink_metadata(&link).is_ok() && fs::metadata(&link).is_err() {
         eprintln!(
-            "grimoire: `{}` points at a generation that no longer exists; run `grm switch <id>`",
+            "grimoire: `{}` points at a generation that no longer exists; run `grm rollback <id>`",
             link.display()
         );
         return Ok(1);
@@ -160,7 +160,7 @@ fn check_state_generation_divergence() -> Result<usize> {
     if !diverged.is_empty() {
         eprintln!(
             "grimoire: state/packages diverges from active generation {id} ({}); interrupted \
-             activation? run `grm switch <id>` to converge",
+             activation? run `grm rollback <id>` to converge",
             diverged.join(", ")
         );
         return Ok(1);

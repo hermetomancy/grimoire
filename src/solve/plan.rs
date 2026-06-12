@@ -73,19 +73,21 @@ impl Plan {
 
         for step in &mut self.steps {
             let hash = if let Some(rune) = &step.rune {
-                let dep_hashes: BTreeMap<String, String> = step
+                // `runtime_deps` carries the resolver's *expanded* names (capabilities already
+                // replaced by concrete providers) in the rune's declaration order, so the
+                // hashes are passed positionally rather than looked up by raw dep name.
+                let dep_hashes: Vec<String> = step
                     .runtime_deps
                     .iter()
                     .map(|dep_name| {
-                        computed
-                            .get(dep_name)
-                            .cloned()
-                            .map(|h| (dep_name.clone(), h))
+                        computed.get(dep_name).cloned().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "missing computed hash for `{dep_name}`, a dependency of `{}`",
+                                step.name
+                            )
+                        })
                     })
-                    .collect::<Option<BTreeMap<_, _>>>()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("missing computed hash for dependency of `{}`", step.name)
-                    })?;
+                    .collect::<Result<Vec<_>>>()?;
                 closure::store_hash_for_rune_with_deps(rune, &dep_hashes, &target, &build_env)
                     .with_context(|| format!("compute store hash for `{}`", step.name))?
             } else if let Some(sub) = step.substitutes.first() {

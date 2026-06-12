@@ -106,7 +106,7 @@ pub fn install(args: InstallArgs) -> Result<()> {
     };
     // Under `--locked`, only reuse an installed package when it matches its pin; an installed
     // version that drifted from the lock must be re-resolved to the pinned one.
-    let mut installed = installed_versions()?;
+    let mut installed = installed_versions_current()?;
     if let Some(pins) = &pins {
         installed.retain(|name, version| pins.get(name).is_some_and(|pin| &pin.version == version));
     }
@@ -134,17 +134,23 @@ pub fn install(args: InstallArgs) -> Result<()> {
     // no steps: an explicit install promotes it. The marking sits outside the per-package
     // transactions; it is idempotent, and a crash here just leaves a root marked as a dep,
     // fixed by re-running the install.
+    let mut promoted = false;
     for name in &root_names {
-        set_requested(name, true, false)?;
+        promoted |= set_requested(name, true, false)?;
     }
 
     // A resolve that reuses an already-satisfying install produces no steps, so nothing above
     // reported anything. Tell the user the request was a no-op rather than printing silence.
-    // Skip creating a new generation when nothing actually changed.
+    // Skip creating a new generation when nothing actually changed — but a promotion alone
+    // does change it: requesting a store-only package (e.g. a cached build dep) pulls it into
+    // the linked set, so the generation must be rebuilt to surface it.
     if installer.installed_now.is_empty() {
         let names = args.packages.join(", ");
-        report(&format!("{names} already installed and up to date"));
-        return Ok(());
+        if !promoted {
+            report(&format!("{names} already installed and up to date"));
+            return Ok(());
+        }
+        report(&format!("{names} already installed; marked as requested"));
     }
     installer.finalize()?;
     installer.report_notes();
@@ -214,7 +220,7 @@ pub fn restore(args: crate::cli::RestoreArgs) -> Result<()> {
     }
 
     // Reuse an installed package only when it already matches its pin, like `--locked`.
-    let mut installed = installed_versions()?;
+    let mut installed = installed_versions_current()?;
     installed.retain(|name, version| pins.get(name).is_some_and(|pin| &pin.version == version));
     let mut installer = Installer::new(installed, Some(pins));
     for name in &requested {
@@ -237,7 +243,7 @@ pub fn restore(args: crate::cli::RestoreArgs) -> Result<()> {
         .filter(|state| !state.requested && !state.held)
         .map(|state| state.name.clone())
         .collect();
-    autoremove_orphans(seeds)?;
+    sweep_orphans(seeds)?;
 
     installer.finalize()?;
     installer.report_notes();
@@ -307,7 +313,7 @@ pub fn upgrade_packages(names: &[String]) -> Result<()> {
         .filter(|state| names.contains(&state.name))
         .flat_map(|state| state.runtime_deps.iter().cloned())
         .collect();
-    let mut installed = installed_versions()?;
+    let mut installed = installed_versions_current()?;
     for name in names {
         installed.remove(name);
     }
@@ -322,9 +328,10 @@ pub fn upgrade_packages(names: &[String]) -> Result<()> {
         return Ok(());
     }
     // Sweep before finalize() so the single new generation reflects both the upgrades and
-    // the removals. Each autoremove is its own committed transaction; a failure mid-sweep
-    // leaves the upgrades committed and the sweep partial, same containment as `remove`.
-    autoremove_orphans(pre_upgrade_deps)?;
+    // the removals. Each swept dependency is its own committed transaction; a failure
+    // mid-sweep leaves the upgrades committed and the sweep partial, same containment as
+    // `remove`.
+    sweep_orphans(pre_upgrade_deps)?;
     installer.finalize()?;
     installer.report_notes();
     Ok(())

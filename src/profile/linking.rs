@@ -27,12 +27,12 @@ pub(crate) const PROFILE_SHARE_SUBDIRS: &[&str] = &[
 /// skip set. A contested bin with no applicable preference is an error naming the contenders,
 /// so the failure is order-independent and actionable.
 pub(crate) fn contested_bin_skips(
-    states: &[PackageState],
+    states: &[&PackageState],
 ) -> Result<BTreeMap<String, BTreeSet<String>>> {
     let mut owners: BTreeMap<&str, Vec<&PackageState>> = BTreeMap::new();
     for state in states {
         for bin_name in state.bins.keys() {
-            owners.entry(bin_name).or_default().push(state);
+            owners.entry(bin_name).or_default().push(*state);
         }
     }
     let preferences = Preferences::load().unwrap_or_default();

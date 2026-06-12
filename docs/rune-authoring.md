@@ -118,7 +118,11 @@ deps: {
   (`"linux-headers[linux-*]"`) gating the dep on a target glob.
 - A dependency name may be a **capability** rather than a literal package (`"awk"` resolves
   to any provider; `grm prefer` breaks ties). Use the capability when any implementation
-  works; use the literal name when you need that one.
+  works; use the literal name when you need that one. Resolution order is deterministic —
+  the `grm prefer` choice, else an installed provider, else the first provider by name —
+  because the chosen provider folds into the dependent's store hash: building against
+  `gawk`'s awk and `mawk`'s awk are different content at different addresses, and a prebuilt
+  only substitutes for users whose resolution matches the builder's.
 - **`deps.features`** — *(future work, AGENTS.md §6)* execution-time FHS-compat capabilities.
 
 ## Bins and capabilities

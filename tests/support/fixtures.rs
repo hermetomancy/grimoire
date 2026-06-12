@@ -195,12 +195,28 @@ pub fn make_prebuilt(
     store_hash: &str,
     bin_script: &str,
 ) -> PathBuf {
+    make_prebuilt_with_deps(path, name, version, triple, store_hash, "[]", bin_script)
+}
+
+/// Like [`make_prebuilt`], but embedding `runtime_deps` (a NUON list, e.g. `["lib"]`) in the
+/// archive's package.nuon. Real `grm tome build` archives always embed their deps; the
+/// installed state record reads them from the archive, and the linked set / orphan sweep
+/// read them from that state.
+pub fn make_prebuilt_with_deps(
+    path: &Path,
+    name: &str,
+    version: &str,
+    triple: &str,
+    store_hash: &str,
+    runtime_deps: &str,
+    bin_script: &str,
+) -> PathBuf {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
     let mut builder = open_archive(path);
     let package_nuon = format!(
-        "{{format: 1, name: \"{name}\", version: \"{version}\", target: \"{triple}\", store_path: \"{store_hash}-{name}-{version}\", bins: {{default: {{{name}: \"bin/{name}\"}}}}}}\n"
+        "{{format: 1, name: \"{name}\", version: \"{version}\", target: \"{triple}\", store_path: \"{store_hash}-{name}-{version}\", bins: {{default: {{{name}: \"bin/{name}\"}}}}, deps: {{ runtime: {runtime_deps} }}}}\n"
     );
     append_file(
         &mut builder,
@@ -244,12 +260,28 @@ pub fn make_versioned_archive_with_hash(
     bin_script: &str,
     store_hash: &str,
 ) -> PathBuf {
+    make_versioned_archive_with_hash_and_deps(
+        path, name, version, triple, bin_script, store_hash, "[]",
+    )
+}
+
+/// Like [`make_versioned_archive_with_hash`], but embedding `runtime_deps` (a NUON list) in
+/// the archive's package.nuon, like real built archives do.
+pub fn make_versioned_archive_with_hash_and_deps(
+    path: &Path,
+    name: &str,
+    version: &str,
+    triple: &str,
+    bin_script: &str,
+    store_hash: &str,
+    runtime_deps: &str,
+) -> PathBuf {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
     let mut builder = open_archive(path);
     let package_nuon = format!(
-        "{{format: 1, name: \"{name}\", version: \"{version}\", target: \"{triple}\", store_path: \"{}\", bins: {{default: {{{name}: \"bin/{name}\"}}}}}}\n",
+        "{{format: 1, name: \"{name}\", version: \"{version}\", target: \"{triple}\", store_path: \"{}\", bins: {{default: {{{name}: \"bin/{name}\"}}}}, deps: {{ runtime: {runtime_deps} }}}}\n",
         fake_store_basename_with_hash(name, version, store_hash)
     );
     append_file(

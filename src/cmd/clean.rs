@@ -1,9 +1,13 @@
 //! `grm clean`: reclaim disk under the install root.
 //!
-//! Empties the source/archive/build caches and any leftover transaction staging directories
-//! without touching installed packages, profiles, state, tomes, addenda, or the lockfile.
-//! Everything removed here is reproducible from the original sources, so a later install just
-//! re-fetches and re-verifies what it needs.
+//! Everything reproducible leaves; everything the user asked for stays. Three phases:
+//! orphaned dependency state nothing references (cached build dependencies, residue from a
+//! failed multi-package install) is swept out of the install; generations older than `--keep`
+//! (the current generation and the rollback target always survive) and every store path no
+//! retained generation references — including the directories store-preserving removal left
+//! behind — are deleted; and the source/archive/build caches plus leftover transaction
+//! staging directories are emptied. Installed packages, retained generations, tomes, addenda,
+//! and the lockfile are untouched; a later install or build re-fetches what it needs.
 
 use anyhow::{Context, Result, bail};
 use std::{
@@ -13,11 +17,30 @@ use std::{
 use walkdir::WalkDir;
 
 use crate::{
+    cli::CleanArgs,
+    install, profile,
     util::paths,
     util::progress::{report, status},
 };
 
-pub fn clean() -> Result<()> {
+pub fn clean(args: CleanArgs) -> Result<()> {
+    // Orphaned dependency state first, so the generation built from the swept set is the one
+    // garbage collection measures reachability against.
+    status("sweeping unused dependencies");
+    let seeds: Vec<String> = install::installed_states()?
+        .iter()
+        .filter(|state| !state.requested && !state.held)
+        .map(|state| state.name.clone())
+        .collect();
+    let swept = install::sweep_orphans(seeds)?;
+    if !swept.is_empty() {
+        let states = install::installed_states()?;
+        profile::rebuild_and_activate(&states)?;
+    }
+
+    status("collecting old generations and unreferenced store paths");
+    let (freed_stores, freed_generations, store_bytes) = profile::collect_garbage(args.keep)?;
+
     let root = paths::install_root()?;
     let targets: [(&str, PathBuf); 4] = [
         ("cache/sources", paths::source_cache_dir()?),
@@ -26,25 +49,44 @@ pub fn clean() -> Result<()> {
         ("transactions", root.join("transactions")),
     ];
 
-    let mut total_bytes: u64 = 0;
-    let mut total_entries: u64 = 0;
+    let mut cache_bytes: u64 = 0;
+    let mut cache_entries: u64 = 0;
     for (label, dir) in &targets {
         status(&format!("cleaning {label}"));
         let (bytes, entries) =
             clean_dir(dir).with_context(|| format!("clean {} ({})", label, dir.display()))?;
-        total_bytes += bytes;
-        total_entries += entries;
+        cache_bytes += bytes;
+        cache_entries += entries;
     }
 
+    if swept.is_empty() && freed_stores == 0 && freed_generations == 0 && cache_entries == 0 {
+        report("nothing to clean");
+        return Ok(());
+    }
+    let mut parts = Vec::new();
+    if !swept.is_empty() {
+        parts.push(format!("{} unused package(s)", swept.len()));
+    }
+    if freed_generations > 0 {
+        parts.push(format!("{freed_generations} old generation(s)"));
+    }
+    if freed_stores > 0 {
+        parts.push(format!("{freed_stores} store path(s)"));
+    }
+    if cache_entries > 0 {
+        parts.push(format!(
+            "{cache_entries} cache {}",
+            if cache_entries == 1 {
+                "entry"
+            } else {
+                "entries"
+            }
+        ));
+    }
     report(&format!(
-        "cleaned {} {} ({})",
-        total_entries,
-        if total_entries == 1 {
-            "entry"
-        } else {
-            "entries"
-        },
-        format_bytes(total_bytes)
+        "cleaned {} ({})",
+        parts.join(", "),
+        format_bytes(store_bytes + cache_bytes)
     ));
     Ok(())
 }

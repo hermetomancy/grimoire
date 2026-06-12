@@ -40,7 +40,10 @@ pub enum Command {
     #[command(visible_aliases = ["in", "i"])]
     Install(InstallArgs),
     /// Remove an installed package. Runtime dependencies installed solely for this package —
-    /// that no other installed package still requires — are removed too.
+    /// that no other installed package still requires — leave in the same transaction. A
+    /// package something still requires is kept and demoted to dependency status instead, so
+    /// it is removed automatically once nothing needs it. Store contents are untouched (so
+    /// rollback still works); `grm clean` reclaims the disk space.
     #[command(visible_aliases = ["rm", "uninstall"])]
     Remove(PackageArg),
     /// Upgrade installed packages to the latest available version. Packages held with
@@ -53,18 +56,11 @@ pub enum Command {
     /// Release a held package so it is eligible for `grm upgrade` again.
     #[command(visible_alias = "unpin")]
     Unhold(PackageArg),
-    /// Demote explicitly installed packages to dependency status, making them eligible for
-    /// `grm autoremove` once nothing else requires them.
-    Unrequest(PackageArg),
     /// Restore the package set a lockfile records: install every requested package at its
     /// pinned version and hash, restore requested/held intent, and sweep anything the lock
     /// does not account for. Tomes must already be configured (and, for git tomes, synced at
     /// the lock's pinned commits).
     Restore(RestoreArgs),
-    /// Remove every orphaned dependency: packages installed only as dependencies (never
-    /// requested by name, not held) that no installed package still requires.
-    #[command(visible_alias = "ar")]
-    Autoremove,
     /// Choose which package provides a contested capability or bin (e.g. `grm prefer awk gawk`).
     /// With no arguments, lists preferences and currently contested capabilities. Note that
     /// `install --locked` still pins concrete providers from the lockfile; a changed preference
@@ -82,8 +78,6 @@ pub enum Command {
     Search(QueryArg),
     /// Show detailed information about a package.
     Info(PackageArg),
-    /// List the orphaned dependencies `grm autoremove` would remove, without removing them.
-    Orphans,
     /// List the files an installed package placed in the store.
     Files(PackageArg),
     /// Show which installed package owns a file (a store path or a profile path).
@@ -94,21 +88,12 @@ pub enum Command {
     // -----------------------------------------------------------------------
     // Profiles
     // -----------------------------------------------------------------------
-    /// Roll back to the previous generation.
+    /// Roll back to the previous generation, or activate a specific generation by ID.
     #[command(visible_alias = "rb")]
-    Rollback,
-    /// Switch to a specific generation.
-    #[command(visible_alias = "sw")]
-    Switch(SwitchArgs),
+    Rollback(RollbackArgs),
     /// List generations.
     #[command(visible_alias = "gens")]
     Generations,
-    /// Garbage-collect unreferenced store paths and old generations.
-    #[command(visible_alias = "gc")]
-    CollectGarbage(GcArgs),
-    /// Delete a specific generation by ID. The currently active generation cannot be deleted.
-    #[command(visible_alias = "del-gen")]
-    DeleteGeneration(DeleteGenerationArgs),
 
     // -----------------------------------------------------------------------
     // Maintenance
@@ -116,10 +101,13 @@ pub enum Command {
     /// Check the health of the grimoire installation.
     #[command(visible_alias = "dr")]
     Doctor,
-    /// Reclaim disk under the install root by emptying the source/archive/build caches and
-    /// any leftover transaction staging directories. Installed packages, profiles, state, tomes,
-    /// addenda, and the lockfile are untouched; the next install will re-fetch what it needs.
-    Clean,
+    /// Reclaim disk under the install root: sweep unused dependencies nothing references
+    /// (cached build deps, residue from failed installs), delete old generations (keeping the
+    /// most recent ones plus the rollback target), delete store paths no retained generation
+    /// references, and empty the source/archive/build caches and leftover transaction staging
+    /// directories. Installed packages, recent generations, tomes, addenda, and the lockfile
+    /// are untouched; the next install or build re-fetches what it needs.
+    Clean(CleanArgs),
     /// Create the fixed Grimoire store directory (/grm on POSIX systems).
     /// On Linux this creates the directory and adjusts ownership. On macOS it registers
     /// the directory in /etc/synthetic.conf and prompts for a reboot.
@@ -146,11 +134,13 @@ pub enum Command {
     // -----------------------------------------------------------------------
     /// Print the content-addressed store hash a package resolves to (its rune plus its runtime
     /// dependency closure). The address a prebuilt must carry to be a valid substitute.
+    #[command(hide = true)]
     StoreHash(PackageArg),
     /// Print a shell completion script for `grm` to stdout. Redirect it where your shell
     /// expects completions (e.g. `grm completions bash > ~/.local/share/bash-completion/completions/grm`).
     Completions(CompletionsArgs),
     /// Render man pages for `grm` and every subcommand into a directory.
+    #[command(hide = true)]
     Man(ManArgs),
 }
 
@@ -267,22 +257,17 @@ pub struct UpgradeArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct SwitchArgs {
-    /// Generation ID to activate.
-    pub id: u64,
+pub struct RollbackArgs {
+    /// Generation ID to activate. Omit to roll back to the previous generation.
+    pub generation: Option<u64>,
 }
 
 #[derive(Debug, Args)]
-pub struct GcArgs {
-    /// Number of recent generations to keep (including the current one).
+pub struct CleanArgs {
+    /// Number of recent generations to keep (including the current one). The rollback target
+    /// is always kept.
     #[arg(short, long, default_value = "5")]
     pub keep: usize,
-}
-
-#[derive(Debug, Args)]
-pub struct DeleteGenerationArgs {
-    /// Generation ID to delete.
-    pub id: u64,
 }
 
 #[derive(Debug, Subcommand)]

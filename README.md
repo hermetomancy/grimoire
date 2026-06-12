@@ -34,9 +34,10 @@ off its pinned commit.
 signature authenticates every archive hash it publishes.
 - **Generations and rollback.** Every install/remove/upgrade creates a new generation;
 `grm rollback` switches back instantly without rebuilding.
-- **Distro-citizen tooling.** Install-reason tracking with orphan cleanup (`grm orphans`,
-`grm autoremove`), file-ownership queries (`grm files`, `grm owns`, `grm provides`), preferred
-providers for contested commands (`grm prefer awk gawk`), post-install notes, and tome news.
+- **Distro-citizen tooling.** Install-reason tracking — removing a package takes its
+now-unneeded dependencies with it in the same transaction — file-ownership queries
+(`grm files`, `grm owns`, `grm provides`), preferred providers for contested commands
+(`grm prefer awk gawk`), post-install notes, and tome news.
 
 ## Positioning
 
@@ -81,10 +82,8 @@ grm provides awk                      # who can provide this command?
 grm prefer awk gawk                   # pick the provider when several can
 
 # Clean up
-grm remove hello
-grm orphans                           # list dependencies nothing needs anymore
-grm autoremove                        # remove them
-grm clean
+grm remove hello                      # dependencies nothing needs anymore leave with it
+grm clean                             # prune old generations, unreferenced store paths, caches
 ```
 
 Run `grm --help` for the full command tree.

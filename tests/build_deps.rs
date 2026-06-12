@@ -172,8 +172,9 @@ fn source_install_keeps_pulled_build_dependency_after_success() {
     assert_success(&output, "run usespath");
     assert_eq!(stdout(&output).trim(), "from build dependency");
 
-    // stampdep remains installed — state, package dir, and shim — because it is part of the
-    // managed build environment now.
+    // stampdep remains installed — state and package dir — because it is part of the managed
+    // build environment now. But it is *store-only*: nobody requested it and nothing
+    // runtime-depends on it, so it must never surface in the profile.
     assert!(
         root.join("state")
             .join("packages")
@@ -186,12 +187,13 @@ fn source_install_keeps_pulled_build_dependency_after_success() {
         "stampdep package dir should remain"
     );
     assert!(
-        root.join("profiles")
+        !root
+            .join("profiles")
             .join("current")
             .join("bin")
             .join("stamp")
             .exists(),
-        "stampdep shim should remain"
+        "a build dep's bin must not leak into the profile"
     );
 
     // `usespath` itself stays installed; it is the explicit target, not a build dep.
@@ -397,5 +399,175 @@ fn shared_build_dependency_realizes_once_across_overlapping_plans() {
         out.matches("mid 0.1.0 — built from source").count(),
         1,
         "mid must be built exactly once: {out}"
+    );
+}
+
+#[test]
+fn changed_build_dep_rune_is_rebuilt_not_reused() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    // `stampdep` prints a stamp that consumers bake into their shims at build time. Editing
+    // stampdep's rune without changing its version must re-realize it for the next consumer
+    // build: reuse is by content address, not by name+version.
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'staletome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    let stampdep_rune = |stamp: &str| {
+        format!(
+            "export const package = {{\n  name: 'stampdep'\n  version: '0.1.0'\n \n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf '{stamp}\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'stamp')\n}}\n"
+        )
+    };
+    let consumer_rune = |name: &str| {
+        format!(
+            "export const package = {{\n  name: '{name}'\n  version: '0.1.0'\n  deps: {{ build: {{ default: ['stampdep'] }}, runtime: [] }}\n \n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  let stamped = (stamp | str trim)\n  $\"#!/usr/bin/env sh\\nprintf '($stamped)\\n'\\n\" | save ($ctx.package_dir | path join 'bin' '{name}')\n}}\n"
+        )
+    };
+    fs::write(runes.join("stampdep.rn"), stampdep_rune("stamp one")).unwrap();
+    fs::write(runes.join("usesone.rn"), consumer_rune("usesone")).unwrap();
+    fs::write(runes.join("usestwo.rn"), consumer_rune("usestwo")).unwrap();
+
+    let add = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "add stale tome");
+    assert_success(&run(root, &["install", "usesone"]), "install usesone");
+    assert_eq!(stdout(&run_shim(root, "usesone")).trim(), "stamp one");
+    let hash_before = state_text(root, "stampdep");
+
+    // Same version, different rune content: the dep's content address changes.
+    fs::write(runes.join("stampdep.rn"), stampdep_rune("stamp two")).unwrap();
+    assert_success(&run(root, &["tome", "update", "staletome"]), "tome update");
+
+    let install = run(root, &["install", "usestwo"]);
+    assert_success(&install, "install usestwo after stampdep rune change");
+    assert!(
+        stdout(&install).contains("stampdep 0.1.0"),
+        "the drifted dep must be re-realized: {}",
+        stdout(&install)
+    );
+    assert_eq!(
+        stdout(&run_shim(root, "usestwo")).trim(),
+        "stamp two",
+        "usestwo must be built against the re-realized stampdep"
+    );
+    assert_ne!(
+        state_text(root, "stampdep"),
+        hash_before,
+        "stampdep's state record must carry the new content address"
+    );
+
+    // An untouched rune keeps being reused: reinstalling the consumer is a no-op.
+    let again = run(root, &["install", "usestwo"]);
+    assert_success(&again, "reinstall usestwo");
+    assert!(
+        stdout(&again).contains("already installed and up to date"),
+        "an unchanged graph must not rebuild: {}",
+        stdout(&again)
+    );
+}
+
+#[test]
+fn store_only_packages_stay_out_of_lock_upgrade_and_profile() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'cachetome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    let tooldep_rune = |version: &str| {
+        format!(
+            "export const package = {{\n  name: 'tooldep'\n  version: '{version}'\n \n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'tooldep {version}\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'tooldep')\n}}\n"
+        )
+    };
+    fs::write(runes.join("tooldep.rn"), tooldep_rune("0.1.0")).unwrap();
+    fs::write(
+        runes.join("consumer.rn"),
+        "export const package = {\n  name: 'consumer'\n  version: '0.1.0'\n  deps: { build: { default: ['tooldep'] }, runtime: [] }\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'consumer\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'consumer')\n}\n",
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert_success(&add, "add cache tome");
+    assert_success(&run(root, &["install", "consumer"]), "install consumer");
+
+    // Store-only: cached for builds, invisible to the environment.
+    assert!(
+        !root
+            .join("profiles")
+            .join("current")
+            .join("bin")
+            .join("tooldep")
+            .exists(),
+        "build dep bin must not be linked into the profile"
+    );
+    // The lock must not carry a package *entry* for the build dep (consumer's own metadata
+    // still names it in `build_deps`, which is fine — that is a recipe fact, not a pin).
+    let lock = fs::read_to_string(root.join("state").join("grimoire.lock.nuon")).unwrap();
+    assert!(
+        !lock.contains("[tooldep,"),
+        "build dep must not be recorded as a locked package: {lock}"
+    );
+    let list = stdout(&run(root, &["list"]));
+    assert!(
+        list.lines()
+            .any(|l| l.contains("tooldep") && l.contains("store-only")),
+        "list must mark the cached build dep store-only: {list}"
+    );
+
+    // A newer tooldep appears; a bare upgrade must leave the cache alone.
+    fs::write(runes.join("tooldep.rn"), tooldep_rune("0.2.0")).unwrap();
+    assert_success(&run(root, &["upgrade"]), "bare upgrade");
+    assert!(
+        state_text(root, "tooldep").contains("version: \"0.1.0\""),
+        "bare upgrade must not touch store-only packages: {}",
+        state_text(root, "tooldep")
+    );
+
+    // Naming it explicitly still upgrades it; it stays store-only.
+    assert_success(&run(root, &["upgrade", "tooldep"]), "explicit upgrade");
+    assert!(
+        state_text(root, "tooldep").contains("version: \"0.2.0\""),
+        "explicit upgrade must work: {}",
+        state_text(root, "tooldep")
+    );
+    assert!(
+        !root
+            .join("profiles")
+            .join("current")
+            .join("bin")
+            .join("tooldep")
+            .exists(),
+        "an upgraded build dep is still store-only"
+    );
+
+    // Requesting it by name promotes it into the environment — even with no install steps.
+    let promote = run(root, &["install", "tooldep"]);
+    assert_success(&promote, "promote tooldep");
+    assert!(
+        stdout(&promote).contains("marked as requested"),
+        "promotion of an installed package must be announced: {}",
+        stdout(&promote)
+    );
+    assert_eq!(
+        stdout(&run_shim(root, "tooldep")).trim(),
+        "tooldep 0.2.0",
+        "a promoted package must surface in the new generation"
     );
 }
