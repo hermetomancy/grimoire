@@ -107,6 +107,13 @@ fn compute_build_env_id() -> Option<String> {
             return Some(override_id);
         }
     }
+    // Once the managed compiler boundary exists, *it* is the build environment: managed
+    // build PATHs put its wrappers ahead of the host boundary, so probing the user's PATH
+    // would hash a compiler builds do not use — and worse, linking or unlinking build-env
+    // would flip the identity and re-address the whole store.
+    if let Some(id) = managed_boundary_id() {
+        return Some(id);
+    }
     let readiness = source_build_readiness().ok()?;
     if !readiness.is_ready() {
         return None;
@@ -133,6 +140,46 @@ fn compute_build_env_id() -> Option<String> {
         parts.push(format!("sdk:{sdk_ver}"));
     }
 
+    parts.sort();
+    Some(parts.join(","))
+}
+
+/// The build-environment identity when the managed boundary (toolchain-wrappers) is
+/// installed: probe the wrapper set itself — `cc` plus the binary-affecting tools it
+/// ships — never the user's PATH. The wrappers delegate to managed clang/llvm (and, on
+/// macOS, the host `ld`), so the banners capture exactly the toolchain a managed build
+/// uses; tools the wrappers do not ship are ambient leaks (the documented stage-2 debt)
+/// and deliberately do not define the boundary. Returns `None` when the wrappers are not
+/// installed or their store dir is gone — the host PATH probe is the boundary then.
+fn managed_boundary_id() -> Option<String> {
+    let states = crate::install::installed_states().ok()?;
+    let wrappers = states.iter().find(|s| s.name == "toolchain-wrappers")?;
+    let bin = Path::new(&wrappers.store_path).join("bin");
+    managed_boundary_id_from(&bin)
+}
+
+fn managed_boundary_id_from(bin: &Path) -> Option<String> {
+    let cc = bin.join("cc");
+    if !cc.is_file() {
+        return None;
+    }
+    let cc_ver = tool_version_string(&cc, "cc").ok()?;
+    let mut parts = vec![format!("cc:{cc_ver}")];
+    for name in OPTIONAL_TOOLS {
+        if !is_binary_affecting_tool(name) {
+            continue;
+        }
+        let path = bin.join(name);
+        if !path.is_file() {
+            continue;
+        }
+        if let Ok(ver) = tool_version_string(&path, name) {
+            parts.push(format!("{name}:{ver}"));
+        }
+    }
+    if let Some(sdk_ver) = macos_sdk_version() {
+        parts.push(format!("sdk:{sdk_ver}"));
+    }
     parts.sort();
     Some(parts.join(","))
 }
@@ -364,5 +411,41 @@ mod tests {
         let mut permissions = fs::metadata(path).unwrap().permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(path, permissions).unwrap();
+    }
+
+    fn fake_wrapper(dir: &Path, name: &str, banner: &str) {
+        let path = dir.join(name);
+        fs::write(&path, format!("#!/bin/sh\necho '{banner}'\n")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).unwrap();
+    }
+
+    #[test]
+    fn managed_boundary_id_probes_only_the_wrapper_set() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path();
+        fake_wrapper(bin, "cc", "clang version 22.1.7");
+        fake_wrapper(bin, "ld", "ld64-1234.5");
+        fake_wrapper(bin, "as", "llvm-as 22.1.7");
+        // Not binary-affecting: present in the wrapper set but must not perturb the id.
+        fake_wrapper(bin, "strip", "llvm-strip 22.1.7");
+
+        let id = managed_boundary_id_from(bin).unwrap();
+        assert!(id.contains("cc:clang version 22.1.7"), "{id}");
+        assert!(id.contains("ld:ld64-1234.5"), "{id}");
+        assert!(id.contains("as:llvm-as 22.1.7"), "{id}");
+        assert!(!id.contains("strip"), "{id}");
+
+        // Identical wrapper sets produce identical identities.
+        assert_eq!(id, managed_boundary_id_from(bin).unwrap());
+    }
+
+    #[test]
+    fn managed_boundary_requires_the_cc_wrapper() {
+        let temp = tempfile::tempdir().unwrap();
+        fake_wrapper(temp.path(), "ld", "ld64-1234.5");
+        assert!(managed_boundary_id_from(temp.path()).is_none());
     }
 }
