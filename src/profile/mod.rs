@@ -15,7 +15,7 @@ use std::{collections::BTreeSet, fs, path::PathBuf};
 use crate::{
     model::PackageState,
     util::paths,
-    util::progress::{report, status, success},
+    util::progress::{report, status, strong, success},
 };
 
 mod gc;
@@ -93,6 +93,10 @@ pub fn current_generation_id() -> Result<Option<u64>> {
 pub fn rebuild_and_activate(states: &[PackageState]) -> Result<u64> {
     let id = create_generation(states)?;
     switch_symlink(id)?;
+    report(&format!(
+        "generation {} is now current",
+        strong(&id.to_string())
+    ));
     Ok(id)
 }
 
@@ -161,12 +165,21 @@ pub fn create_generation(states: &[PackageState]) -> Result<u64> {
 /// The state restore lands before the symlink flip: the flip is the user-visible commit
 /// point, and a crash between the two leaves state describing the target generation — which
 /// the next mutating command or `grm switch` converges, and `grm doctor` flags.
-pub fn activate_generation(id: u64) -> Result<()> {
+///
+/// Returns `true` when the profile actually switched, `false` when `id` was already active
+/// (the repair path), so callers can word their result line accordingly.
+pub fn activate_generation(id: u64) -> Result<bool> {
     let gen_dir = generation_dir(id)?;
     if !gen_dir.exists() {
         bail!("generation {id} does not exist");
     }
     let already_active = current_generation_id()? == Some(id);
+    if !already_active {
+        report(&format!(
+            "switching profile to generation {}…",
+            strong(&id.to_string())
+        ));
+    }
     if !restore_state_snapshot(&gen_dir)? {
         report(&format!(
             "warning: generation {id} has no state snapshot (created by an older grimoire); \
@@ -177,9 +190,10 @@ pub fn activate_generation(id: u64) -> Result<()> {
         // Re-activating the current generation is the repair path for an interrupted
         // activation: the state restore above converges state with the symlink.
         report(&format!("generation {id} is already active"));
-        return Ok(());
+        return Ok(false);
     }
-    switch_symlink(id)
+    switch_symlink(id)?;
+    Ok(true)
 }
 
 /// Atomically repoints `profiles/current` at the given generation. The low-level half of
@@ -197,8 +211,6 @@ fn switch_symlink(id: u64) -> Result<()> {
     std::os::unix::fs::symlink(&gen_dir, &tmp)
         .with_context(|| format!("stage current symlink -> {}", gen_dir.display()))?;
     fs::rename(&tmp, &current).with_context(|| format!("activate generation {id}"))?;
-
-    report(&format!("activated generation {id}"));
     Ok(())
 }
 
@@ -215,9 +227,5 @@ pub fn rollback() -> Result<u64> {
         .context("no previous generation to roll back to")?;
 
     activate_generation(previous.id)?;
-    report(&format!(
-        "rolled back from generation {current} to {}",
-        previous.id
-    ));
     Ok(previous.id)
 }

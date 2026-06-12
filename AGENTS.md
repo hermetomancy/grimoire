@@ -177,6 +177,12 @@ depends on a POSIX userland at `/usr/bin` and `/bin`. Default target triples:
 2. Error messages are for humans. Say what failed and, where possible, what to do.
 3. The CLI is imperative and explicit. Commands accept multiple positional packages where
    semantically reasonable; multi-package mutations are one all-or-nothing transaction (§9.3).
+4. **Result lines share one vocabulary** (`util/progress`): `✦` prefixes confirmations
+   (`report`), `!` prefixes cautions (`warn`), subjects are emphasized with `strong`, trailing
+   detail is de-emphasized with `faint` after an em dash (`ripgrep 14.1.0 — prebuilt, checksum
+   verified`), and version transitions use `→`. Decorations and styling appear only on a
+   terminal with `NO_COLOR` unset; piped output stays plain and byte-stable. Phrasing is
+   lowercase and calm: say what happened, not how hard it was.
 
 ## 13. Testing
 

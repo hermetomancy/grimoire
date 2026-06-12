@@ -49,6 +49,13 @@ pub(crate) fn ensure_build_deps_installed_inner(
         if installed.contains_key(&step.name) {
             continue;
         }
+        // The recursion below installs the build deps of anything built from source, so a
+        // later step in this plan may have landed since the plan was resolved; reuse it
+        // instead of realizing it twice (same staleness as `Installer::reuse_realized_step`).
+        if step_already_realized(&step)? {
+            installed.insert(step.name.clone(), step.version.clone());
+            continue;
+        }
         if !building.insert(step.name.clone()) {
             bail!("build dependency cycle detected involving `{}`", step.name);
         }
@@ -65,6 +72,7 @@ pub(crate) fn ensure_build_deps_installed_inner(
                 &archive,
                 Some(sub.entry.archive_hash.clone()),
                 Some(&sub.store_hash),
+                InstallOrigin::BuildDep,
             )
         } else if let Some(rune) = &step.rune {
             let store_hash = crate::store::closure::store_hash_for_rune(rune)
@@ -85,7 +93,12 @@ pub(crate) fn ensure_build_deps_installed_inner(
                 &env,
                 &store_hash,
             )?;
-            install_store_only(&result.archive, None, Some(&result.store_hash))
+            install_store_only(
+                &result.archive,
+                None,
+                Some(&result.store_hash),
+                InstallOrigin::BuildDep,
+            )
         } else {
             bail!(
                 "no installable prebuilt or source for `{}` {}",

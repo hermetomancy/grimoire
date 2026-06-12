@@ -24,7 +24,7 @@ mod util;
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Command, TomeCommand};
-use util::{process_lock, progress, progress::Verbosity, time_util};
+use util::{process_lock, progress, progress::Verbosity};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -83,36 +83,29 @@ fn run(cli: Cli) -> Result<()> {
         Command::Autoremove => install::autoremove(),
         Command::Prefer(args) => cmd::prefer::prefer(args),
         Command::Rollback => {
+            let started = std::time::Instant::now();
             let id = profile::rollback()?;
-            println!("rolled back to generation {id}");
+            progress::report(&format!(
+                "rolled back to generation {} in {:.2}s",
+                progress::strong(&id.to_string()),
+                started.elapsed().as_secs_f64(),
+            ));
             Ok(())
         }
         Command::Switch(args) => {
-            profile::activate_generation(args.id)?;
-            println!("switched to generation {}", args.id);
-            Ok(())
-        }
-        Command::Generations => {
-            let gens = profile::list_generations()?;
-            let current = profile::current_generation_id()?;
-            for g in gens {
-                let marker = if current == Some(g.id) { "*" } else { " " };
-                println!(
-                    "{} gen-{:<4} {} ({} packages)",
-                    marker,
-                    g.id,
-                    time_util::format_timestamp(g.created),
-                    g.packages.len()
-                );
+            let started = std::time::Instant::now();
+            if profile::activate_generation(args.id)? {
+                progress::report(&format!(
+                    "switched to generation {} in {:.2}s",
+                    progress::strong(&args.id.to_string()),
+                    started.elapsed().as_secs_f64(),
+                ));
             }
             Ok(())
         }
+        Command::Generations => cmd::generations::generations(),
         Command::CollectGarbage(args) => profile::gc(args.keep),
-        Command::DeleteGeneration(args) => {
-            profile::delete_generation(args.id)?;
-            println!("deleted generation {}", args.id);
-            Ok(())
-        }
+        Command::DeleteGeneration(args) => profile::delete_generation(args.id),
         Command::Tome { command } => match command {
             TomeCommand::Init(args) => tome::init(args),
             TomeCommand::Rune(args) => tome::rune(args),

@@ -141,7 +141,7 @@ pub(crate) fn build_runes(
             archive.display()
         ));
         if all {
-            install::install_store_only(&archive, None, None)
+            install::install_store_only(&archive, None, None, install::InstallOrigin::TomeBuild)
                 .with_context(|| format!("store-only install of {}", entry.name))?;
         }
         catalog.upsert(store_hash, entry);
