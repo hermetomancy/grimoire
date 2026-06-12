@@ -112,7 +112,10 @@ sources: {
 | `platform` | no | Target glob (dependency-bracket syntax: `macos-*`, `linux-x86_64-musl`). Non-matching sources are neither fetched nor folded into the store hash — how a fixed-output package pins a different artifact per platform (`rust.rn` is the canonical example). |
 
 Archive sources (`.tar.zst`/`.tar.gz`/`.tar.xz`) are extracted automatically (path-validated
-first, same rules as package archives) and exposed as `ctx.sources.<name>.dir`. Non-archive
+first, same rules as package archives) and exposed as `ctx.sources.<name>.dir`. A URL whose
+final path segment has *no* extension — codeload.github.com commit tarballs
+(`.../tar.gz/<sha>`) — is sniffed by magic bytes instead; any URL with an extension keeps
+its extension-derived meaning, so a `.patch.gz` never extracts as a tarball. Non-archive
 sources (patches, single files) are exposed as `ctx.sources.<name>.path` only.
 
 ## Dependencies
@@ -120,7 +123,7 @@ sources (patches, single files) are exposed as `ctx.sources.<name>.path` only.
 ```rn
 deps: {
   build: {
-    default: ["cmake" "make"]
+    default: ["cmake" "gmake"]
     linux: ["linux-headers"]
     "linux-x86_64-musl": ["some-exact-triple-tool"]
   }
@@ -133,7 +136,8 @@ deps: {
   `bin/` dirs join the managed build PATH and their prefixes are layered into discovery
   variables (`CMAKE_PREFIX_PATH`, `PKG_CONFIG_PATH`, `CPATH`, `LIBRARY_PATH`, `ACLOCAL_PATH`,
   `<DEP>_PREFIX`). Declare every non-POSIX tool the build invokes — and remember the
-  self-hosted ambient userland is toybox, which ships no `make`.
+  self-hosted ambient userland is toybox, which ships no `make`. Out-of-core packages can
+  declare `build-env` instead of enumerating the toolchain.
 - **`deps.runtime`** — packages required at execution time; resolved by the solver and
   installed into the active generation.
 - **Entry forms** (anywhere a dependency appears): a bare name (`"libc"`, any version), a
