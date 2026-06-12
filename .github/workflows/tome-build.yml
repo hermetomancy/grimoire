@@ -6,8 +6,16 @@
 # noise. Once bootstrap lands, promote this to a release-blocking gate: trigger on tags
 # alongside release.yml and drop `continue-on-error`.
 #
-# tome-core is intentionally not in this repository (gitignored); set TOME_REPO to wherever
-# the canonical core tome lives.
+# Store-path correctness: archives bake absolute store paths, so publishable artifacts
+# must build against the fixed `/grm` store. Linux runners create it; hosted macOS
+# runners cannot (sealed system root, and /etc/synthetic.conf needs a reboot), so the
+# macOS job builds under GRIMOIRE_ROOT and its artifacts are bootstrap *proof*, not
+# publishable — publish macOS dists from a machine with /grm.
+#
+# Hosted runners cover linux-gnu (x86_64 + aarch64) and macos-aarch64. The musl and
+# FreeBSD stage-1 targets need containers/VMs — add them when those bootstraps land.
+#
+# tome-core is intentionally not in this repository (gitignored); the workflow clones it.
 
 name: tome-build
 
@@ -17,10 +25,7 @@ on:
       tome_repo:
         description: Git URL of the core tome repository
         required: false
-        default: https://github.com/grimoire-of-glass/core
-
-env:
-  GRIMOIRE_ROOT: ${{ github.workspace }}/grimoire-root
+        default: https://github.com/grimoire-of-glass/tome-core
 
 jobs:
   build-all:
@@ -29,20 +34,59 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     runs-on: ${{ matrix.os }}
+    # llvm + rust from source: hours, not minutes.
+    timeout-minutes: 360
     # Manual proving runs should report per-platform results without failing the whole
     # dispatch; remove when this becomes a release gate.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Free disk space (Linux)
+        if: runner.os == 'Linux'
+        # The llvm + rust builds need tens of GB; evict preinstalled bloat first.
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Create the fixed store (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo mkdir -p /grm
+          sudo chown "$(id -u):$(id -g)" /grm
+
+      - name: Use a workspace store (macOS)
+        # Hosted macOS runners cannot create /grm; these artifacts prove the bootstrap
+        # but are not publishable (workspace store paths baked in).
+        if: runner.os == 'macOS'
+        run: echo "GRIMOIRE_ROOT=${{ github.workspace }}/grimoire-root" >> "$GITHUB_ENV"
+
       - name: Build grm
         run: cargo build --release
+
       - name: Clone the core tome
         run: git clone --depth 1 "${{ inputs.tome_repo }}" core-tome
+
       - name: Build every rune
+        run: ./target/release/grm tome build --all --strict --path core-tome
+
+      - name: Sign the index
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
-          mkdir -p "$GRIMOIRE_ROOT"
-          ./target/release/grm tome build --all --strict --path core-tome
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            echo "MINISIGN_SECRET_KEY not available; skipping signature" >&2
+            exit 0
+          fi
+          if [ "$RUNNER_OS" = "macOS" ]; then brew install minisign
+          else sudo apt-get update && sudo apt-get install -y minisign; fi
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > /tmp/minisign.key
+          minisign -S -s /tmp/minisign.key -m core-tome/dist/index.nuon \
+            -t "tome-core index ($RUNNER_OS $(uname -m))"
+          rm -f /tmp/minisign.key
+
       - name: Upload built archives
         uses: actions/upload-artifact@v4
         with:
