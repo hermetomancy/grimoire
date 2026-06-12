@@ -480,7 +480,21 @@ fn run_rune_build(
         .with_context(|| format!("build rune {}", rune.display()));
     std::env::set_current_dir(original_cwd)
         .with_context(|| format!("restore working directory {}", original_cwd.display()))?;
-    let manifest = manifest?;
+    // A failed build normally takes its workspace with it; GRIMOIRE_KEEP_BUILD persists it
+    // so configure logs and partial build trees can be autopsied.
+    let manifest = match manifest {
+        Ok(manifest) => manifest,
+        Err(e) => {
+            if std::env::var_os("GRIMOIRE_KEEP_BUILD").is_some() {
+                let kept = temp.keep();
+                crate::util::progress::note(&format!(
+                    "build workspace kept at {} (GRIMOIRE_KEEP_BUILD)",
+                    kept.display()
+                ));
+            }
+            return Err(e);
+        }
+    };
 
     // Autotools-style `make install DESTDIR=...` nests the payload under the prefix path
     // inside package_dir. The packing logic strips this prefix; discovery must look there too.
