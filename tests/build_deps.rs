@@ -687,3 +687,46 @@ fn doctor_ignores_store_only_bin_collisions() {
         stdout(&prefer)
     );
 }
+
+/// The announce line says what an install *implies* before the first fetch: missing (or
+/// drifted) build deps that will realize along the way.
+#[test]
+fn install_announces_implied_build_deps_up_front() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let tome = TempDir::new().unwrap();
+    let tome_path = tome.path();
+    let runes = tome_path.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome_path.join("tome.rn"),
+        "export const tome = {\n  name: 'announcetome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("tooldep.rn"),
+        "export const package = {\n  name: 'tooldep'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'tooldep\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'tooldep')\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("app.rn"),
+        "export const package = {\n  name: 'app'\n  version: '0.1.0'\n  deps: { build: { default: ['tooldep'] }, runtime: [] }\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'app\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'app')\n}\n",
+    )
+    .unwrap();
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome_path.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add announcetome",
+    );
+
+    let install = run(root, &["install", "app"]);
+    assert_success(&install, "install app");
+    let combined = format!("{}{}", stdout(&install), stderr(&install));
+    assert!(
+        combined.contains("build dep to realize: tooldep"),
+        "install must announce the implied build dep: {combined}"
+    );
+}

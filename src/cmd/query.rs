@@ -199,11 +199,31 @@ pub fn upgrade(args: UpgradeArgs) -> Result<()> {
         ));
         names.push(new);
     }
-    progress::note(&format!(
+    let mut announce = format!(
         "upgrading {} package{}…",
         progress::strong(&names.len().to_string()),
         if names.len() == 1 { "" } else { "s" }
-    ));
+    );
+    // Say what the upgrade *implies*, not just what was asked: missing or drifted build
+    // deps realize along the way, and an innocuous one-package upgrade can mean an llvm
+    // rebuild. Best-effort — a failed estimate never blocks the upgrade.
+    if let Ok(extra) = install::estimate_extra_realizations(&names)
+        && !extra.is_empty()
+    {
+        let shown: Vec<&str> = extra.iter().take(6).map(String::as_str).collect();
+        let ellipsis = if extra.len() > shown.len() {
+            ", …"
+        } else {
+            ""
+        };
+        announce.push_str(&progress::faint(&format!(
+            " (+ {} build dep{} to realize: {}{ellipsis})",
+            extra.len(),
+            if extra.len() == 1 { "" } else { "s" },
+            shown.join(", ")
+        )));
+    }
+    progress::note(&announce);
     install::upgrade_packages(&names)
 }
 
