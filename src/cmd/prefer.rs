@@ -56,7 +56,9 @@ fn list() -> Result<()> {
 
     let mut contested: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let states = install::installed_states()?;
-    for state in &states {
+    // Only the linked set can contest: store-only packages never reach a generation.
+    let linked = install::linked_set(&states);
+    for state in states.iter().filter(|state| linked.contains(&state.name)) {
         for bin_name in state.bins.keys() {
             contested
                 .entry(bin_name.clone())

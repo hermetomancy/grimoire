@@ -188,13 +188,16 @@ fn check_state_generation_divergence() -> Result<usize> {
     Ok(0)
 }
 
-/// Two installed packages claiming the same bin name without a `grm prefer` choice will fail
-/// the next generation rebuild; surface it before that happens.
+/// Two *linked* packages claiming the same bin name without a `grm prefer` choice will fail
+/// the next generation rebuild; surface it before that happens. Store-only packages (cached
+/// build deps) never link, so their bins cannot contest anything — rust-stage0 shipping
+/// `rustc` beside linked rust is by design, not a problem.
 fn check_duplicate_bins() -> Result<usize> {
     let states = install::installed_states()?;
+    let linked = install::linked_set(&states);
     let preferences = Preferences::load().unwrap_or_default();
     let mut owners: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for state in &states {
+    for state in states.iter().filter(|state| linked.contains(&state.name)) {
         for bin in state.bins.keys() {
             owners.entry(bin).or_default().push(&state.name);
         }
