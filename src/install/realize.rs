@@ -153,6 +153,31 @@ pub(crate) fn install_store_only(
     let metadata = PackageMetadata::from_value(nuon_io::parse_nuon(&metadata_text)?, true)?;
     validate_target(&metadata, &paths::target_triple())?;
 
+    // Conflicts gate linked installs only: store-only packages (build deps, tome-build
+    // products) never enter the environment, so coexistence in the store is fine. The check
+    // is symmetric, and packages this one replaces are exempt — a replacer routinely
+    // conflicts with what it supersedes, and migration removes it in the same transaction.
+    let linked = matches!(
+        origin,
+        InstallOrigin::Prebuilt | InstallOrigin::Source | InstallOrigin::LocalArchive
+    );
+    if linked {
+        let states = installed_states()?;
+        if let Some(conflict) = states.iter().find(|state| {
+            state.name != metadata.name
+                && !metadata.replaces.contains(&state.name)
+                && (metadata.conflicts.contains(&state.name)
+                    || state.conflicts.contains(&metadata.name))
+        }) {
+            bail!(
+                "cannot install `{}`: it conflicts with installed `{}`; remove `{}` first",
+                metadata.name,
+                conflict.name,
+                conflict.name
+            );
+        }
+    }
+
     let root = paths::install_root()?;
     let (package_dir, store_hash) = resolve_store_dir(&metadata, expected_store_hash)?;
 
@@ -189,6 +214,32 @@ pub(crate) fn install_store_only(
     tx.commit();
     if let Some(replaced) = replaced {
         let _ = fs::remove_dir_all(replaced);
+    }
+
+    // Supersession: remove every installed package this one replaces, in the same command,
+    // carrying its requested/held intent onto the replacement so a rename never silently
+    // demotes or unpins anything. Each removal is its own committed transaction; orphaned
+    // deps of the replaced package are swept immediately. Store-only installs skip this —
+    // a cached build dep must not mutate the user's environment.
+    if linked {
+        for old in &metadata.replaces {
+            if old == &metadata.name {
+                continue;
+            }
+            let installed_old = installed_states()?.into_iter().find(|s| &s.name == old);
+            let Some(old_state) = installed_old else {
+                continue;
+            };
+            report(&format!("{} replaces {old}; removing {old}", metadata.name));
+            let removed = remove_one(old)?;
+            if old_state.requested || removed.requested {
+                set_requested(&metadata.name, true, false)?;
+            }
+            if old_state.held || removed.held {
+                set_hold(&metadata.name, true, false)?;
+            }
+            sweep_orphans(removed.runtime_deps)?;
+        }
     }
 
     report(&format!(
@@ -402,6 +453,9 @@ pub(crate) fn write_state(
         provides: metadata.provides.clone(),
         libs: metadata.libs.clone(),
         notes: metadata.notes.clone(),
+        upstream_version: metadata.upstream_version.clone(),
+        conflicts: metadata.conflicts.clone(),
+        replaces: metadata.replaces.clone(),
     };
 
     // Capture the prior state so a later failure can restore it.

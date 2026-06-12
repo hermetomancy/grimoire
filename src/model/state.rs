@@ -51,6 +51,15 @@ pub struct PackageState {
     /// Post-install notes carried over from the package metadata, replayed by `grm info`.
     #[serde(default)]
     pub notes: Vec<String>,
+    /// The real upstream version string when `version` was normalized to semver.
+    #[serde(default)]
+    pub upstream_version: Option<String>,
+    /// Installed packages this one cannot coexist with (from the package metadata).
+    #[serde(default)]
+    pub conflicts: Vec<String>,
+    /// Package names this one supersedes (from the package metadata).
+    #[serde(default)]
+    pub replaces: Vec<String>,
 }
 
 impl PackageState {
@@ -78,6 +87,9 @@ impl PackageState {
         let provides = optional_string_list(&record, "provides")?;
         let libs = optional_string_list(&record, "libs")?;
         let notes = optional_string_list(&record, "notes")?;
+        let upstream_version = optional_string(&record, "upstream_version")?;
+        let conflicts = optional_string_list(&record, "conflicts")?;
+        let replaces = optional_string_list(&record, "replaces")?;
 
         Ok(Self {
             name,
@@ -95,6 +107,9 @@ impl PackageState {
             provides,
             libs,
             notes,
+            upstream_version,
+            conflicts,
+            replaces,
         })
     }
 
@@ -135,6 +150,11 @@ impl PackageState {
         record.push("provides", string_list_value(&self.provides));
         record.push("libs", string_list_value(&self.libs));
         record.push("notes", string_list_value(&self.notes));
+        if let Some(upstream) = &self.upstream_version {
+            record.push("upstream_version", Value::string(upstream, Span::unknown()));
+        }
+        record.push("conflicts", string_list_value(&self.conflicts));
+        record.push("replaces", string_list_value(&self.replaces));
         Value::record(record, Span::unknown())
     }
 }

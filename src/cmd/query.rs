@@ -144,18 +144,76 @@ pub fn upgrade(args: UpgradeArgs) -> Result<()> {
 
     let to_upgrade = collect_upgrades(&targets, &installed, &held, explicit, args.dry_run)?;
 
-    if to_upgrade.is_empty() {
+    // Rename discovery (bare upgrades only): a package stops receiving versions under its
+    // own name when the catalog superseded it via `replaces`. Installing the replacer
+    // performs the migration — the realize path removes the replaced package and carries
+    // its requested/held intent. Held packages are respected like any other bare target.
+    let upgrading: std::collections::HashSet<&String> =
+        to_upgrade.iter().map(|(name, _, _)| name).collect();
+    let renames: Vec<(String, String)> = if explicit {
+        Vec::new()
+    } else {
+        let replacements = catalog_replacements()?;
+        targets
+            .iter()
+            .filter(|name| !held.get(*name).copied().unwrap_or(false))
+            .filter(|name| !upgrading.contains(*name))
+            .filter_map(|old| {
+                replacements
+                    .get(old)
+                    .filter(|new| *new != old && !installed.contains_key(*new))
+                    .map(|new| (old.clone(), new.clone()))
+            })
+            .collect()
+    };
+
+    if to_upgrade.is_empty() && renames.is_empty() {
         return Ok(());
     }
 
     if args.dry_run {
         print_upgrade_plan(&to_upgrade);
+        for (old, new) in &renames {
+            println!("  ~ {old} → {new} (replaced)");
+        }
         return Ok(());
     }
 
-    let names: Vec<String> = to_upgrade.into_iter().map(|(name, _, _)| name).collect();
+    let mut names: Vec<String> = to_upgrade.into_iter().map(|(name, _, _)| name).collect();
+    for (old, new) in renames {
+        progress::report(&format!("{new} replaces {old}"));
+        names.push(new);
+    }
     progress::status(&format!("upgrading {} package(s)…", names.len()));
     install::upgrade_packages(&names)
+}
+
+/// The catalog's supersessions: replaced name → replacer, harvested from every tome's runes
+/// and index entries. First writer wins on conflicting claims (tomes are iterated in
+/// configuration order), matching candidate resolution.
+fn catalog_replacements() -> Result<BTreeMap<String, String>> {
+    let mut map: BTreeMap<String, String> = BTreeMap::new();
+    for pkg in tome_packages()? {
+        for old in &pkg.metadata.replaces {
+            map.entry(old.clone())
+                .or_insert_with(|| pkg.metadata.name.clone());
+        }
+    }
+    let target = paths::target_triple();
+    for tome in tome::load_tomes()? {
+        let Some((_, index)) = tome::package_index(&tome)? else {
+            continue;
+        };
+        for (_, entry) in index.entries {
+            if entry.target != target {
+                continue;
+            }
+            for old in entry.replaces {
+                map.entry(old).or_insert_with(|| entry.name.clone());
+            }
+        }
+    }
+    Ok(map)
 }
 
 fn collect_upgrades(
@@ -256,6 +314,9 @@ fn print_installed(state: &PackageState) {
     println!("installed:");
     println!("  name: {}", state.name);
     println!("  version: {}", state.version);
+    if let Some(upstream) = &state.upstream_version {
+        println!("  upstream version: {upstream}");
+    }
     if let Some(target) = &state.target {
         println!("  target: {target}");
     }
@@ -278,6 +339,9 @@ fn print_available(package: &TomePackage) {
     println!("available:");
     println!("  name: {}", package.metadata.name);
     println!("  version: {}", package.metadata.version);
+    if let Some(upstream) = &package.metadata.upstream_version {
+        println!("  upstream version: {upstream}");
+    }
     println!("  tome: {}", package.tome);
     println!("  rune: {}", package.rune.display());
     if let Some(summary) = &package.metadata.summary {

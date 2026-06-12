@@ -34,6 +34,12 @@ pub struct IndexEntry {
     /// Library base names (e.g. "foo" for libfoo.so) discovered at build time.
     #[serde(default)]
     pub libs: Vec<String>,
+    /// Installed packages this one cannot coexist with (mirrors the rune's `conflicts`).
+    #[serde(default)]
+    pub conflicts: Vec<String>,
+    /// Package names this one supersedes (mirrors the rune's `replaces`).
+    #[serde(default)]
+    pub replaces: Vec<String>,
 }
 
 impl PackageIndex {
@@ -121,6 +127,8 @@ impl IndexEntry {
 
         let provides = optional_string_list(val, "provides")?;
         let libs = optional_string_list(val, "libs")?;
+        let conflicts = optional_string_list(val, "conflicts")?;
+        let replaces = optional_string_list(val, "replaces")?;
 
         Ok(Self {
             name,
@@ -131,6 +139,8 @@ impl IndexEntry {
             runtime_deps,
             provides,
             libs,
+            conflicts,
+            replaces,
         })
     }
 
@@ -147,6 +157,8 @@ impl IndexEntry {
         record.push("runtime_deps", dependency_list_value(&self.runtime_deps));
         record.push("provides", string_list_value(&self.provides));
         record.push("libs", string_list_value(&self.libs));
+        record.push("conflicts", string_list_value(&self.conflicts));
+        record.push("replaces", string_list_value(&self.replaces));
         Value::record(record, Span::unknown())
     }
 }
