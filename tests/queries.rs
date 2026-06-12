@@ -520,3 +520,45 @@ fn completions_and_man_render_from_cli_definition() {
         );
     }
 }
+
+#[test]
+fn rune_outside_the_command_subset_fails_at_query_time() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    // `str join` is not in the rune command subset. With the bare core-language parser it
+    // reads as an innocent external command and only explodes at build time — after build
+    // deps were fetched and built. Const extraction now parses with the full rune command
+    // context, so the violation surfaces at `grm info`.
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    let runes = tome.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'subsettome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("badpkg.rn"),
+        "export const package = {\n  name: 'badpkg'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  let x = ([\"a\" \"b\"] | str join \"-\")\n  mkdir ($ctx.package_dir | path join 'bin')\n}\n",
+    )
+    .unwrap();
+
+    // The violation surfaces at the earliest gate: adding the tome validates every rune
+    // with the full command set, so the bad rune never enters the catalog at all.
+    let add = run(
+        root,
+        &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+    );
+    assert!(
+        !add.status.success(),
+        "tome add must reject a rune outside the command subset: {}",
+        stdout(&add)
+    );
+    assert!(
+        stderr(&add).contains("could not parse") && stderr(&add).contains("badpkg.rn"),
+        "the failure must be a parse error naming the rune: {}",
+        stderr(&add)
+    );
+}

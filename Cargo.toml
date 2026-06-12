@@ -56,7 +56,9 @@ tempfile = "3"
 terminal_size = "0.4"
 ureq = "2"
 walkdir = "2"
-xz2 = "0.1"
+# `static` builds the vendored liblzma instead of linking the host one via pkg-config —
+# a host-dependency leak, and a blocker for packaging grimoire itself.
+xz2 = { version = "0.1", features = ["static"] }
 zstd = "0.13"
 
 [dev-dependencies]

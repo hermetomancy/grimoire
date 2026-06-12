@@ -23,7 +23,13 @@ use super::*;
 
 pub(crate) fn exported_const(path: &Path, name: &str) -> Result<Value> {
     let source = fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    let mut engine_state = nu_cmd_lang::create_default_context();
+    // Parse with the full rune command context — the same one the build runner uses — so a
+    // rune that strays outside the command subset (docs/rune-authoring.md) fails here, at
+    // `grm info`/`search`/plan time, instead of after its build dependencies have already
+    // been fetched and built. With the bare core context an unknown command like `str join`
+    // parses as an innocent external call and the violation only surfaces at build time.
+    let mut engine_state =
+        crate::nu::commands::add_rune_command_context(nu_cmd_lang::create_default_context());
     engine_state.add_env_var("PWD".to_string(), Value::test_string("."));
     let mut working_set = StateWorkingSet::new(&engine_state);
     nu_parser::parse(&mut working_set, path.to_str(), &source, false);

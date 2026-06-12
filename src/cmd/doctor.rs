@@ -70,6 +70,7 @@ pub fn doctor() -> Result<()> {
     problems += check_tomes()?;
     problems += check_packages()?;
     problems += check_duplicate_bins()?;
+    problems += check_generation_snapshots()?;
     problems += check_stale_backups()?;
     problems += check_source_build_readiness()?;
     check_lock(&mut problems)?;
@@ -202,6 +203,35 @@ fn check_duplicate_bins() -> Result<usize> {
 
 /// `.grimoire-old` directories are move-aside backups dropped on commit; one left behind
 /// means an interrupted transaction, and it silently holds disk space.
+/// A retained generation whose snapshot references missing store paths is a rollback trap:
+/// activation would restore state records for packages whose bits are gone. `grm clean`
+/// always protects retained generations' store paths, so this only happens after manual
+/// store surgery or an interrupted clean — flag it *before* a rollback discovers it.
+fn check_generation_snapshots() -> Result<usize> {
+    let mut problems = 0;
+    for generation in profile::list_generations()? {
+        let dir = profile::generation_dir(generation.id)?;
+        let Ok(Some(snapshot)) = profile::read_state_snapshot(&dir) else {
+            continue; // pre-snapshot generation or unreadable; other checks cover corruption
+        };
+        let missing: Vec<&str> = snapshot
+            .iter()
+            .filter(|state| !Path::new(&state.store_path).exists())
+            .map(|state| state.name.as_str())
+            .collect();
+        if !missing.is_empty() {
+            problems += 1;
+            eprintln!(
+                "grimoire: generation {} snapshot references missing store path(s) for {}; \
+                 rolling back to it would restore state for packages whose bits are gone",
+                generation.id,
+                missing.join(", ")
+            );
+        }
+    }
+    Ok(problems)
+}
+
 fn check_stale_backups() -> Result<usize> {
     let mut dirs = vec![paths::store_root()?];
     let cache = paths::install_root()?.join("cache");
