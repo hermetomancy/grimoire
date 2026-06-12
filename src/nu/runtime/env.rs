@@ -112,15 +112,20 @@ pub(crate) fn sandbox_env_vars(
         xdg_data.display().to_string(),
     );
     set_env_value(&mut context, "GRIMOIRE_SANDBOX", "managed-env".to_string());
+    // CMake bakes the Homebrew/MacPorts prefixes into its *built-in* platform search paths
+    // on macOS, which no amount of env scrubbing reaches — only the ignore lists do. The
+    // *environment* variants are parsed with the platform path separator (`:` on POSIX,
+    // unlike the `;`-separated CMake variables); a `;` here silently degrades to one
+    // nonexistent path and the ignore list does nothing (how LLVM 22 found Homebrew zstd).
     set_env_value(
         &mut context,
         "CMAKE_IGNORE_PREFIX_PATH",
-        "/opt/homebrew;/usr/local;/opt/local".to_string(),
+        "/opt/homebrew:/usr/local:/opt/local".to_string(),
     );
     set_env_value(
         &mut context,
         "CMAKE_SYSTEM_IGNORE_PREFIX_PATH",
-        "/opt/homebrew;/usr/local;/opt/local".to_string(),
+        "/opt/homebrew:/usr/local:/opt/local".to_string(),
     );
 
     for key in SCRUBBED_DISCOVERY_ENV {
@@ -301,9 +306,15 @@ mod tests {
         );
         assert_eq!(env_value(&env.context, "PYTHONPATH"), Some(""));
         assert_eq!(env_value(&env.context, "HOMEBREW_PREFIX"), Some(""));
-        assert!(
-            env_value(&env.context, "CMAKE_IGNORE_PREFIX_PATH")
-                .is_some_and(|value| value.contains("/opt/homebrew"))
+        // The env-variable form is POSIX-colon separated; a `;` would make CMake treat the
+        // whole list as one nonexistent prefix and ignore nothing.
+        assert_eq!(
+            env_value(&env.context, "CMAKE_IGNORE_PREFIX_PATH"),
+            Some("/opt/homebrew:/usr/local:/opt/local")
+        );
+        assert_eq!(
+            env_value(&env.context, "CMAKE_SYSTEM_IGNORE_PREFIX_PATH"),
+            Some("/opt/homebrew:/usr/local:/opt/local")
         );
         assert_eq!(
             env_value(&env.process, "PKG_CONFIG_PATH"),
