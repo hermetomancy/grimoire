@@ -505,22 +505,25 @@ fn hung_binhost_index_fetch_times_out_quickly() {
         "tome add hungtome",
     );
 
-    // The index is fetched lazily at resolution time, not by `tome update`.
+    // The index is fetched lazily at resolution time, not by `tome update`. An
+    // unreachable binhost times out within its ~5s budget, warns loudly, and degrades to
+    // source-only resolution instead of failing the command.
     let started = std::time::Instant::now();
     let install = run(root, &["install", "placeholder", "--dry-run"]);
     let elapsed = started.elapsed();
     assert!(
         elapsed < std::time::Duration::from_secs(15),
-        "index fetch against a hung binhost must fail within its budget, took {elapsed:?}"
+        "index fetch against a hung binhost must give up within its budget, took {elapsed:?}"
+    );
+    assert_success(&install, "resolution degrades to source-only");
+    let combined = format!("{}{}", stdout(&install), stderr(&install));
+    assert!(
+        combined.contains("binhost unreachable"),
+        "the degrade must warn loudly: {combined}"
     );
     assert!(
-        !install.status.success(),
-        "a hung binhost is an error, not a hang: {}",
+        stdout(&install).contains("source rune"),
+        "the plan should fall back to the source rune: {}",
         stdout(&install)
-    );
-    assert!(
-        stderr(&install).contains(&format!("{base}/index.nuon")),
-        "the error should name the index URL: {}",
-        stderr(&install)
     );
 }

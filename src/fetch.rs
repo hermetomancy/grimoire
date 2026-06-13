@@ -3,7 +3,7 @@
 //! Everything funnels through [`fetch_verified`], the single download-and-trust gate: an artifact
 //! is fetched (over HTTP with timeouts and bounded retries, or copied for local/`file://` paths)
 //! into a content-addressed cache and checked against its expected hash *before* it is returned
-//! (AGENTS.md §10.1). [`http_get_text`] fetches an index document, treating a 404 as "no index".
+//! (AGENTS.md §10.1). [`http_get_index`] fetches an index document, treating a 404 as "no index".
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::{
@@ -112,23 +112,33 @@ pub fn fetch_verified(
     Ok(cached)
 }
 
-/// Fetches a text document (a package index) over `https`. Returns `None` on a 404 so a tome
+/// Fetches a package index over `https`. Returns [`IndexFetch::Missing`] on a 404 so a tome
 /// whose host has not published an index yet is treated as offering no binaries, mirroring a
 /// missing local `index.nuon`. The index is the trust root: archives it lists are checksum-
 /// verified against it, so the document itself is fetched over the transport without a hash —
 /// which is exactly why plain `http` is refused (a MitM index controls every archive hash).
 /// Loopback addresses are exempt for local development and tests.
-pub fn http_get_text(url: &str) -> Result<Option<String>> {
+/// The three outcomes of an index fetch a caller may treat differently: a document, a
+/// definitive "not published" (404), or an unreachable host — which resolution degrades to
+/// source-only with a loud warning, while policy violations (plain http) stay hard errors.
+pub enum IndexFetch {
+    Document(String),
+    Missing,
+    Unreachable(anyhow::Error),
+}
+
+pub fn http_get_index(url: &str) -> Result<IndexFetch> {
     require_https_for_index(url)?;
     status(&format!("fetching index ({url})"));
     match http_get_bounded(http_agent(), url, Some(INDEX_TIMEOUT)) {
-        Ok(response) => Ok(Some(
-            response
-                .into_string()
-                .with_context(|| format!("read index body from {url}"))?,
-        )),
-        Err(err) if matches!(*err, ureq::Error::Status(404, _)) => Ok(None),
-        Err(err) => Err(http_error(url, *err)),
+        Ok(response) => match response.into_string() {
+            Ok(text) => Ok(IndexFetch::Document(text)),
+            Err(err) => Ok(IndexFetch::Unreachable(anyhow!(
+                "read index body from {url}: {err}"
+            ))),
+        },
+        Err(err) if matches!(*err, ureq::Error::Status(404, _)) => Ok(IndexFetch::Missing),
+        Err(err) => Ok(IndexFetch::Unreachable(http_error(url, *err))),
     }
 }
 

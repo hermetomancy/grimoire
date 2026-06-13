@@ -88,7 +88,41 @@ pub(crate) fn load_raw_index(cache: &Path, packages: &TomePackages) -> Result<Op
     if is_http_repo(&packages.repo) {
         let base = packages.repo.trim_end_matches('/');
         let index_url = format!("{base}/{}", packages.index);
-        crate::fetch::http_get_text(&index_url)
+        // One fetch per URL per process: resolution consults the index several times in
+        // a single run, and the answer (document, missing, or unreachable) is the same
+        // each time — an unreachable binhost should cost one timeout and one warning,
+        // not one per query.
+        static INDEX_MEMO: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::HashMap<String, Option<String>>>,
+        > = std::sync::OnceLock::new();
+        let memo = INDEX_MEMO.get_or_init(Default::default);
+        if let Some(cached) = memo
+            .lock()
+            .expect("index memo lock poisoned")
+            .get(&index_url)
+        {
+            return Ok(cached.clone());
+        }
+        let fetched = match crate::fetch::http_get_index(&index_url)? {
+            crate::fetch::IndexFetch::Document(text) => Some(text),
+            crate::fetch::IndexFetch::Missing => None,
+            // Degrade, loudly: an unreachable binhost means no binary substitutes this
+            // run — source builds still work, and refusing outright would let anyone who
+            // can *block* (not forge) the index take installs down entirely. The trade:
+            // a blocker can steer users from verified binaries to source builds; the
+            // warning is the tell.
+            crate::fetch::IndexFetch::Unreachable(err) => {
+                crate::util::progress::warn(&format!(
+                    "binhost unreachable ({err:#}); continuing without its binary \
+                     packages — affected installs build from source"
+                ));
+                None
+            }
+        };
+        memo.lock()
+            .expect("index memo lock poisoned")
+            .insert(index_url, fetched.clone());
+        Ok(fetched)
     } else {
         let root = packages_repo_root(cache, packages);
         let index_path = root.join(&packages.index);
