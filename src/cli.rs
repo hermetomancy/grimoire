@@ -236,6 +236,10 @@ pub struct ListArgs {
     /// linked environment.
     #[arg(short, long)]
     pub all: bool,
+    /// List only packages you explicitly installed (the requested roots), excluding
+    /// dependencies pulled in to satisfy them. This is the set `grm install` would rebuild.
+    #[arg(short, long, conflicts_with = "all")]
+    pub explicit: bool,
 }
 
 #[derive(Debug, Args)]

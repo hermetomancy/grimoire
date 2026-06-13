@@ -134,6 +134,28 @@ fn example_tome_runtime_dependency() {
         "greeter output: {}",
         stdout(&greeter)
     );
+
+    // `--explicit` lists only the requested root, not the pulled-in runtime dep: the
+    // default list shows both greeter and hello; --explicit shows greeter alone.
+    let explicit = stdout(&run(root, &["list", "--explicit"]));
+    assert!(
+        explicit.contains("greeter"),
+        "--explicit must list the requested root: {explicit}"
+    );
+    assert!(
+        !explicit.contains("hello"),
+        "--explicit must hide the dependency-only hello: {explicit}"
+    );
+    // The short flag is equivalent, and the flag conflicts with --all.
+    assert_eq!(
+        stdout(&run(root, &["list", "-e"])),
+        explicit,
+        "-e == --explicit"
+    );
+    assert!(
+        !run(root, &["list", "--explicit", "--all"]).status.success(),
+        "--explicit and --all are mutually exclusive"
+    );
 }
 
 #[test]

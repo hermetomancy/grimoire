@@ -25,15 +25,25 @@ pub fn list(args: crate::cli::ListArgs) -> Result<()> {
     }
     let linked = linked_set(&states);
     // The environment is what `list` answers for; store-only packages are cache and only
-    // appear under `--all`.
-    let hidden = states
-        .iter()
-        .filter(|state| !linked.contains(&state.name))
-        .count();
+    // appear under `--all`. `--explicit` narrows the other way — to just the requested
+    // roots, the answer to "what did I actually ask for" (the set `grm install` rebuilds).
     let shown: Vec<_> = states
         .iter()
-        .filter(|state| args.all || linked.contains(&state.name))
+        .filter(|state| {
+            if args.explicit {
+                state.requested
+            } else {
+                args.all || linked.contains(&state.name)
+            }
+        })
         .collect();
+    if shown.is_empty() {
+        // Only reachable with `--explicit` and nothing requested; the default and `--all`
+        // always include the (non-empty) linked set.
+        println!("no explicitly-installed packages");
+        return Ok(());
+    }
+    let hidden = states.len() - shown.len();
     let (total, mut held, mut store_only) = (shown.len(), 0usize, 0usize);
     let rows = shown
         .iter()
@@ -62,17 +72,24 @@ pub fn list(args: crate::cli::ListArgs) -> Result<()> {
     // A terminal gets a closing summary; piped output stays rows-only for scripts.
     if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
         let mut summary = format!("{total} package{}", if total == 1 { "" } else { "s" });
-        let linked_count = total - held - store_only;
-        let mut parts = vec![format!("{linked_count} linked")];
-        if held > 0 {
-            parts.push(format!("{held} held"));
-        }
-        if store_only > 0 {
-            parts.push(format!("{store_only} store-only"));
-        }
-        summary.push_str(&format!(" — {}", parts.join(", ")));
-        if !args.all && hidden > 0 {
-            summary.push_str(&format!(", {hidden} store-only hidden (--all)"));
+        if args.explicit {
+            summary.push_str(" explicitly installed");
+            if held > 0 {
+                summary.push_str(&format!(" — {held} held"));
+            }
+        } else {
+            let linked_count = total - held - store_only;
+            let mut parts = vec![format!("{linked_count} linked")];
+            if held > 0 {
+                parts.push(format!("{held} held"));
+            }
+            if store_only > 0 {
+                parts.push(format!("{store_only} store-only"));
+            }
+            summary.push_str(&format!(" — {}", parts.join(", ")));
+            if !args.all && hidden > 0 {
+                summary.push_str(&format!(", {hidden} store-only hidden (--all)"));
+            }
         }
         println!("{}", progress::faint(&summary));
     }
