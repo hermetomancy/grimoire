@@ -164,6 +164,9 @@ fn managed_boundary_id_from(bin: &Path) -> Option<String> {
         return None;
     }
     let cc_ver = tool_version_string(&cc, "cc").ok()?;
+    if cc_ver.starts_with("bin:") {
+        return None; // a banner-less cc cannot define a stable identity; use the PATH probe
+    }
     let mut parts = vec![format!("cc:{cc_ver}")];
     for name in OPTIONAL_TOOLS {
         if !is_binary_affecting_tool(name) {
@@ -173,7 +176,14 @@ fn managed_boundary_id_from(bin: &Path) -> Option<String> {
         if !path.is_file() {
             continue;
         }
-        if let Ok(ver) = tool_version_string(&path, name) {
+        // Banner or nothing: the `bin:` byte-hash fallback must never enter the managed
+        // identity. The wrappers are scripts whose bytes embed the underlying toolchain's
+        // store path, so hashing them makes the identity a function of the addresses it
+        // itself determines — every rebuild would shift the identity and re-address the
+        // world again, forever.
+        if let Ok(ver) = tool_version_string(&path, name)
+            && !ver.starts_with("bin:")
+        {
             parts.push(format!("{name}:{ver}"));
         }
     }
@@ -226,25 +236,28 @@ fn macos_sdk_version() -> Option<String> {
     xcrun_show("--show-sdk-version")
 }
 
-/// Runs `tool --version` (or `tool -version` for macOS tools) and returns the first line of stdout,
-/// trimmed. Falls back to hashing the binary prefix if the tool does not produce version output.
+/// Runs `tool --version` (trying `-version` first for the macOS-style tools, since Apple's
+/// originals only speak that) and returns the first line of stdout, trimmed. Falls back to
+/// hashing the binary prefix if no flag produces version output.
 fn tool_version_string(path: &Path, name: &str) -> Result<String> {
-    let flag = if name == "install_name_tool" || name == "lipo" {
-        "-version"
+    // The managed wrappers delegate to llvm tools, which speak GNU --version even where
+    // Apple's original only speaks -version — try both before giving up on a banner.
+    let flags: &[&str] = if name == "install_name_tool" || name == "lipo" {
+        &["-version", "--version"]
     } else {
-        "--version"
+        &["--version"]
     };
 
-    let output = std::process::Command::new(path)
-        .arg(flag)
-        .output()
-        .with_context(|| format!("spawn {} {} for version", path.display(), flag))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let first_line = stdout.lines().next().unwrap_or("").trim();
-
-    if !first_line.is_empty() {
-        return Ok(first_line.to_string());
+    for flag in flags {
+        let output = std::process::Command::new(path)
+            .arg(flag)
+            .output()
+            .with_context(|| format!("spawn {} {} for version", path.display(), flag))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let first_line = stdout.lines().next().unwrap_or("").trim();
+        if !first_line.is_empty() {
+            return Ok(first_line.to_string());
+        }
     }
 
     // Some tools (e.g. ancient `ld`) don't support --version. Fall back to a binary prefix hash
@@ -431,12 +444,20 @@ mod tests {
         fake_wrapper(bin, "as", "llvm-as 22.1.7");
         // Not binary-affecting: present in the wrapper set but must not perturb the id.
         fake_wrapper(bin, "strip", "llvm-strip 22.1.7");
+        // Banner-less: a tool that answers no version flag must be skipped, not byte-hashed —
+        // wrapper scripts embed store paths, and hashing them makes the identity
+        // self-referential (re-addresses the world on every rebuild, forever).
+        fake_wrapper(bin, "install_name_tool", "");
 
         let id = managed_boundary_id_from(bin).unwrap();
         assert!(id.contains("cc:clang version 22.1.7"), "{id}");
         assert!(id.contains("ld:ld64-1234.5"), "{id}");
         assert!(id.contains("as:llvm-as 22.1.7"), "{id}");
         assert!(!id.contains("strip"), "{id}");
+        assert!(
+            !id.contains("install_name_tool") && !id.contains("bin:"),
+            "banner-less tools must not enter the identity: {id}"
+        );
 
         // Identical wrapper sets produce identical identities.
         assert_eq!(id, managed_boundary_id_from(bin).unwrap());
