@@ -473,3 +473,54 @@ fn tome_news_surfaces_once_after_updates() {
         "seen marker must be recorded in tome state: {state}"
     );
 }
+
+/// An unreachable or hung binhost must fail the index fetch within its ~5s budget instead
+/// of holding the command for connect-timeout-times-retries.
+#[test]
+fn hung_binhost_index_fetch_times_out_quickly() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let tome = TempDir::new().unwrap();
+    let tome_path = tome.path();
+    fs::create_dir_all(tome_path.join("runes")).unwrap();
+    fs::write(
+        tome_path.join("runes").join("placeholder.rn"),
+        "export const package = {\n  name: 'placeholder'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n}\n",
+    )
+    .unwrap();
+    let base = serve_black_hole();
+    fs::write(
+        tome_path.join("tome.rn"),
+        format!(
+            "export const tome = {{\n  name: 'hungtome'\n  packages: {{ repo: '{base}', format: 'http', index: 'index.nuon' }}\n}}\n"
+        ),
+    )
+    .unwrap();
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome_path.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add hungtome",
+    );
+
+    // The index is fetched lazily at resolution time, not by `tome update`.
+    let started = std::time::Instant::now();
+    let install = run(root, &["install", "placeholder", "--dry-run"]);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "index fetch against a hung binhost must fail within its budget, took {elapsed:?}"
+    );
+    assert!(
+        !install.status.success(),
+        "a hung binhost is an error, not a hang: {}",
+        stdout(&install)
+    );
+    assert!(
+        stderr(&install).contains(&format!("{base}/index.nuon")),
+        "the error should name the index URL: {}",
+        stderr(&install)
+    );
+}

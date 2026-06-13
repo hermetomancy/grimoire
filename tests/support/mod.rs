@@ -439,3 +439,17 @@ pub fn solo_index(
         "{{\n  format: 2,\n    entries: {{\n    \"{store_hash}\": {{ name: \"{name}\", version: \"{version}\", target: \"{triple}\", archive: \"{archive}\", archive_hash: \"{archive_hash}\", runtime_deps: {runtime_deps}}}\n  }}\n}}\n"
     )
 }
+
+/// A server that accepts connections and never answers — an unreachable/hung binhost.
+/// Returns the base URL; the listener thread holds every connection open silently.
+pub fn serve_black_hole() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind black-hole server");
+    let port = listener.local_addr().expect("local addr").port();
+    thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming().flatten() {
+            held.push(stream); // keep the connection open, say nothing
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
