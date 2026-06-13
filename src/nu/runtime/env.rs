@@ -112,6 +112,26 @@ pub(crate) fn sandbox_env_vars(
         xdg_data.display().to_string(),
     );
     set_env_value(&mut context, "GRIMOIRE_SANDBOX", "managed-env".to_string());
+
+    // rustc bakes each source file's absolute path into panic/backtrace metadata, so an
+    // unremapped Rust build smears this build's ephemeral work dir (the crate source and
+    // the per-build cargo registry under HOME/.cargo) through the output binary —
+    // leaking the builder's temp path and making archive bytes differ every build even
+    // though the input-addressed store hash does not. Remap the work dir to a stable
+    // sentinel so two builders of the same rune produce byte-identical binaries. rustc
+    // embeds the *canonical* path (`/private/var/...` on macOS, where `/var` is a
+    // symlink), so remap the canonicalized form; a rune that needs its own RUSTFLAGS sets
+    // them inside `build` and overrides this. The flag is codegen-cosmetic — it rewrites
+    // recorded paths only, never affecting the compiled semantics.
+    let canonical_work = fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+    set_env_value(
+        &mut context,
+        "RUSTFLAGS",
+        format!(
+            "--remap-path-prefix={}=/grimoire-build",
+            canonical_work.display()
+        ),
+    );
     // CMake bakes the Homebrew/MacPorts prefixes into its *built-in* platform search paths
     // on macOS, which no amount of env scrubbing reaches — only the ignore lists do. The
     // *environment* variants are parsed with the platform path separator (`:` on POSIX,
