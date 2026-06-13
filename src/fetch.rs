@@ -29,6 +29,11 @@ const HTTP_MAX_ATTEMPTS: u32 = 3;
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Per-read/write budget once connected, generous enough for large archives on a slow link.
 const HTTP_IO_TIMEOUT: Duration = Duration::from_secs(120);
+/// Overall budget for fetching a package index — a few-KB document that should answer
+/// immediately. An unreachable binhost fails the fetch in seconds instead of holding the
+/// command for connect-timeout-times-retries; the budget covers DNS, connect, and body,
+/// and retries only happen while it lasts.
+const INDEX_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A source artifact that has been fetched into the local cache and verified against its
 /// declared checksum. `path` points at the cached file the build context can consume.
@@ -116,7 +121,7 @@ pub fn fetch_verified(
 pub fn http_get_text(url: &str) -> Result<Option<String>> {
     require_https_for_index(url)?;
     status(&format!("fetching index ({url})"));
-    match http_get(http_agent(), url) {
+    match http_get_bounded(http_agent(), url, Some(INDEX_TIMEOUT)) {
         Ok(response) => Ok(Some(
             response
                 .into_string()
@@ -168,12 +173,33 @@ fn http_agent() -> &'static ureq::Agent {
 /// responses are retried up to [`HTTP_MAX_ATTEMPTS`] with a short linear backoff, since they are
 /// usually transient. A 4xx (including 404) returns immediately so callers can act on it.
 fn http_get(agent: &ureq::Agent, url: &str) -> Result<ureq::Response, Box<ureq::Error>> {
+    http_get_bounded(agent, url, None)
+}
+
+/// [`http_get`] with an optional overall wall-clock budget shared across all attempts. Each
+/// attempt's request timeout is clamped to the remaining budget (covering DNS and connect,
+/// which the agent's per-phase timeouts do not), and retries stop once the budget is spent.
+fn http_get_bounded(
+    agent: &ureq::Agent,
+    url: &str,
+    budget: Option<Duration>,
+) -> Result<ureq::Response, Box<ureq::Error>> {
+    let start = std::time::Instant::now();
     let mut attempt = 0;
     loop {
         attempt += 1;
-        match agent.get(url).call() {
+        let mut request = agent.get(url);
+        if let Some(budget) = budget {
+            let remaining = budget.saturating_sub(start.elapsed());
+            request = request.timeout(remaining.max(Duration::from_millis(100)));
+        }
+        match request.call() {
             Ok(response) => return Ok(response),
-            Err(err) if attempt < HTTP_MAX_ATTEMPTS && is_retryable(&err) => {
+            Err(err)
+                if attempt < HTTP_MAX_ATTEMPTS
+                    && is_retryable(&err)
+                    && budget.is_none_or(|budget| start.elapsed() < budget) =>
+            {
                 thread::sleep(Duration::from_millis(250 * u64::from(attempt)));
             }
             Err(err) => return Err(Box::new(err)),
