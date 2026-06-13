@@ -176,20 +176,39 @@ pub(crate) fn build_runes(
     Ok(())
 }
 
+/// Host path prefixes that must never appear in a store package's output: host
+/// package-manager trees and the build's own ephemeral staging dir.
+const IMPURE_PATTERNS: &[&str] = &[
+    "/usr/local/",
+    "/opt/homebrew/",
+    "/opt/local/",
+    "/nix/store/",
+    "/var/folders/",
+];
+
+/// Every impure pattern `bytes` contains, in `IMPURE_PATTERNS` order. Returns *all*
+/// matches, not the first: a benign hit (a `/usr/local/` string baked into some default)
+/// must never shadow a real one (the build's own `/var/folders/` temp dir smeared through
+/// a binary) in the same file. First-match-then-break once hid exactly that.
+fn impure_patterns_in(bytes: &[u8]) -> Vec<&'static str> {
+    IMPURE_PATTERNS
+        .iter()
+        .filter(|pattern| {
+            bytes
+                .windows(pattern.len())
+                .any(|window| window == pattern.as_bytes())
+        })
+        .copied()
+        .collect()
+}
+
 /// Post-build purity lint: scans every archive member for absolute host paths that should
-/// never be baked into a store package — host package-manager prefixes and macOS's ephemeral
-/// staging tree. A hit usually means the build linked a host library, baked a host tool
-/// path, or embedded its own temp directory instead of the final store prefix. Warns by
-/// default; `--strict` makes it fatal. The `.grimoire/` members (embedded rune source) are
-/// exempt — comments legitimately mention such paths.
+/// never be baked into a store package — host package-manager prefixes and the build's own
+/// ephemeral staging tree. A hit usually means the build linked a host library, baked a
+/// host tool path, or embedded its own temp directory instead of the final store prefix.
+/// Warns by default; `--strict` makes it fatal. The `.grimoire/` members (embedded rune
+/// source) are exempt — comments legitimately mention such paths.
 fn lint_archive_purity(archive: &Path, strict: bool) -> Result<()> {
-    const IMPURE: &[&str] = &[
-        "/usr/local/",
-        "/opt/homebrew/",
-        "/opt/local/",
-        "/nix/store/",
-        "/var/folders/",
-    ];
     let file = fs::File::open(archive)?;
     let decoder = zstd::stream::read::Decoder::new(file)?;
     let mut tar = tar::Archive::new(decoder);
@@ -203,16 +222,10 @@ fn lint_archive_purity(archive: &Path, strict: bool) -> Result<()> {
         let mut bytes = Vec::new();
         use std::io::Read;
         entry.read_to_end(&mut bytes)?;
-        for pattern in IMPURE {
-            if bytes
-                .windows(pattern.len())
-                .any(|window| window == pattern.as_bytes())
-            {
-                hits.push((path.clone(), pattern));
-                break;
-            }
+        for pattern in impure_patterns_in(&bytes) {
+            hits.push((path.clone(), pattern));
         }
-        if hits.len() >= 5 {
+        if hits.len() >= 8 {
             break;
         }
     }
@@ -576,4 +589,29 @@ pub(crate) fn rune_names_ordered(root: &Path) -> Result<Vec<String>> {
     }
 
     Ok(ordered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::impure_patterns_in;
+
+    #[test]
+    fn a_benign_match_does_not_shadow_a_real_one_in_the_same_file() {
+        // The exact shape that masked the bug: a nushell binary carrying both the benign
+        // XDG default string and the build's own temp dir.
+        let bytes = b"...XDG_DATA_DIRS /usr/local/share/:/usr/share/ ... \
+                      /var/folders/yk/T/.tmpLm8MUZ/work/.grimoire-home/.cargo/foo.rs ...";
+        let matched = impure_patterns_in(bytes);
+        assert!(matched.contains(&"/usr/local/"), "{matched:?}");
+        assert!(
+            matched.contains(&"/var/folders/"),
+            "the real leak must not be shadowed by the benign one: {matched:?}"
+        );
+    }
+
+    #[test]
+    fn a_remapped_clean_binary_reports_nothing() {
+        let bytes = b"/grimoire-build/.grimoire-home/.cargo/registry/src/foo-1.0/src/lib.rs";
+        assert!(impure_patterns_in(bytes).is_empty());
+    }
 }
