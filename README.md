@@ -77,7 +77,7 @@ grm search hello
 grm info hello
 grm install hello --dry-run   # the full plan: steps, build deps, migrations
 grm install hello
-grm ls                        # the linked environment; --all includes cached build deps
+grm ls                        # the linked environment; --all adds cached build deps, --explicit only your roots
 
 # Upgrade, hold, roll back
 grm upgrade
