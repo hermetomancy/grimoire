@@ -262,3 +262,15 @@ next to it — and the code probably wants a better name.
    build environment (`src/nu/runtime/`), or the rune command set (`src/nu/commands/`)
    updates the reference in the same commit. A stale field table is worse than none —
    authors trust it verbatim.
+5. **Keep the documentation set current with the change that touches it.** A change is not
+   done until every doc it affects is updated in the same commit (or commit series). The set:
+   - **CHANGELOG.md** — every notable change lands an entry under **Unreleased** as it merges
+     (it moves under a version heading at tag time).
+   - **TODO.md** — per §15.2.
+   - **docs/rune-authoring.md** — per §15.4.
+   - **README.md** — when a change alters the user-facing surface, the install/usage flow, or
+     the project's stated capabilities.
+   - **A tome or addendum catalog's `README.md`** (e.g. `tome-core/README.md`) — when a change
+     adds, renames, or alters the contract of a rune, capability, or addendum it documents.
+
+   A stale doc is worse than none; reviewers and authors trust them verbatim.
