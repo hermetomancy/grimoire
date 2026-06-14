@@ -39,7 +39,7 @@ const CORE_PACKAGES: &[&str] = &[
     "llvm",
     "clang",
     "cmake",
-    "python3",
+    "python3-minimal",
     "gmake",
     "toybox",
     "toolchain-wrappers",

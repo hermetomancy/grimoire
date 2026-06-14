@@ -30,6 +30,9 @@ heading when it is tagged.
 
 ### Changed
 
+- The managed core userland references `python3-minimal` (the stdlib-only build interpreter) rather
+  than `python3`: the build-PATH floor and `grm doctor`'s readiness check are updated to match the
+  tome split. The full `python3` is no longer a core package.
 - Linux musl builds retarget the compiler to musl. Once `musl` and `linux-headers` are installed,
   a musl-target build sets `--target=<arch>-linux-musl` plus a musl sysroot (`-isystem` for musl +
   kernel headers, `-B`/`-L` for musl's CRT and libc, `--rtlib=compiler-rt --unwindlib=none`), so
