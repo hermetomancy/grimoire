@@ -8,7 +8,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::{nu::nuon_io, util::paths, util::progress::report};
+use crate::{nu::nuon_io, util::paths, util::progress::warn};
 
 use super::*;
 
@@ -53,8 +53,8 @@ pub fn list_generations() -> Result<Vec<Generation>> {
                     generations.push(g);
                     changed = true;
                 }
-                Err(e) => report(&format!(
-                    "warning: could not read generation metadata {}: {e}",
+                Err(e) => warn(&format!(
+                    "could not read generation metadata {}: {e:#}",
                     gen_path.display()
                 )),
             }
@@ -64,9 +64,7 @@ pub fn list_generations() -> Result<Vec<Generation>> {
     generations.sort_by_key(|b| std::cmp::Reverse(b.id));
 
     if changed && let Err(e) = write_registry(&generations) {
-        report(&format!(
-            "warning: could not write generations registry: {e}"
-        ));
+        warn(&format!("could not write generations registry: {e:#}"));
     }
 
     Ok(generations)

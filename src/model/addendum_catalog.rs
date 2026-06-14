@@ -277,6 +277,12 @@ impl AddendumPatch {
                 let mut entry = Record::new();
                 entry.push("url", Value::string(&source.url, Span::unknown()));
                 entry.push("sha256", Value::string(&source.sha256, Span::unknown()));
+                // Mirror PackageMetadata's source serialization: a platform-scoped patch source
+                // must round-trip its glob, or the persisted manifest loses the constraint and
+                // the source is fetched on every platform.
+                if let Some(platform) = &source.platform {
+                    entry.push("platform", Value::string(platform, Span::unknown()));
+                }
                 out.push(name, Value::record(entry, Span::unknown()));
             }
             record.push("sources", Value::record(out, Span::unknown()));

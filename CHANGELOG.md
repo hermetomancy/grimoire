@@ -45,6 +45,14 @@ heading when it is tagged.
 
 ### Fixed
 
+- Addendum source patches round-trip their `platform` glob: a platform-scoped patch source no
+  longer loses its constraint when the addendum manifest is re-serialized.
+- Resolution surfaces a capability-index build failure (corrupt tome cache, unreadable index)
+  instead of swallowing it into an empty map and reporting a misleading "no version satisfies".
+- Diagnostics polish: registry/news/addendum warnings use the `warn` tier (not a hand-rolled
+  `warning:` prefix on the success tier) and print the full error context; a transient read
+  error while scanning a split group is surfaced rather than silently dropping a member; the
+  build-environment drift summary no longer drops a tool whose name prefixes another's.
 - State writes are now durable, not just atomic: `write_nuon` fsyncs the staged file before the
   rename and fsyncs the destination directory after it, and the generation-activation symlink
   flip and state-snapshot restore fsync their directory. Previously a crash right after an

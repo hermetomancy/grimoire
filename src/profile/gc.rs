@@ -135,7 +135,7 @@ pub(crate) fn prune_registry() -> Result<()> {
     if registry.len() != before
         && let Err(e) = write_registry(&registry)
     {
-        warn(&format!("could not write generations registry: {e}"));
+        warn(&format!("could not write generations registry: {e:#}"));
     }
     Ok(())
 }
