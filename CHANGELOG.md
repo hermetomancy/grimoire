@@ -45,6 +45,12 @@ heading when it is tagged.
 
 ### Fixed
 
+- Capability provider selection is now one shared function (`solve::select_provider`) called by
+  both the resolver and the closure walker, so the provider folded into a dependent's content
+  address is identical on both paths. The walker previously ignored the dependency's version
+  requirement when several providers were installed, so it could pick a different provider than
+  the resolver — a silent store-address divergence (§9.8) that demoted binary substitution and
+  produced phantom drift.
 - Tome manifests reject unknown fields: a `signer` key misplaced under `packages` (the form
   the parser never read) is now a loud error instead of a silently-unsigned tome. The signer
   set is declared at the manifest's top level as `signers: [...]`. The signing docs are
