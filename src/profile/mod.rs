@@ -260,6 +260,9 @@ fn switch_symlink(id: u64) -> Result<()> {
     std::os::unix::fs::symlink(&gen_dir, &tmp)
         .with_context(|| format!("stage current symlink -> {}", gen_dir.display()))?;
     fs::rename(&tmp, &current).with_context(|| format!("activate generation {id}"))?;
+    // The symlink flip is the user-visible commit (§9.7); fsync the profile dir so a crash
+    // immediately after activation cannot lose it and resurrect the prior generation.
+    crate::util::fs_util::fsync_dir(parent)?;
     Ok(())
 }
 

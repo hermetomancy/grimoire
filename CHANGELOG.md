@@ -45,6 +45,11 @@ heading when it is tagged.
 
 ### Fixed
 
+- State writes are now durable, not just atomic: `write_nuon` fsyncs the staged file before the
+  rename and fsyncs the destination directory after it, and the generation-activation symlink
+  flip and state-snapshot restore fsync their directory. Previously a crash right after an
+  "atomic" rename could leave a present-but-empty lockfile/state file or a `current` symlink
+  pointing at a generation whose contents never reached disk (§9).
 - Capability provider selection is now one shared function (`solve::select_provider`) called by
   both the resolver and the closure walker, so the provider folded into a dependent's content
   address is identical on both paths. The walker previously ignored the dependency's version

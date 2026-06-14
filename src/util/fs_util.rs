@@ -3,6 +3,23 @@
 use anyhow::{Context, Result, bail};
 use std::{fs, path::Path};
 
+/// Flushes a directory's own contents to disk so that a `rename`, create, or remove of an entry
+/// inside it survives a crash. POSIX `rename` is atomic with respect to concurrent readers but is
+/// not *durable* until the containing directory is fsync'd: after a power loss the rename may be
+/// lost or, worse, the new name may point at a file whose data never reached disk. State
+/// promotion pairs this with an fsync of the file data before the rename (AGENTS.md §9).
+///
+/// The directory fsync is best-effort: some filesystems reject `fsync` on a directory descriptor
+/// with `EINVAL`/`ENOTSUP`, which is not a correctness failure here, so only failing to *open* the
+/// directory is reported.
+pub fn fsync_dir(dir: &Path) -> Result<()> {
+    let file = fs::File::open(dir).with_context(|| format!("open {} to fsync", dir.display()))?;
+    // WHY ignored: a directory that cannot be fsync'd (unsupported on the filesystem) still leaves
+    // the rename visible; we lose only the durability upgrade, never consistency.
+    let _ = file.sync_all();
+    Ok(())
+}
+
 /// Recursively copies `source` into `destination`, preserving directory structure.
 /// Symlinks are rejected with a message that includes `label` (e.g. "addendum" or "tome").
 pub fn copy_dir_all(source: &Path, destination: &Path, label: &str) -> Result<()> {
