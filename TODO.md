@@ -10,8 +10,11 @@ not here. When everything below is done and reflected in the design doc, delete 
 - **`CHANGELOG.md`** already tracks an `Unreleased` section; at the first tag, promote it
   to a versioned heading (the `release.yml` preflight already enforces tag == Cargo.toml).
   Editorial promotion only — no new content owed.
-- **tome-build.yml** stays manual until Bootstrap stage 1 lands, then becomes a
-  release-blocking `grm tome build --all` CI job per platform.
+- **tome-build.yml** is a release-blocking tag gate (`grm tome build --all --strict` per
+  platform on every `v*` tag). It fails on any platform where Bootstrap stage 1 has not
+  landed — the gate refusing to bless a release whose core does not build. Remaining: close
+  stage 1 on the four unblocked targets, and add the musl/FreeBSD matrix rows (containers/VMs)
+  as those bootstraps land.
 
 ### Bootstrap stage 1: core on all targets
 
