@@ -21,6 +21,10 @@ pub struct BuildEnv {
     pub extra_env: Vec<(String, String)>,
     /// Target triple the build is being performed for.
     pub target: String,
+    /// When set, the POSIX ambient tail (`/usr/bin`, `/bin`) is dropped from build PATH so the
+    /// build sees only declared deps and the managed core floor — the `--hermetic` enumeration
+    /// mode that surfaces silent host-userland leaks. Diagnostic only; never affects the store hash.
+    pub hermetic: bool,
 }
 
 #[derive(Debug)]
@@ -41,6 +45,7 @@ impl BuildEnv {
             inherit_host_path: true,
             extra_env,
             target: paths::target_triple(),
+            hermetic: false,
         }
     }
 
@@ -55,6 +60,7 @@ impl BuildEnv {
             inherit_host_path: false,
             extra_env,
             target: paths::target_triple(),
+            hermetic: false,
         }
     }
 }
@@ -226,11 +232,14 @@ pub(crate) fn build_path_entries(env: &BuildEnv, host_tool_dir: Option<&Path>) -
     if let Some(dir) = host_tool_dir {
         entries.push(dir.to_path_buf());
     }
-    // POSIX ambient utilities are always available in managed builds:
-    // sed, grep, awk, find, mkdir, cp, chmod, expr, test, etc.
-    for dir in posix_ambient_dirs() {
-        if dir.is_dir() && !entries.contains(&dir) {
-            entries.push(dir);
+    // POSIX ambient utilities are available in managed builds unless the build is hermetic:
+    // sed, grep, awk, find, mkdir, cp, chmod, expr, test, etc. `--hermetic` drops them to
+    // enumerate which runes silently reach for host tools toybox does not ship (stage-2 work).
+    if !env.hermetic {
+        for dir in posix_ambient_dirs() {
+            if dir.is_dir() && !entries.contains(&dir) {
+                entries.push(dir);
+            }
         }
     }
     if env.inherit_host_path {
@@ -364,5 +373,34 @@ mod tests {
         env.iter()
             .find(|(name, _)| name == key)
             .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn hermetic_drops_posix_ambient_tail() {
+        // A managed (non-bootstrap) build appends the ambient POSIX dirs so runes can reach
+        // sed/grep/awk/… without declaring them; `--hermetic` drops that tail to surface which
+        // runes silently reach for host tools the core floor does not ship.
+        let ambient = posix_ambient_dirs();
+        let existing: Vec<_> = ambient.iter().filter(|dir| dir.is_dir()).cloned().collect();
+
+        let mut env = BuildEnv::managed(Vec::new(), Vec::new(), Vec::new());
+        let with_ambient = build_path_entries(&env, None);
+        for dir in &existing {
+            assert!(
+                with_ambient.contains(dir),
+                "non-hermetic build must include ambient {}",
+                dir.display()
+            );
+        }
+
+        env.hermetic = true;
+        let hermetic = build_path_entries(&env, None);
+        for dir in &ambient {
+            assert!(
+                !hermetic.contains(dir),
+                "hermetic build must drop ambient {}",
+                dir.display()
+            );
+        }
     }
 }
