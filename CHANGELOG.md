@@ -45,6 +45,10 @@ heading when it is tagged.
 
 ### Fixed
 
+- A binary-index-only package (a prebuilt published with no source rune) that is also a capability
+  provided by other packages no longer gets a divergent address: the closure walk addresses it by
+  its own recorded hash — matching the resolver, which treats any name with candidates as literal
+  — instead of resolving it as a capability to a different provider (§9.8).
 - Signed remote binhosts now install: an archive's detached `.minisig` is fetched over the same
   transport as the archive and verified against the downloaded bytes, instead of being looked up
   only on the local filesystem (which never existed for an `http` repo, so a signed remote tome
