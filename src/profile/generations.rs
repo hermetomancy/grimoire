@@ -310,6 +310,9 @@ pub(super) fn restore_state_snapshot(gen_dir: &Path) -> Result<bool> {
     }
     fs::rename(&staging, &packages_dir)
         .with_context(|| format!("promote restored state to {}", packages_dir.display()))?;
+    if let Some(parent) = packages_dir.parent() {
+        crate::util::fs_util::fsync_dir(parent)?;
+    }
     let _ = fs::remove_dir_all(&backup);
 
     // The lockfile is derived from state; rebuild it so it describes the activated set.

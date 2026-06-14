@@ -16,9 +16,10 @@ pub fn parse_nuon(input: &str) -> Result<Value> {
     nuon::from_nuon(input, None).map_err(|err| anyhow!("parse NUON: {err}"))
 }
 
-/// Writes NUON state atomically: the contents are written to a temporary file in the
-/// destination directory and then renamed into place, so a reader never observes a
-/// partially written state file.
+/// Writes NUON state atomically and durably: the contents are written to a temporary file in the
+/// destination directory, fsync'd, then renamed into place, so a reader never observes a partial
+/// state file and a crash never leaves a present-but-empty one. The destination directory is
+/// fsync'd after the rename so the new entry itself is durable (AGENTS.md §9).
 pub fn write_nuon(path: &Path, value: &Value) -> Result<()> {
     let contents = to_nuon_string(value)?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -27,7 +28,13 @@ pub fn write_nuon(path: &Path, value: &Value) -> Result<()> {
         .tempfile_in(parent)?;
     temp.write_all(contents.as_bytes())?;
     temp.flush()?;
+    // The data must reach disk before the rename, or a crash can leave the new name pointing at
+    // an unwritten (zero-length) file.
+    temp.as_file()
+        .sync_all()
+        .with_context(|| format!("fsync staged NUON for {}", path.display()))?;
     temp.persist(path).map_err(|err| anyhow!(err.to_string()))?;
+    crate::util::fs_util::fsync_dir(parent)?;
     Ok(())
 }
 
