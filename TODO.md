@@ -7,23 +7,36 @@ not here. When everything below is done and reflected in the design doc, delete 
 
 ### Release engineering
 
-- **`CHANGELOG.md`** at the first tag.
+- **`CHANGELOG.md`** already tracks an `Unreleased` section; at the first tag, promote it
+  to a versioned heading (the `release.yml` preflight already enforces tag == Cargo.toml).
+  Editorial promotion only — no new content owed.
 - **tome-build.yml** stays manual until Bootstrap stage 1 lands, then becomes a
   release-blocking `grm tome build --all` CI job per platform.
 
 ### Bootstrap stage 1: core on all targets
 
 Build the core runes (`linux-headers`, `musl`, `llvm` (+`clang` split member with
-compiler-rt runtimes inside), `gmake`, `toybox` (+`gsed` on BSD-userland hosts),
+compiler-rt runtimes inside), `gmake`, `toybox` (+`gsed`),
 `toolchain-wrappers`) from source on every supported target. macOS aarch64 closed the
-dogfood loop 2026-06-12 (full chain through rust 1.96 and grimoire itself); remaining:
+dogfood loop 2026-06-12 (full chain through rust 1.96 and grimoire itself). The remaining
+targets are not equivalent work. Four are *unblocked* — a complete dogfood path exists, so
+each needs only a native `grm tome build --all` run plus per-rune platform debugging. Two
+are *blocked* on the cross-bootstrap expansion below: no official Rust stage0 host tools
+(`rust-stage0.rn`/`rust.rn` publish none), so the loop cannot close natively. The blocked
+pair is not on the stable bar.
+
+Unblocked (native build + per-rune debugging):
 
 - ⏳ Linux x86_64 glibc
 - ⏳ Linux aarch64 glibc
 - ⏳ Linux x86_64 musl
-- ⏳ Linux aarch64 musl
-- ⏳ FreeBSD x86_64
-- ⏳ FreeBSD aarch64
+- ⏳ FreeBSD x86_64 — riskiest: no GitHub-hosted runner, and a multi-hour llvm+rust build
+  inside a nested VM (no `/grm`, tight disk/time) is unproven; may need a self-hosted builder.
+
+Blocked on the cross-bootstrap expansion (not stable-blocking):
+
+- ⛔ Linux aarch64 musl
+- ⛔ FreeBSD aarch64
 
 ### Bootstrap stage 2: full self-hosting
 
@@ -36,10 +49,22 @@ The host *userland* link is shadowed, never severed: `/usr/bin` + `/bin` are
 unconditionally appended to managed build PATH (`posix_ambient_dirs`), so anything toybox
 does not ship (perl, m4, bash-isms) falls through to the host silently — an unhashed
 build input, same class as the Homebrew-zstd leak. Path to severance is empirical: a
-hermetic build mode (`tome build --hermetic`?) that drops the ambient tail, run per rune
-to enumerate what actually leaks; passing runes are certified toybox-ambient, failures
-name what stage 2 must package. Folding "toybox-ambient or not" into `build_env_id` is
-the cheap interim fix if prebuilts ever come from heterogeneous builders.
+hermetic build mode that drops the ambient tail, run per rune to enumerate what actually
+leaks; passing runes are certified toybox-ambient, failures name what stage 2 must package.
+Two separable deliverables:
+
+- **`grm tome build --hermetic` (diagnostic; ship first).** `build_path_entries`
+  (`src/nu/runtime/env.rs`) is the only place the ambient tail is appended — gate the
+  `posix_ambient_dirs()` loop behind a `BuildEnv.hermetic` flag threaded from the CLI exactly
+  like `--bootstrap`, `conflicts_with` bootstrap. Pure diagnostic: does **not** touch the
+  store hash. A build that fails on a missing `perl`/`m4`/bash-ism is the leak signal.
+- **Fold a toybox-ambient marker into `build_env_id` (deferred; needs a decision).** The
+  cheap interim fix if prebuilts ever come from heterogeneous builders, but blocked by an
+  architecture mismatch: `build_env_id` is a process-global cached pure fn with no per-build
+  inputs while `--hermetic` is per-build, and the marker must reach all three address
+  consumers (resolver `plan.rs`, closure walker `closure.rs`, install state `realize.rs`)
+  identically or §9.8 breaks. Decide between a host-property marker and plumbing per-build
+  env identity end-to-end before writing it.
 
 ### Store-address determinism
 
@@ -75,10 +100,12 @@ inputs, different hash depending on who asks.)
 
 ## Expansion projects (spec before code)
 
-- **linux-aarch64-musl cross bootstrap.** No official rust host tools — needs a real
-  cross story: build deps resolved for the *host* triple while runtime deps and outputs
-  target the *target* triple (the model currently conflates them), cross
-  toolchain-wrappers, rust cross-std. Project-sized; write the design doc first.
+- **Cross bootstrap (linux-aarch64-musl, freebsd-aarch64).** Both lack official Rust
+  stage0 host tools, so neither closes the dogfood loop natively (the two blocked stage-1
+  targets above). Needs a real cross story: build deps resolved for the *host* triple while
+  runtime deps and outputs target the *target* triple (the model currently conflates them —
+  single `target_triple` in `util/paths.rs`), cross toolchain-wrappers, rust cross-std.
+  Project-sized; write the design doc first.
 - **Scoped profiles and dev shells (`grm profile` / `grm shell`).** Named, imperative
   profiles for development against managed libraries — e.g. a `rust-devel` profile where
   `cargo install`'s `openssl-sys` finds the managed OpenSSL instead of host Homebrew.
