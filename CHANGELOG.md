@@ -30,12 +30,17 @@ heading when it is tagged.
 
 ### Changed
 
-- The Linux musl build environment always exposes the installed `musl` and `linux-headers`
-  prefixes (their `CPATH`/`LIBRARY_PATH`/`CMAKE_PREFIX_PATH`/`<DEP>_PREFIX`), so a musl-target
-  compile finds the managed libc, CRT objects, and kernel uapi headers without each rune having to
-  declare the libc floor (§5.3). They are injected as environment — like the macOS `SDKROOT` — so
-  they never enter a package's content address, and merged after declared-dep paths (segment-
-  deduped) so an explicitly declared library keeps priority.
+- Linux musl builds retarget the compiler to musl. Once `musl` and `linux-headers` are installed,
+  a musl-target build sets `--target=<arch>-linux-musl` plus a musl sysroot (`-isystem` for musl +
+  kernel headers, `-B`/`-L` for musl's CRT and libc, `--rtlib=compiler-rt --unwindlib=none`), so
+  the compiler stops defaulting to the host gnu/glibc triple. This closes the host-libc leak that
+  made configure probes mis-detect glibc-only symbols (e.g. `sem_clockwait`) and final links pull
+  the host glibc CRT. The installed `musl`/`linux-headers` prefixes are also exposed through the
+  usual discovery vars (`CPATH`/`LIBRARY_PATH`/`CMAKE_PREFIX_PATH`/`<DEP>_PREFIX`) for cmake and
+  pkg-config. All of it is injected as environment — like the macOS `SDKROOT` — so it never enters
+  a package's content address; discovery vars are merged after declared-dep paths (segment-deduped)
+  so an explicitly declared library keeps priority. While the floor is itself bootstrapping (musl/
+  linux-headers not yet installed) the build falls back to the prior static flags.
 - CLI consolidated: `autoremove`, `orphans`, `unrequest`, `switch`, `delete-generation`, and
   `collect-garbage` removed; removal sweeps orphans in the same transaction and demotes
   still-required packages; `rollback [GEN]` absorbs switch; `clean [--keep N]` is the one

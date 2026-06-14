@@ -110,19 +110,58 @@ fn core_compiler_boundary_available() -> Result<bool> {
     Ok(states.iter().any(|s| s.name == "toolchain-wrappers"))
 }
 
-/// Environment variables injected for musl-target builds.
-fn musl_static_env_vars() -> Vec<(String, String)> {
-    vec![
-        ("CC".to_string(), "cc".to_string()),
-        ("CXX".to_string(), "c++".to_string()),
-        ("AR".to_string(), "ar".to_string()),
-        ("LD".to_string(), "ld".to_string()),
-        ("NM".to_string(), "nm".to_string()),
-        ("RANLIB".to_string(), "ranlib".to_string()),
-        ("STRIP".to_string(), "strip".to_string()),
-        ("CFLAGS".to_string(), "-static".to_string()),
-        ("LDFLAGS".to_string(), "-static".to_string()),
+/// The toolchain aliases shared by every musl-target build, independent of whether the floor is
+/// installed yet. `cc`/`c++` resolve to the managed clang (or the host boundary's clang/gcc).
+fn musl_tool_aliases() -> Vec<(String, String)> {
+    [
+        ("CC", "cc"),
+        ("CXX", "c++"),
+        ("AR", "ar"),
+        ("LD", "ld"),
+        ("NM", "nm"),
+        ("RANLIB", "ranlib"),
+        ("STRIP", "strip"),
     ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect()
+}
+
+/// Fallback env for a musl build while the floor itself is being bootstrapped (musl/linux-headers
+/// not yet installed): the static flags, with no explicit retargeting because there is no managed
+/// libc to target against.
+fn musl_static_env_vars() -> Vec<(String, String)> {
+    let mut env = musl_tool_aliases();
+    env.push(("CFLAGS".to_string(), "-static".to_string()));
+    env.push(("LDFLAGS".to_string(), "-static".to_string()));
+    env
+}
+
+/// Maps a Grimoire target triple (`<os>-<arch>-<abi>`) to the clang triple (`<arch>-<os>-<abi>`)
+/// the compiler is retargeted to — e.g. `linux-aarch64-musl` → `aarch64-linux-musl`.
+fn clang_musl_triple(target: &str) -> String {
+    match target.split('-').collect::<Vec<_>>().as_slice() {
+        [os, arch, abi] => format!("{arch}-{os}-{abi}"),
+        _ => target.to_string(),
+    }
+}
+
+/// Env that retargets the compiler from the host gnu/glibc triple to musl, using the installed
+/// `musl` and `linux-headers` store prefixes. See the call site in [`build_env_for_target`] for
+/// why each flag is needed.
+fn musl_target_env_vars(target: &str, musl: &str, headers: &str) -> Vec<(String, String)> {
+    let triple = clang_musl_triple(target);
+    let cflags = format!(
+        "--target={triple} --sysroot={musl} -isystem {musl}/include -isystem {headers}/include -B{musl}/lib"
+    );
+    let ldflags = format!(
+        "--target={triple} --sysroot={musl} -B{musl}/lib -L{musl}/lib --rtlib=compiler-rt --unwindlib=none -static"
+    );
+    let mut env = musl_tool_aliases();
+    env.push(("CFLAGS".to_string(), cflags.clone()));
+    env.push(("CXXFLAGS".to_string(), cflags));
+    env.push(("LDFLAGS".to_string(), ldflags));
+    env
 }
 
 /// Constructs a [`BuildEnv`] for a build on `target`. Declared build-dep `bin/` dirs come
@@ -140,15 +179,35 @@ pub fn build_env_for_target(
 
     let mut env = extra_env;
     if is_musl_target(target) {
-        env.extend(musl_static_env_vars());
-        // musl libc and the kernel uapi headers are the Linux build floor (AGENTS.md §5.3):
-        // every musl-target compile needs them on the include/library search path so the
-        // toolchain resolves the managed libc, CRT objects, and headers instead of falling
-        // through to the host's. They are injected as *environment* — like the macOS SDKROOT —
-        // not as rune deps, so they never enter a package's content address. During their own
-        // bootstrap they are not yet installed and `build_dep_env_vars` simply emits nothing for
-        // them; the merge appends after the declared-dep paths so an explicitly declared library
-        // still outranks the floor.
+        let states = install::installed_states()?;
+        let prefix = |name: &str| {
+            states
+                .iter()
+                .find(|s| s.name == name)
+                .map(|s| s.store_path.clone())
+        };
+        match (prefix("musl"), prefix("linux-headers")) {
+            // The managed floor is installed: retarget the compiler to musl explicitly. A host
+            // clang/gcc defaults to the host gnu/glibc triple, so it leaks host libc into both
+            // configure feature probes (a glibc-only symbol like `sem_clockwait` links and is
+            // wrongly detected as present) and final links (host glibc CRT). The triple fixes the
+            // ABI; the sysroot + headers supply musl libc and the kernel uapi headers; `-B`/`-L`
+            // point at musl's CRT and libc; and compiler-rt with no unwinder sidesteps the host's
+            // libgcc. Validated on linux-aarch64-musl: links a static musl binary and Python's
+            // configure correctly leaves HAVE_SEM_CLOCKWAIT unset.
+            (Some(musl), Some(headers)) => {
+                env.extend(musl_target_env_vars(target, &musl, &headers));
+            }
+            // The floor itself is still being bootstrapped (building musl/linux-headers): they are
+            // not yet installed, so there is nothing to target against. Fall back to the static
+            // flags; those builds run against the host boundary by design.
+            _ => env.extend(musl_static_env_vars()),
+        }
+        // Also expose the floor prefixes through the usual discovery vars (CPATH, LIBRARY_PATH,
+        // <DEP>_PREFIX, CMAKE_PREFIX_PATH) so build systems that read them — cmake, pkg-config —
+        // find musl and the kernel headers too. Injected as environment, like the macOS SDKROOT,
+        // so they never enter a package's content address; merged after declared-dep paths
+        // (segment-deduped) so an explicitly declared library keeps priority.
         let floor = install::build_dep_env_vars(&[
             crate::model::Dependency::any("musl"),
             crate::model::Dependency::any("linux-headers"),
@@ -725,6 +784,33 @@ mod tests {
             lookup("CPATH"),
             Some("/lh/include:/musl/include".to_string())
         );
+    }
+
+    #[test]
+    fn clang_musl_triple_swaps_os_and_arch() {
+        assert_eq!(
+            clang_musl_triple("linux-aarch64-musl"),
+            "aarch64-linux-musl"
+        );
+        assert_eq!(clang_musl_triple("linux-x86_64-musl"), "x86_64-linux-musl");
+        // An unexpected shape is passed through unchanged rather than mangled.
+        assert_eq!(clang_musl_triple("weird"), "weird");
+    }
+
+    #[test]
+    fn musl_target_env_vars_builds_the_validated_flag_set() {
+        let env = musl_target_env_vars("linux-aarch64-musl", "/store/musl", "/store/lh");
+        let get = |key: &str| env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+        assert_eq!(get("CC"), Some("cc"));
+        let cflags = get("CFLAGS").unwrap();
+        assert!(cflags.contains("--target=aarch64-linux-musl"));
+        assert!(cflags.contains("-isystem /store/musl/include"));
+        assert!(cflags.contains("-isystem /store/lh/include"));
+        assert_eq!(get("CXXFLAGS"), get("CFLAGS"));
+        let ldflags = get("LDFLAGS").unwrap();
+        assert!(ldflags.contains("--rtlib=compiler-rt"));
+        assert!(ldflags.contains("--unwindlib=none"));
+        assert!(ldflags.contains("-static"));
     }
 
     #[test]
