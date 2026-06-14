@@ -227,7 +227,7 @@ pub(crate) fn sync_tome_cache(tome: &TomeState) -> Result<String> {
     let first_sync = tome.checked_ref.is_none();
     let cache_path = sync_common::cache_path(TomeState::SUBDIR, &tome.name)?;
     if let Err(e) = news::surface_after_sync(&tome.name, &cache_path, first_sync) {
-        warn(&format!("could not surface tome news: {e}"));
+        warn(&format!("could not surface tome news: {e:#}"));
     }
     Ok(sync_report_line(
         &tome.name,

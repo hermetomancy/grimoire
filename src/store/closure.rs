@@ -277,15 +277,19 @@ fn diff_build_env(recorded: &str, current: &str) -> String {
     };
     let old_parts = parse(recorded);
     let new_parts = parse(current);
+    // Dedup by exact tool name. A `starts_with` check would let one tool's change mask another
+    // whose name it is a prefix of (`ld` vs `ldd`, `as` vs `asm`), silently dropping a real
+    // change from the explanation; a sorted set visits each tool once.
+    let tools: BTreeMap<&String, ()> = old_parts
+        .keys()
+        .chain(new_parts.keys())
+        .map(|t| (t, ()))
+        .collect();
     let mut changes = Vec::new();
-    for tool in old_parts.keys().chain(new_parts.keys()) {
+    for tool in tools.into_keys() {
         let old = old_parts.get(tool).map(String::as_str).unwrap_or("(none)");
         let new = new_parts.get(tool).map(String::as_str).unwrap_or("(none)");
-        if old != new
-            && !changes
-                .iter()
-                .any(|c: &String| c.starts_with(tool.as_str()))
-        {
+        if old != new {
             changes.push(format!("{tool}: {old} → {new}"));
         }
     }

@@ -196,7 +196,7 @@ pub fn create_generation(states: &[PackageState]) -> Result<u64> {
     let mut registry = read_registry().unwrap_or_default();
     registry.push(generation);
     if let Err(e) = write_registry(&registry) {
-        warn(&format!("could not write generations registry: {e}"));
+        warn(&format!("could not write generations registry: {e:#}"));
     }
 
     success(&format!("created generation {next_id}"));

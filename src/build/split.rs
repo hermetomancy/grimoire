@@ -137,7 +137,11 @@ fn scan_members(runes_dir: &Path, parent: &str) -> Result<Vec<GroupMember>> {
             // member: silently dropping it would build the group without it (and hand its
             // files to the parent), so surface its error here instead.
             Err(err) => {
-                let source = fs::read(&path).unwrap_or_default();
+                // If the file cannot even be read we cannot tell whether it was meant to be a
+                // member, and silently dropping a member is the failure mode this guards against
+                // — so surface the read error rather than swallowing it into "no match".
+                let source = fs::read(&path)
+                    .with_context(|| format!("read split member candidate {}", path.display()))?;
                 let needle = b"split_from";
                 if source.windows(needle.len()).any(|window| window == needle) {
                     return Err(err.context(format!(

@@ -104,7 +104,7 @@ pub fn update(args: TomeUpdateArgs) -> Result<()> {
         match sync_addendum_cache(&state) {
             Ok(()) => report(&format!("updated addendum {}", accent(&state.name))),
             Err(e) => {
-                warn(&format!("failed to update addendum {}: {e}", state.name));
+                warn(&format!("failed to update addendum {}: {e:#}", state.name));
                 any_failed = true;
             }
         }

@@ -38,9 +38,11 @@ pub(crate) fn resolve_with(
     source: &dyn CandidateSource,
     preferences: &BTreeMap<String, String>,
 ) -> Result<Plan> {
-    let capabilities = CapabilityIndex::build().unwrap_or_else(|_| CapabilityIndex {
-        map: HashMap::new(),
-    });
+    // Propagate a genuine build failure (corrupt tome cache, unreadable index) instead of
+    // swallowing it into an empty map: the closure walker does the same (`build()?`), and an
+    // empty map would make every capability dep fail to expand and surface as a misleading
+    // "no version of X satisfies …" rather than the real cause.
+    let capabilities = CapabilityIndex::build().context("build capability index")?;
     let mut resolver = Resolver {
         installed,
         pins,
