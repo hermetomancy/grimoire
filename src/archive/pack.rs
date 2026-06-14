@@ -78,7 +78,13 @@ pub fn pack_built_rune(
     Ok(archive_path)
 }
 
-fn package_payload_dir(package_dir: &Path, final_prefix: &Path) -> Result<PathBuf> {
+/// The directory a build's payload actually lives in. Autotools-style `make install DESTDIR=...`
+/// nests the payload under the prefix path inside `package_dir` (`<package_dir>/grm/store/<hash>…`);
+/// when that nested tree exists it is the payload, otherwise the build wrote straight into
+/// `package_dir`. The single definition shared by build-time discovery and packing, so both inspect
+/// the *same* tree (they previously diverged: this path rejects `..`/prefix components, the other
+/// silently dropped them).
+pub(crate) fn package_payload_dir(package_dir: &Path, final_prefix: &Path) -> Result<PathBuf> {
     let destdir_payload = package_dir.join(relative_destdir_prefix(final_prefix)?);
     Ok(if destdir_payload.exists() {
         destdir_payload
