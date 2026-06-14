@@ -45,6 +45,9 @@ heading when it is tagged.
 
 ### Fixed
 
+- Generations are built stage-then-promote like every other state mutation: a new generation is
+  assembled in a `.gen-N.staging` directory and atomically renamed into place, so a crash mid-build
+  can no longer leave a registry-adoptable but snapshot-less `gen-N` (§9.1).
 - `--locked` installs independently re-assert the pinned artifact at realize time: the chosen
   substitute must match both the locked archive hash and (when recorded) the locked content
   address, rather than relying solely on the solver's candidate filtering. Previously the
