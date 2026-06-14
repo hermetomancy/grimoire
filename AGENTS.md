@@ -167,6 +167,13 @@ Grimoire has no database. Durability is explicit transaction directories plus at
    next mutating command builds on the activated set instead of resurrecting the abandoned
    one. Re-activating the current generation is the repair path for an interrupted
    activation; `grm doctor` flags divergence.
+8. **The store address is one canonical function.** A package's content address is a
+   deterministic, path-independent function of its declared inputs (rune bytes, version,
+   platform-filtered sources, target, resolver-chosen dependency closure, build environment).
+   No second code path may derive it differently: the address the resolver computes for
+   substitution must equal the address the build actually produces. Divergence is a silent
+   correctness bug — phantom drift that cascades into rebuilds, and computed hashes that no
+   longer match a published index so binary substitution drops to source — never cosmetic.
 
 ## 10. Security invariants
 
