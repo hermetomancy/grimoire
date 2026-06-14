@@ -530,23 +530,9 @@ fn run_rune_build(
         }
     };
 
-    // Autotools-style `make install DESTDIR=...` nests the payload under the prefix path
-    // inside package_dir. The packing logic strips this prefix; discovery must look there too.
-    let payload_dir = {
-        let relative: PathBuf = final_prefix
-            .components()
-            .filter_map(|c| match c {
-                std::path::Component::Normal(p) => Some(p),
-                _ => None,
-            })
-            .collect();
-        let destdir_payload = package_dir.join(&relative);
-        if destdir_payload.exists() {
-            destdir_payload
-        } else {
-            package_dir.clone()
-        }
-    };
+    // Discovery must inspect the same tree packing will — the one shared helper, so a DESTDIR
+    // payload (or its absence) is resolved identically on both sides.
+    let payload_dir = pack::package_payload_dir(&package_dir, final_prefix)?;
 
     fix_bin_permissions(&payload_dir)?;
     Ok(RawBuild {
