@@ -49,8 +49,11 @@ impl Installer {
             self.dry_run_source_root(&rune)?;
             return Ok(package.to_owned());
         }
-        let store_hash = crate::store::closure::store_hash_for_rune(&rune)
-            .with_context(|| format!("compute store hash for source root `{package}`"))?;
+        let store_hash = crate::store::closure::store_hash_for_rune(
+            &rune,
+            &crate::store::closure::installed_resolved(),
+        )
+        .with_context(|| format!("compute store hash for source root `{package}`"))?;
         let installed = self.build_and_install(&rune, &store_hash)?;
         let name = installed.name.clone();
         let runtime = installed.runtime_deps.clone();
@@ -347,6 +350,7 @@ impl Installer {
                 &paths::build_output_dir()?,
                 &env,
                 store_hash,
+                &crate::store::closure::installed_resolved(),
             )?;
             // Group siblings already landed in the build output dir; their own install
             // steps reuse them via `cached_build_archive` instead of rebuilding the group.

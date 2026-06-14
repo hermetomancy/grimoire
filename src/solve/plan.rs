@@ -92,8 +92,17 @@ impl Plan {
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;
-                closure::store_hash_for_rune_with_deps(rune, &dep_hashes, &target, &build_env)
-                    .with_context(|| format!("compute store hash for `{}`", step.name))?
+                // For a split member, `computed` carries the resolver's chosen hashes for the
+                // group's external deps, so the closure walk folds those versions instead of an
+                // independent re-pick — the resolver and the build address the member identically.
+                closure::store_hash_for_rune_with_deps(
+                    rune,
+                    &dep_hashes,
+                    &target,
+                    &build_env,
+                    &computed,
+                )
+                .with_context(|| format!("compute store hash for `{}`", step.name))?
             } else if let Some(sub) = step.substitutes.first() {
                 sub.store_hash.clone()
             } else {
