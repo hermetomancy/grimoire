@@ -286,6 +286,12 @@ stable across Nushell upgrades and the dependency tree small. If a rune genuinel
 missing command, it is added to `src/nu/commands/` and to this table in the same commit
 (AGENTS.md §15.4) — or the build step uses an external tool instead.
 
+The file-loading parse keywords (`use`, `source`, `source-env`, `overlay`, `module`,
+`register`, `plugin`) are **rejected outright** when Grimoire reads a rune's metadata: they
+load files *during parsing*, which would make reading the inert `package` record open arbitrary
+host files (AGENTS.md §4.3). Rune metadata is data, not a program — keep `package` a literal
+record.
+
 ## Build script patterns
 
 **No `sh -c`.** Rune `build` functions are native Nushell. Use Nushell's own control flow,

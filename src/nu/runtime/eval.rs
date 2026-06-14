@@ -1,7 +1,7 @@
 //! Engine plumbing: parsing/evaluating Nushell source, exported-const reads, build
 //! failure shaping, and the streamed build log.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use nu_protocol::{
     PipelineData, ShellError, Value,
     debugger::WithoutDebug,
@@ -29,6 +29,11 @@ pub(crate) fn exported_const(path: &Path, name: &str) -> Result<Value> {
 /// Like [`exported_const`], for rune source already in memory — e.g. a group rune embedded
 /// in an archive's `.grimoire/group/`. `label` stands in for the file path in errors.
 pub(crate) fn exported_const_from_bytes(source: &[u8], label: &str, name: &str) -> Result<Value> {
+    // Reading rune metadata must be inert (AGENTS §4.3): refuse the file-loading parse keywords
+    // *before* the parser runs, so an untrusted rune cannot turn `grm info`/`search`/plan into a
+    // confused-deputy file read at parse time. None of these are in the rune command set (§7.6).
+    reject_file_loading_keywords(source, label)?;
+
     // Parse with the full rune command context — the same one the build runner uses — so a
     // rune that strays outside the command subset (docs/rune-authoring.md) fails here, at
     // `grm info`/`search`/plan time, instead of after its build dependencies have already
@@ -52,6 +57,87 @@ pub(crate) fn exported_const_from_bytes(source: &[u8], label: &str, name: &str) 
         .map_err(|err| anyhow!("could not read exported const `{name}` from {label}: {err}"))?;
 
     Ok(value.clone())
+}
+
+/// Parse keywords that read files from disk *during parsing* — `use`/`source`/`source-env` load a
+/// module or script, `overlay`'s `use` form loads a module, and `register`/`plugin`/`module` pull
+/// in external definitions. None belong to the rune command set, and on the metadata path they
+/// would let untrusted rune bytes read arbitrary host files while the `package` const is parsed.
+const FILE_LOADING_KEYWORDS: &[&str] = &[
+    "use",
+    "source",
+    "source-env",
+    "overlay",
+    "register",
+    "plugin",
+    "module",
+];
+
+/// Rejects any [`FILE_LOADING_KEYWORDS`] used in command position anywhere in `source`, including
+/// inside block/closure bodies (which the lexer captures as one token, so they are re-lexed) and
+/// the `export use`/`export module` forms. Runs purely on the lexer — no parsing, so no file is
+/// ever opened — and so must precede [`nu_parser::parse`] on the metadata path.
+fn reject_file_loading_keywords(source: &[u8], label: &str) -> Result<()> {
+    fn token_text<'a>(src: &'a [u8], token: &nu_parser::Token) -> &'a [u8] {
+        src.get(token.span.start..token.span.end).unwrap_or(&[])
+    }
+
+    /// A block/closure/record/list body is lexed as a single bracketed token; strip one layer of
+    /// `{}`/`()`/`[]` so the body can be re-lexed and its command positions inspected too.
+    fn inner_block(text: &[u8]) -> Option<&[u8]> {
+        let close = match text.first()? {
+            b'{' => b'}',
+            b'(' => b')',
+            b'[' => b']',
+            _ => return None,
+        };
+        (text.len() >= 2 && text.last() == Some(&close)).then(|| &text[1..text.len() - 1])
+    }
+
+    fn scan(src: &[u8]) -> Option<String> {
+        use nu_parser::TokenContents;
+        let (tokens, _) = nu_parser::lex(src, 0, &[], &[], true);
+        let mut command_position = true;
+        let mut after_export = false;
+        for token in &tokens {
+            match token.contents {
+                TokenContents::Pipe
+                | TokenContents::PipePipe
+                | TokenContents::Semicolon
+                | TokenContents::Eol => {
+                    command_position = true;
+                    after_export = false;
+                }
+                TokenContents::Item => {
+                    let word = std::str::from_utf8(token_text(src, token)).unwrap_or_default();
+                    if (command_position || after_export) && FILE_LOADING_KEYWORDS.contains(&word) {
+                        return Some(word.to_owned());
+                    }
+                    // `export use`/`export module` read a file via the word after `export`.
+                    after_export = command_position && word == "export";
+                    command_position = false;
+                    if let Some(inner) = inner_block(token_text(src, token))
+                        && let Some(found) = scan(inner)
+                    {
+                        return Some(found);
+                    }
+                }
+                _ => {
+                    command_position = false;
+                    after_export = false;
+                }
+            }
+        }
+        None
+    }
+
+    if let Some(keyword) = scan(source) {
+        bail!(
+            "refusing to read rune metadata from {label}: the `{keyword}` keyword loads files at \
+             parse time and is not part of the rune command set; rune metadata must be inert data"
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn eval_nu_source(
@@ -359,5 +445,55 @@ mod tests {
             .map_err(|err| anyhow!("package const: {err}"))?;
         eprintln!("{value:#?}");
         Ok(())
+    }
+
+    #[test]
+    fn metadata_read_rejects_file_loading_keywords() {
+        // The confused-deputy vector: parsing untrusted rune bytes must not open host files.
+        for source in [
+            "use \"/etc/passwd\"\nexport const package = { name: x, version: \"1\" }",
+            "source /etc/hosts\nexport const package = { name: x, version: \"1\" }",
+            "export const package = { name: x, version: \"1\" }\nexport def build [] { use \"/etc/passwd\" }",
+            "export use \"/etc/passwd\"\nexport const package = { name: x, version: \"1\" }",
+            "overlay use \"/etc/passwd\"\nexport const package = { name: x, version: \"1\" }",
+        ] {
+            let err = exported_const_from_bytes(source.as_bytes(), "evil.rn", "package")
+                .expect_err("file-loading keyword must be refused");
+            assert!(
+                err.to_string().contains("must be inert data"),
+                "unexpected error for {source:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_read_allows_a_normal_rune() {
+        // A realistic rune — sources record, deps, and a build def using external commands —
+        // must parse without tripping the guard (no false positives on `sources:` etc.).
+        let source = r#"
+export const package = {
+  name: "widget"
+  version: "1.2.3"
+  sources: { main: { url: "https://example.com/w.tar.gz", sha256: "sha256:abc" } }
+  deps: { build: { default: ["build-env"] }, runtime: [] }
+  bins: { default: { widget: "bin/widget" } }
+}
+
+export def build [ctx] {
+  cd ($ctx.sources.main.dir | path join "widget-1.2.3")
+  ./configure --prefix=($ctx.prefix)
+  make -j($ctx.nproc)
+  make install DESTDIR=($ctx.package_dir)
+}
+"#;
+        let value = exported_const_from_bytes(source.as_bytes(), "widget.rn", "package")
+            .expect("a normal rune must parse");
+        let Value::Record { val, .. } = value else {
+            panic!("expected a record");
+        };
+        assert_eq!(
+            val.get("name").and_then(|v| v.as_str().ok()),
+            Some("widget")
+        );
     }
 }
