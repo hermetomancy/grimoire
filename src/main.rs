@@ -53,8 +53,9 @@ fn main() -> Result<()> {
 
 fn run(cli: Cli) -> Result<()> {
     // Commands that mutate shared install-root state are serialised by an OS-level advisory
-    // lock; read-only commands and commands that operate on user-chosen paths (build, tome
-    // init/rune/build) skip it. See `process_lock` for the lifetime and crash semantics.
+    // lock; read-only commands and authoring commands that only touch a user-chosen path
+    // (`tome init`, `tome rune`) skip it. `tome build` takes it — it writes the store and state.
+    // See `process_lock` for the lifetime and crash semantics.
     let _lock = if mutates_install_root(&cli.command) {
         Some(process_lock::acquire()?)
     } else {
@@ -155,7 +156,10 @@ fn mutates_install_root(command: &Command) -> bool {
             TomeCommand::Add(args) => !args.dry_run,
             TomeCommand::Update(args) => !args.dry_run,
             TomeCommand::Remove(args) => !args.dry_run,
-            TomeCommand::Build(args) => args.all,
+            // Every build writes the shared store and state/packages: a single-package build
+            // installs its build deps store-only (§8), and `--all` installs the built packages.
+            // Both must hold the lock so a concurrent `grm clean` cannot reap store paths mid-build.
+            TomeCommand::Build(_) => true,
             // Default `tome news` advances the seen marker; `--all` is a pure read.
             TomeCommand::News(args) => !args.all,
             _ => false,
