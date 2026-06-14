@@ -188,6 +188,11 @@ impl TomeState {
 impl TomeManifest {
     pub fn from_value(value: Value) -> Result<Self> {
         let record = expect_record(value, "tome manifest")?;
+        reject_unknown_fields(
+            &record,
+            "tome manifest",
+            &["name", "description", "packages", "signers"],
+        )?;
         let name = required_field_string(&record, "tome manifest", "name")?;
         validate_tome_name(&name)?;
         let description = optional_string(&record, "description")?;
@@ -226,6 +231,10 @@ impl TomePackages {
         let Value::Record { val, .. } = value else {
             bail!("tome manifest field `packages` must be a record");
         };
+        // A signer key belongs at the manifest's top-level `signers` list, not nested here;
+        // rejecting unknown fields turns a misplaced `signer` into a loud error rather than a
+        // silently-unsigned tome (AGENTS.md §4).
+        reject_unknown_fields(val, "tome packages", &["repo", "format", "index"])?;
 
         Ok(Self {
             repo: required_field_string(val, "tome packages", "repo")?,
@@ -259,4 +268,62 @@ pub fn validate_tome_ref(ref_name: &str) -> Result<()> {
         bail!("tome ref must not be empty");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn str_val(s: &str) -> Value {
+        Value::string(s, Span::unknown())
+    }
+
+    fn packages_record(extra: &[(&str, &str)]) -> Value {
+        let mut record = Record::new();
+        record.push("repo", str_val("https://example.com/repo"));
+        record.push("format", str_val("http"));
+        record.push("index", str_val("index.nuon"));
+        for (key, value) in extra {
+            record.push(*key, str_val(value));
+        }
+        Value::record(record, Span::unknown())
+    }
+
+    fn manifest_record(packages: Value, signers: Option<Value>) -> Value {
+        let mut record = Record::new();
+        record.push("name", str_val("core"));
+        record.push("packages", packages);
+        if let Some(signers) = signers {
+            record.push("signers", signers);
+        }
+        Value::record(record, Span::unknown())
+    }
+
+    #[test]
+    fn nested_signer_is_rejected_not_silently_dropped() {
+        // The signer key belongs at the manifest's top-level `signers`; nested under `packages`
+        // it must fail loudly rather than ship a tome the author believes is signed.
+        let value = manifest_record(packages_record(&[("signer", "RWxxxx")]), None);
+        let err = TomeManifest::from_value(value).expect_err("nested signer must be rejected");
+        assert!(err.to_string().contains("unknown field"), "{err}");
+        assert!(err.to_string().contains("signer"), "{err}");
+    }
+
+    #[test]
+    fn top_level_signers_parses_and_pins() {
+        let signers = Value::list(vec![str_val("RWxxxx")], Span::unknown());
+        let value = manifest_record(packages_record(&[]), Some(signers));
+        let manifest = TomeManifest::from_value(value).expect("valid manifest");
+        assert_eq!(manifest.signers, vec!["RWxxxx".to_string()]);
+    }
+
+    #[test]
+    fn unknown_top_level_field_is_rejected() {
+        let mut record = Record::new();
+        record.push("name", str_val("core"));
+        record.push("signer", str_val("RWxxxx")); // singular, at top level: still wrong
+        let err = TomeManifest::from_value(Value::record(record, Span::unknown()))
+            .expect_err("unknown top-level field must be rejected");
+        assert!(err.to_string().contains("unknown field"), "{err}");
+    }
 }

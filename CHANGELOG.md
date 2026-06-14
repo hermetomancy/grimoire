@@ -45,6 +45,12 @@ heading when it is tagged.
 
 ### Fixed
 
+- Tome manifests reject unknown fields: a `signer` key misplaced under `packages` (the form
+  the parser never read) is now a loud error instead of a silently-unsigned tome. The signer
+  set is declared at the manifest's top level as `signers: [...]`. The signing docs are
+  corrected to the implemented per-artifact model — each archive and the `runes-manifest.nuon`
+  carry detached `.minisig` signatures verified against the pinned keys; the `index.nuon`
+  itself is not signed.
 - Index transport can no longer be downgraded: index fetches use a dedicated agent that
   refuses HTTP redirects, so an `https` index that 30x-redirects to plain `http` is rejected
   instead of silently re-fetched in cleartext, and a URL with embedded credentials

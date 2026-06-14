@@ -319,10 +319,10 @@ pub fn sign_to(path: &Path, data: &[u8], keypair: &minisign::KeyPair) {
     fs::write(path, signature).expect("write signature");
 }
 
-/// Builds a local tome that publishes a single prebuilt `sgnpkg` archive with a signed
-/// `index.nuon`, declaring `keypair`'s public key as `packages.signer`. Re-running it with a
-/// different keypair rewrites the manifest's signer and re-signs the (byte-identical) index,
-/// which is exactly the key-rotation scenario.
+/// Builds a local tome that publishes a single prebuilt `sgnpkg` archive with a detached
+/// `archive.tar.zst.minisig` and a signed `runes-manifest.nuon`, declaring `keypair`'s public
+/// key at the manifest's top-level `signers`. Re-running it with a different keypair rewrites
+/// the declared signer and re-signs the artifacts, which is exactly the key-rotation scenario.
 pub fn build_signed_tome(tome: &Path, name: &str, triple: &str, keypair: &minisign::KeyPair) {
     fs::create_dir_all(tome.join("dist")).unwrap();
     fs::create_dir_all(tome.join("runes")).unwrap();

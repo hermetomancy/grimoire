@@ -39,6 +39,22 @@ pub fn expect_record(value: Value, label: &str) -> Result<Record> {
     }
 }
 
+/// Rejects any field on `record` that is not in `allowed`. A misplaced or misspelled key
+/// (e.g. `signer` where the schema reads top-level `signers`) is then a loud parse error
+/// instead of being silently dropped — the difference between a tome the author believes is
+/// signed and one that ships unsigned. Use on author-facing manifest schemas (AGENTS.md §4).
+pub(crate) fn reject_unknown_fields(record: &Record, label: &str, allowed: &[&str]) -> Result<()> {
+    for (key, _) in record.iter() {
+        if !allowed.contains(&key.as_str()) {
+            bail!(
+                "{label} has an unknown field `{key}` (allowed: {})",
+                allowed.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn optional_string(record: &Record, field: &str) -> Result<Option<String>> {
     match record.get(field) {
         Some(Value::Nothing { .. }) | None => Ok(None),
