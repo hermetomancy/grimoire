@@ -30,6 +30,12 @@ heading when it is tagged.
 
 ### Changed
 
+- The Linux musl build environment always exposes the installed `musl` and `linux-headers`
+  prefixes (their `CPATH`/`LIBRARY_PATH`/`CMAKE_PREFIX_PATH`/`<DEP>_PREFIX`), so a musl-target
+  compile finds the managed libc, CRT objects, and kernel uapi headers without each rune having to
+  declare the libc floor (§5.3). They are injected as environment — like the macOS `SDKROOT` — so
+  they never enter a package's content address, and merged after declared-dep paths (segment-
+  deduped) so an explicitly declared library keeps priority.
 - CLI consolidated: `autoremove`, `orphans`, `unrequest`, `switch`, `delete-generation`, and
   `collect-garbage` removed; removal sweeps orphans in the same transaction and demotes
   still-required packages; `rollback [GEN]` absorbs switch; `clean [--keep N]` is the one

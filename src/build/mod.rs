@@ -50,6 +50,31 @@ pub fn is_musl_target(target: &str) -> bool {
     target.starts_with("linux-") && target.ends_with("-musl")
 }
 
+/// Merges `additions` into `env` at the path-segment level: each colon-separated segment of a
+/// value is appended to the existing key only if not already present, so declared-dep entries keep
+/// search priority and a value already there is never duplicated. The dedup matters because a
+/// single-path var like `<DEP>_PREFIX` would otherwise become `/p:/p` when a floor package is also
+/// a declared dep (e.g. `musl` declares `linux-headers`). Empty values are skipped so a floor
+/// package that is not yet installed contributes nothing.
+fn merge_path_env(env: &mut Vec<(String, String)>, additions: Vec<(String, String)>) {
+    for (key, value) in additions {
+        if value.is_empty() {
+            continue;
+        }
+        if let Some((_, existing)) = env.iter_mut().find(|(name, _)| *name == key) {
+            let mut segments: Vec<&str> = existing.split(':').filter(|s| !s.is_empty()).collect();
+            for segment in value.split(':').filter(|s| !s.is_empty()) {
+                if !segments.contains(&segment) {
+                    segments.push(segment);
+                }
+            }
+            *existing = segments.join(":");
+        } else {
+            env.push((key, value));
+        }
+    }
+}
+
 /// Returns the `bin/` directories of all installed core packages.
 fn core_bin_dirs() -> Result<Vec<PathBuf>> {
     let states = install::installed_states()?;
@@ -116,6 +141,19 @@ pub fn build_env_for_target(
     let mut env = extra_env;
     if is_musl_target(target) {
         env.extend(musl_static_env_vars());
+        // musl libc and the kernel uapi headers are the Linux build floor (AGENTS.md §5.3):
+        // every musl-target compile needs them on the include/library search path so the
+        // toolchain resolves the managed libc, CRT objects, and headers instead of falling
+        // through to the host's. They are injected as *environment* — like the macOS SDKROOT —
+        // not as rune deps, so they never enter a package's content address. During their own
+        // bootstrap they are not yet installed and `build_dep_env_vars` simply emits nothing for
+        // them; the merge appends after the declared-dep paths so an explicitly declared library
+        // still outranks the floor.
+        let floor = install::build_dep_env_vars(&[
+            crate::model::Dependency::any("musl"),
+            crate::model::Dependency::any("linux-headers"),
+        ])?;
+        merge_path_env(&mut env, floor);
     }
     if target.starts_with("macos-")
         && let Some(sdk) = toolchain::macos_sdk_path()
@@ -636,6 +674,58 @@ pub fn find_rune(package: &str) -> Result<Option<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_path_env_appends_floor_after_declared_paths() {
+        let mut env = vec![
+            ("CPATH".to_string(), "/dep/include".to_string()),
+            ("CC".to_string(), "cc".to_string()),
+        ];
+        merge_path_env(
+            &mut env,
+            vec![
+                // an existing path key: the floor value appends after the declared one, which
+                // keeps search priority.
+                ("CPATH".to_string(), "/musl/include".to_string()),
+                // a fresh key: inserted as-is.
+                ("MUSL_PREFIX".to_string(), "/grm/store/musl".to_string()),
+                // a not-yet-installed floor package emits an empty value: skipped entirely.
+                ("LIBRARY_PATH".to_string(), String::new()),
+            ],
+        );
+        let lookup = |key: &str| env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+        assert_eq!(
+            lookup("CPATH"),
+            Some("/dep/include:/musl/include".to_string())
+        );
+        assert_eq!(lookup("MUSL_PREFIX"), Some("/grm/store/musl".to_string()));
+        assert_eq!(lookup("CC"), Some("cc".to_string()));
+        assert_eq!(lookup("LIBRARY_PATH"), None);
+    }
+
+    #[test]
+    fn merge_path_env_dedups_already_present_segments() {
+        // A floor package that is also a declared dep (e.g. `musl` declares `linux-headers`)
+        // arrives with a value already in the env; segment-level dedup keeps a single-path var
+        // like `<DEP>_PREFIX` from becoming `/p:/p`, and avoids duplicate search entries.
+        let mut env = vec![
+            ("LINUX_HEADERS_PREFIX".to_string(), "/lh".to_string()),
+            ("CPATH".to_string(), "/lh/include".to_string()),
+        ];
+        merge_path_env(
+            &mut env,
+            vec![
+                ("LINUX_HEADERS_PREFIX".to_string(), "/lh".to_string()),
+                ("CPATH".to_string(), "/musl/include:/lh/include".to_string()),
+            ],
+        );
+        let lookup = |key: &str| env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+        assert_eq!(lookup("LINUX_HEADERS_PREFIX"), Some("/lh".to_string()));
+        assert_eq!(
+            lookup("CPATH"),
+            Some("/lh/include:/musl/include".to_string())
+        );
+    }
 
     #[test]
     fn core_bin_dirs_returns_installed_core_packages() {
