@@ -105,43 +105,30 @@ impl Resolver<'_> {
             return dep.clone();
         }
         // Provider order must be deterministic: the choice folds into the chosen package's
-        // dependents' store hashes, and the closure walker (`store::closure`) mirrors this
-        // resolution when hashing straight from a rune — both sides must agree.
+        // dependents' store hashes, and the closure walker (`store::closure`) shares the very
+        // same `select_provider` when hashing straight from a rune — both sides must agree.
         providers.sort();
-        // A `grm prefer` choice wins over everything: it is explicit user intent. If the
-        // preferred package cannot satisfy the version requirement, resolution fails loudly
-        // downstream instead of silently substituting a different provider. Only a *stale*
-        // preference — the named package no longer provides the capability at all — warns and
-        // falls through to the default selection.
-        if let Some(preferred) = self.preferences.get(&dep.name) {
-            if providers.contains(preferred) {
-                return Dependency {
-                    name: preferred.clone(),
-                    req: dep.req.clone(),
-                    platform: dep.platform.clone(),
-                };
-            }
+        // A stale preference — the named package no longer provides the capability at all —
+        // warns; a preference that still provides it wins inside `select_provider` even when it
+        // cannot satisfy `req` (resolution then fails loudly downstream rather than silently
+        // substituting a different provider).
+        if let Some(preferred) = self.preferences.get(&dep.name)
+            && !providers.contains(preferred)
+        {
             progress::warn(&format!(
                 "preference for `{}` names `{preferred}`, which no longer provides it; ignoring",
                 dep.name
             ));
         }
-        // Prefer an already-installed provider that satisfies the version constraint.
-        for provider in &providers {
-            if let Some(version) = self.installed.get(provider)
-                && crate::model::req_matches(&dep.req, version)
-            {
-                return Dependency {
-                    name: provider.clone(),
-                    req: dep.req.clone(),
-                    platform: dep.platform.clone(),
-                };
-            }
-        }
-        // No installed provider matches; use the first by name. With multiple uninstalled
-        // providers `grm prefer <capability> <package>` is how the user overrides this pick.
+        let name = select_provider(
+            &providers,
+            self.preferences.get(&dep.name),
+            self.installed,
+            &dep.req,
+        )
+        .unwrap_or_else(|| dep.name.clone()); // providers is non-empty, so always Some
         Dependency {
-            name: providers[0].clone(),
+            name,
             req: dep.req.clone(),
             platform: dep.platform.clone(),
         }

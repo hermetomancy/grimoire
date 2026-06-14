@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use semver::{Version, VersionReq};
 
 use crate::{build, build::toolchain, store, util::paths};
 
@@ -42,7 +43,7 @@ fn disk_group_parts(group: &build::split::SplitGroup) -> Result<Vec<GroupPart>> 
 /// Computes the content address (store hash) of the package named `name`, resolving its runtime
 /// dependency closure to store hashes.
 pub fn store_hash(name: &str) -> Result<String> {
-    Walker::new()?.of_name(name)
+    Walker::new()?.of_name(name, &VersionReq::STAR)
 }
 
 /// Like [`store_hash`], but for a specific rune file (e.g. a `grm build <path>`), so the exact rune
@@ -311,7 +312,10 @@ struct Walker {
 struct CapabilityContext {
     index: crate::solve::CapabilityIndex,
     preferences: std::collections::BTreeMap<String, String>,
-    installed: std::collections::HashSet<String>,
+    /// Installed provider names mapped to their version, so capability resolution can apply the
+    /// dependency's `VersionReq` exactly as the resolver's `expand_capability` does (AGENTS §9.8).
+    /// A provider whose recorded version does not parse is omitted — it cannot req-match anyway.
+    installed: BTreeMap<String, Version>,
 }
 
 impl Walker {
@@ -333,7 +337,7 @@ impl Walker {
         })
     }
 
-    fn of_name(&mut self, name: &str) -> Result<String> {
+    fn of_name(&mut self, name: &str, req: &VersionReq) -> Result<String> {
         if let Some(hash) = self.cache.get(name) {
             return Ok(hash.clone());
         }
@@ -341,32 +345,36 @@ impl Walker {
             return self.of_rune(name, &rune);
         }
         // No literal rune: resolve the name as a capability to a concrete provider, mirroring
-        // the solver. The chosen provider folds into the hash, which is the point — a package
-        // built against `gawk`'s awk is different content from one built against `mawk`'s, so
-        // it gets a different address (and a prebuilt only substitutes for users whose
+        // the solver — including the version requirement, so the provider chosen here is the one
+        // the resolver picked. The chosen provider folds into the hash, which is the point — a
+        // package built against `gawk`'s awk is different content from one built against `mawk`'s,
+        // so it gets a different address (and a prebuilt only substitutes for users whose
         // resolution matches the builder's).
-        let Some(provider) = self.resolve_capability(name)? else {
+        let Some(provider) = self.resolve_capability(name, req)? else {
             bail!(
                 "no rune found for `{name}` and no package provides it; every runtime \
                  dependency must resolve to a rune or a capability provider"
             );
         };
-        let hash = self.of_name(&provider)?;
+        // The provider is a literal package; resolving it needs no further req (it has a rune).
+        let hash = self.of_name(&provider, &VersionReq::STAR)?;
         self.cache.insert(name.to_string(), hash.clone());
         Ok(hash)
     }
 
-    /// Resolves a capability name to one provider package, in the solver's order — the
-    /// `grm prefer` choice when it still provides the capability, else an installed provider,
-    /// else the first provider — except every step here is deterministic (providers sorted by
-    /// name) because the result feeds a content address. Returns `None` when nothing provides
-    /// the capability.
-    fn resolve_capability(&mut self, name: &str) -> Result<Option<String>> {
+    /// Resolves a capability name to one provider package, in the solver's order and against the
+    /// same version requirement: the `grm prefer` choice when it still provides the capability,
+    /// else the first installed provider *that satisfies `req`*, else the first provider by name.
+    /// This mirrors `solve::resolver::expand_capability` step for step — including the req filter
+    /// on installed providers — so the provider folded into a dependent's content address is the
+    /// same one the resolver picked (AGENTS §9.8). Every step is deterministic (providers sorted
+    /// by name). Returns `None` when nothing provides the capability.
+    fn resolve_capability(&mut self, name: &str, req: &VersionReq) -> Result<Option<String>> {
         if self.caps.is_none() {
             let installed = crate::install::installed_states()
                 .unwrap_or_default()
                 .into_iter()
-                .map(|state| state.name)
+                .filter_map(|state| Some((state.name, Version::parse(&state.version).ok()?)))
                 .collect();
             self.caps = Some(CapabilityContext {
                 index: crate::solve::CapabilityIndex::build()?,
@@ -382,18 +390,12 @@ impl Walker {
             return Ok(None);
         }
         providers.sort();
-        if let Some(preferred) = caps.preferences.get(name)
-            && providers.contains(preferred)
-        {
-            return Ok(Some(preferred.clone()));
-        }
-        if let Some(installed) = providers
-            .iter()
-            .find(|provider| caps.installed.contains(*provider))
-        {
-            return Ok(Some(installed.clone()));
-        }
-        Ok(Some(providers[0].clone()))
+        Ok(crate::solve::select_provider(
+            &providers,
+            caps.preferences.get(name),
+            &caps.installed,
+            req,
+        ))
     }
 
     fn of_rune(&mut self, name: &str, rune: &Path) -> Result<String> {
@@ -431,17 +433,17 @@ impl Walker {
     /// provider the same deterministic way `of_name` does before the map is consulted. Anything
     /// absent from `resolved` (no plan in scope, or a dep outside the resolved set) falls back to
     /// the full closure walk, which is the canonical address when no resolved closure exists.
-    fn external_hash(&mut self, name: &str) -> Result<String> {
+    fn external_hash(&mut self, name: &str, req: &VersionReq) -> Result<String> {
         if let Some(hash) = self.resolved.get(name) {
             return Ok(hash.clone());
         }
         if build::find_rune(name)?.is_none()
-            && let Some(provider) = self.resolve_capability(name)?
+            && let Some(provider) = self.resolve_capability(name, req)?
             && let Some(hash) = self.resolved.get(&provider)
         {
             return Ok(hash.clone());
         }
-        self.of_name(name)
+        self.of_name(name, req)
     }
 
     /// Computes the derived store hash of every member of a split group: external runtime
@@ -474,7 +476,7 @@ impl Walker {
                     if parts.iter().any(|member| member.name == dep.name) {
                         continue;
                     }
-                    let hash = self.external_hash(&dep.name)?;
+                    let hash = self.external_hash(&dep.name, &dep.req)?;
                     if !dep_hashes.contains(&hash) {
                         dep_hashes.push(hash);
                     }
@@ -531,7 +533,7 @@ impl Walker {
                 if !dep.matches_platform(&self.target) {
                     continue;
                 }
-                dep_hashes.push(self.of_name(&dep.name)?);
+                dep_hashes.push(self.of_name(&dep.name, &dep.req)?);
             }
             Ok(dep_hashes)
         })();
