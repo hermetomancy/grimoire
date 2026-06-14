@@ -174,8 +174,7 @@ fish are recognised); add it manually for other shells.
 
 ## Release Signing
 
-Official release artifacts and the core/world tome indexes are signed with the project
-minisign key:
+Official release artifacts are signed with the project minisign key:
 
 ```
 untrusted comment: minisign public key D4CCD5A2669CAC7C
@@ -183,30 +182,41 @@ RWR8rJxmotXM1NhQBsJZQfEeWtSP+3x67Nih78Tl7An5o7UQ8gWwmTt6
 ```
 
 Verify a release file with `minisign -Vm <file> -P RWR8rJxmotXM1NhQBsJZQfEeWtSP+3x67Nih78Tl7An5o7UQ8gWwmTt6`.
-Tome syncs verify automatically: the key is declared in each tome's `tome.rn` and pinned
-on first sync.
+A tome opts into signing by declaring `signers` in its `tome.rn` (see below); the keys are
+pinned on first sync and every later sync must present the same set.
 
 ## Signing a Tome
 
+Trust is **per artifact**, not per index: each published archive carries a detached
+`archive.tar.zst.minisig`, and source runes are authenticated through a signed
+`runes-manifest.nuon` (which pins every rune's content hash). The `index.nuon` itself is not
+signed — its archive hashes are authenticated by each archive's own signature plus its checksum.
+
 ```sh
-minisign -G
-grm tome build --all --path ./mytome
-minisign -S -m ./mytome/dist/index.nuon
+minisign -G                                    # generate a keypair
+grm tome build --all --path ./mytome           # build archives into dist/
+# sign each published artifact against your secret key:
+minisign -S -m ./mytome/runes-manifest.nuon    # source distribution
+for a in ./mytome/dist/*.tar.zst; do minisign -S -m "$a"; done   # binary distribution
 ```
 
-Declare the signer in `tome.rn`:
+Declare the public key at the manifest's **top level** (a `signer` nested under `packages` is
+rejected as an unknown field, so a misplaced key fails loudly instead of shipping unsigned):
 
 ```nu
-packages: {
-  repo: "https://example.com/mytome"
-  format: "http"
-  index: "index.nuon"
-  signer: "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3"
+export const tome = {
+  name: "mytome"
+  signers: ["RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3"]
+  packages: {
+    repo: "https://example.com/mytome"
+    format: "http"
+    index: "index.nuon"
+  }
 }
 ```
 
-Grimoire pins the key on first sync and refuses later syncs with a missing, invalid, or rotated
-key.
+Grimoire pins the key set on first sync and refuses later syncs with a missing, invalid, or
+rotated key.
 
 ## Addenda
 

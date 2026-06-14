@@ -14,8 +14,9 @@ use anyhow::{Context, Result, bail};
 use minisign_verify::{PublicKey, Signature};
 use std::path::Path;
 
-/// The conventional extension for a detached minisign signature: `index.nuon` is signed into
-/// `index.nuon.minisig`.
+/// The conventional extension for a detached minisign signature: `archive.tar.zst` is signed
+/// into `archive.tar.zst.minisig`. (The index document itself is not signed — its archive
+/// hashes are authenticated by each archive's own signature plus its checksum.)
 pub const SIGNATURE_EXTENSION: &str = "minisig";
 
 /// Verifies `data` against a detached minisign `signature` using `public_key_b64` — the bare
