@@ -294,18 +294,9 @@ impl Installer {
 
     /// Fetches, verifies, and installs a prebuilt substitute.
     fn install_substitute(&self, sub: &Substitute) -> Result<InstalledArchive> {
-        let source_archive = sub.root.join(&sub.entry.archive);
-        if let Some(tome) = tome::load_tomes()?
-            .into_iter()
-            .find(|t| t.name == sub.tome_name)
-        {
-            tome::verify_archive(&source_archive, &tome).with_context(|| {
-                format!(
-                    "verify archive signature for `{}` {}",
-                    sub.entry.name, sub.entry.version
-                )
-            })?;
-        }
+        // Fetch and checksum-verify the archive first: its detached signature is verified against
+        // the fetched bytes, and for a remote binhost the `.minisig` is fetched over the same
+        // transport (it has no local path to read).
         let archive = fetch::fetch_verified(
             &sub.entry.archive,
             &sub.root,
@@ -313,6 +304,19 @@ impl Installer {
             &paths::archive_cache_dir()?,
             &format!("archive `{}` {}", sub.entry.name, sub.entry.version),
         )?;
+        if let Some(tome) = tome::load_tomes()?
+            .into_iter()
+            .find(|t| t.name == sub.tome_name)
+        {
+            tome::verify_archive(&archive, &sub.entry.archive, &sub.root, &tome).with_context(
+                || {
+                    format!(
+                        "verify archive signature for `{}` {}",
+                        sub.entry.name, sub.entry.version
+                    )
+                },
+            )?;
+        }
         install_archive(
             &archive,
             Some(sub.entry.archive_hash.clone()),

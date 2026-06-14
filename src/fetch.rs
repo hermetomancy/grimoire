@@ -275,6 +275,23 @@ fn http_error(url: &str, err: ureq::Error) -> anyhow::Error {
     }
 }
 
+/// Fetches a small companion file (e.g. a detached `.minisig`) as text, over the same transport
+/// the artifact it accompanies came from: an `http(s)` URL is downloaded, anything else is read
+/// relative to `base_dir`. No content hash is required — a detached signature is verified against
+/// the already-checksummed artifact it signs, so a tampered signature simply fails verification.
+pub fn fetch_companion_text(location: &str, base_dir: &Path) -> Result<String> {
+    if location.starts_with("http://") || location.starts_with("https://") {
+        let response =
+            http_get(http_agent(), location).map_err(|err| http_error(location, *err))?;
+        response
+            .into_string()
+            .with_context(|| format!("read {location}"))
+    } else {
+        let path = local_source_path(location, base_dir);
+        fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))
+    }
+}
+
 fn download_into(url: &str, base_dir: &Path, destination: &Path) -> Result<()> {
     if url.starts_with("http://") || url.starts_with("https://") {
         let response = http_get(http_agent(), url).map_err(|err| http_error(url, *err))?;

@@ -45,6 +45,10 @@ heading when it is tagged.
 
 ### Fixed
 
+- Signed remote binhosts now install: an archive's detached `.minisig` is fetched over the same
+  transport as the archive and verified against the downloaded bytes, instead of being looked up
+  only on the local filesystem (which never existed for an `http` repo, so a signed remote tome
+  failed closed and could never serve a binary). Covered by a new served-over-HTTP test.
 - Capability resolution no longer reports a satisfiable graph unsatisfiable: when the
   lexically-first provider has no version matching the requirement but another provider does, the
   one that can satisfy it is chosen. The check is requirement-aware over inputs the resolver and
