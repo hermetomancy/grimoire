@@ -593,8 +593,12 @@ pub fn resolve_rune(package: &str) -> Result<PathBuf> {
 /// then a `runes/<package>.rn` in any configured tome cache, then the same relative to the
 /// current directory. Returns the canonical path, or `None` when nothing matches.
 pub fn find_rune(package: &str) -> Result<Option<PathBuf>> {
+    // A rune is always a file. Testing `is_file()` rather than `exists()` keeps a directory whose
+    // name collides with `package` from being accepted as a rune — e.g. a `grimoire/` source
+    // checkout in the cwd while resolving the package `grimoire`, which would otherwise be read as
+    // rune metadata and fail with a cryptic `Is a directory (os error 21)`.
     let path = PathBuf::from(package);
-    if path.exists() {
+    if path.is_file() {
         return Ok(Some(path.canonicalize().with_context(|| {
             format!("resolve rune path {}", path.display())
         })?));
@@ -607,7 +611,7 @@ pub fn find_rune(package: &str) -> Result<Option<PathBuf>> {
     for tome in tome::load_tomes()? {
         let cache_path = tome::ensure_tome_cache(&tome)?;
         let rune = cache_path.join("runes").join(format!("{package}.rn"));
-        if rune.exists() {
+        if rune.is_file() {
             return Ok(Some(rune.canonicalize().with_context(|| {
                 format!("resolve rune path {}", rune.display())
             })?));
@@ -619,7 +623,7 @@ pub fn find_rune(package: &str) -> Result<Option<PathBuf>> {
         PathBuf::from("runes").join(format!("{package}.rn")),
     ];
     for candidate in candidates {
-        if candidate.exists() {
+        if candidate.is_file() {
             return Ok(Some(candidate.canonicalize().with_context(|| {
                 format!("resolve rune path {}", candidate.display())
             })?));

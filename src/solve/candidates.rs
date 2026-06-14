@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use semver::Version;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use crate::{
@@ -192,7 +192,28 @@ pub(crate) fn gather_rune_candidate(name: &str, target: &str) -> Result<Option<R
     let Some(rune) = build::find_rune(name)? else {
         return Ok(None);
     };
-    let metadata = build::read_rune_metadata(&rune, build::tome_name_for_rune(&rune)?.as_deref())?;
+    // Rune resolution here is speculative: `name` may have matched a file that turns out not to be
+    // a usable rune (wrong contents, a parse error, an unreadable tome checkout). A bad rune must
+    // not abort the whole solve — it simply contributes no source candidate, leaving the index
+    // substitutes (the "usual route") to satisfy `name`. The failure is surfaced as a warning
+    // rather than swallowed, so a genuinely broken rune is still noticed. An *explicit* source
+    // install (`grm install <path>.rn` / `--from-source`) goes through `resolve_rune`, which keeps
+    // the same failure fatal — there the user demanded that rune and deserves the hard error.
+    match read_rune_candidate(&rune, name, target) {
+        Ok(candidate) => Ok(Some(candidate)),
+        Err(err) => {
+            crate::util::progress::warn(&format!(
+                "ignoring local rune `{}` for `{name}`: {err:#}; resolving `{name}` from \
+                 configured tomes instead",
+                rune.display()
+            ));
+            Ok(None)
+        }
+    }
+}
+
+fn read_rune_candidate(rune: &Path, name: &str, target: &str) -> Result<RuneCandidate> {
+    let metadata = build::read_rune_metadata(rune, build::tome_name_for_rune(rune)?.as_deref())?;
     let version = parse_version_relaxed(&metadata.version)
         .with_context(|| format!("rune version `{}` for `{name}`", metadata.version))?;
     let runtime: Vec<Dependency> = metadata
@@ -201,13 +222,13 @@ pub(crate) fn gather_rune_candidate(name: &str, target: &str) -> Result<Option<R
         .into_iter()
         .filter(|d| d.matches_platform(target))
         .collect();
-    Ok(Some(RuneCandidate {
+    Ok(RuneCandidate {
         version,
         runtime,
         conflicts: metadata.conflicts,
         replaces: metadata.replaces,
-        path: rune,
-    }))
+        path: rune.to_path_buf(),
+    })
 }
 
 /// The newest version of `name` installable from any configured tome (binary or source), or

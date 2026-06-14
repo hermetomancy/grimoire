@@ -53,6 +53,17 @@ pub fn run(root: &Path, args: &[&str]) -> Output {
         .expect("spawn grimoire")
 }
 
+/// Like [`run`], but with an explicit working directory — used to reproduce argument routing that
+/// depends on the cwd contents (e.g. a same-named directory shadowing a package name).
+pub fn run_in_dir(root: &Path, cwd: &Path, args: &[&str]) -> Output {
+    Command::new(BIN)
+        .args(args)
+        .env("GRIMOIRE_ROOT", root)
+        .current_dir(cwd)
+        .output()
+        .expect("spawn grimoire")
+}
+
 /// Like [`run`], but with extra environment variables — used to pin `GRIMOIRE_BUILD_ENV` so a test
 /// can simulate building and installing under different host toolchains.
 pub fn run_env(root: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {

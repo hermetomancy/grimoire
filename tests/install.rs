@@ -613,3 +613,80 @@ fn install_selects_constrained_dependency_version() {
         "solver must honor the `<2.0` constraint and pick lib 1.0.0"
     );
 }
+
+/// A package name that collides with a directory in the current working directory must still
+/// resolve as a *named* package, not be misrouted to a local-archive install. Regression for the
+/// `grm install grimoire` run from a tree holding a `grimoire/` source checkout, which fed the
+/// directory to archive staging and failed with `Is a directory (os error 21)`.
+#[test]
+fn named_install_ignores_same_named_directory_in_cwd() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let cwd = TempDir::new().unwrap();
+    fs::create_dir(cwd.path().join("grimoire")).unwrap();
+
+    let install = run_in_dir(root, cwd.path(), &["install", "grimoire"]);
+    let stderr = stderr(&install);
+    assert!(
+        !install.status.success(),
+        "no tome provides `grimoire`, so the install must fail: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Is a directory"),
+        "a same-named cwd directory must not be staged as an archive: {stderr}"
+    );
+    assert!(
+        stderr.contains("no version of `grimoire`"),
+        "the argument must reach name resolution, not local-archive staging: {stderr}"
+    );
+}
+
+/// A directory passed explicitly as an archive path fails with a clear message instead of the
+/// cryptic `Is a directory (os error 21)` from staging.
+#[test]
+fn local_archive_install_rejects_a_directory_clearly() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let dir = TempDir::new().unwrap();
+    let archive = dir.path().join("not-an-archive.tar.zst");
+    fs::create_dir(&archive).unwrap();
+
+    let install = run(root, &["install", archive.to_str().unwrap()]);
+    assert_failure_contains(
+        &install,
+        "is a directory, not a `.tar.zst` archive",
+        "directory passed as a local archive",
+    );
+}
+
+/// A local rune that matches a package name but fails to parse must not abort the whole solve.
+/// Rune resolution during a named install is speculative, so a broken rune is ignored (with a
+/// warning) and resolution falls back to the usual route — here, configured tomes, which provide
+/// nothing, yielding the normal "no version" error rather than a fatal rune-parse failure.
+#[test]
+fn named_install_ignores_unparseable_local_rune() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let cwd = TempDir::new().unwrap();
+    fs::write(cwd.path().join("binpkg.rn"), "%%% not a valid rune %%%\n").unwrap();
+
+    let install = run_in_dir(root, cwd.path(), &["install", "binpkg"]);
+    assert!(
+        !install.status.success(),
+        "no tome provides `binpkg`, so the install still fails: {}",
+        stderr(&install)
+    );
+    assert!(
+        stdout(&install).contains("ignoring local rune"),
+        "a broken local rune should be reported, not silently swallowed: {}",
+        stdout(&install)
+    );
+    assert!(
+        stderr(&install).contains("no version of `binpkg`"),
+        "resolution must fall back to the usual route, not abort on the rune parse error: {}",
+        stderr(&install)
+    );
+}

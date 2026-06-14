@@ -45,6 +45,15 @@ heading when it is tagged.
 
 ### Fixed
 
+- `grm install <name>` no longer fails when the working directory holds an entry of the same name.
+  Argument routing distinguished a local archive (and `find_rune` a source rune) by bare path
+  existence, so a `grimoire/` source checkout next to `grm install grimoire` was handed to archive
+  staging — `File::open` succeeds on a directory, so it surfaced as a cryptic `Is a directory
+  (os error 21)` blamed on the transaction destination. Routing is now syntactic (a package name is
+  a bare identifier; a local archive looks like a path or carries `.tar.zst`), rune lookup matches
+  files only, and speculative rune resolution during a named solve degrades to "no source
+  candidate" with a warning instead of aborting — an explicit `--from-source`/`.rn` install, which
+  demanded that rune, stays fatal.
 - A binary-index-only package (a prebuilt published with no source rune) that is also a capability
   provided by other packages no longer gets a divergent address: the closure walk addresses it by
   its own recorded hash — matching the resolver, which treats any name with candidates as literal

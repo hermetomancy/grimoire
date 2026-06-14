@@ -142,6 +142,15 @@ pub(crate) fn install_store_only(
     expected_store_hash: Option<&str>,
     origin: InstallOrigin,
 ) -> Result<InstalledArchive> {
+    if archive_path.is_dir() {
+        // `File::open` on a directory succeeds, so without this guard the failure surfaced only
+        // when staging read the "archive" and got `Is a directory (os error 21)` — blamed on the
+        // transaction destination rather than the directory the caller passed in.
+        bail!(
+            "package archive `{}` is a directory, not a `.tar.zst` archive",
+            archive_path.display()
+        );
+    }
     if !archive_path.exists() {
         bail!(
             "package archive `{}` does not exist",

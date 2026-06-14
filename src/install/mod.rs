@@ -88,6 +88,25 @@ impl Installer {
     }
 }
 
+/// Whether an install argument denotes a local archive *file* rather than a package name to
+/// resolve from tomes. A package name is a bare identifier — no path separators, no leading `.`
+/// (see [`crate::model::value::validate_ident`]) — so an argument is only a local archive when it
+/// *looks* like a path: it carries the `.tar.zst` extension, contains a path separator, or begins
+/// with `.` (`./`, `../`).
+///
+/// The test is deliberately syntactic and never touches the filesystem. Routing on
+/// `Path::exists()` instead would let any cwd entry whose name happens to match a package shadow
+/// the named install — most painfully a `grimoire/` *directory* (a source checkout) sitting next
+/// to `grm install grimoire`, which then handed the directory to the archive staging code and
+/// failed with a cryptic `Is a directory (os error 21)`. Whether a path-shaped argument actually
+/// resolves to a readable archive is [`Installer::install_local_root`]'s job to report.
+fn is_local_archive_arg(package: &str) -> bool {
+    package.ends_with(".tar.zst")
+        || package.starts_with('.')
+        || package.contains('/')
+        || package.contains('\\')
+}
+
 pub fn install(args: InstallArgs) -> Result<()> {
     if let Some(msg) = paths::fixed_store_setup_instructions() {
         bail!("{msg}");
@@ -123,10 +142,7 @@ pub fn install(args: InstallArgs) -> Result<()> {
             .packages
             .iter()
             .filter(|package| {
-                !args.from_source
-                    && !package.ends_with(".rn")
-                    && !package.ends_with(".tar.zst")
-                    && !PathBuf::from(package).exists()
+                !args.from_source && !package.ends_with(".rn") && !is_local_archive_arg(package)
             })
             .cloned()
             .collect();
@@ -152,7 +168,7 @@ pub fn install(args: InstallArgs) -> Result<()> {
     for package in &args.packages {
         let name = if args.from_source || package.ends_with(".rn") {
             installer.install_source_root(package)?
-        } else if PathBuf::from(package).exists() || package.ends_with(".tar.zst") {
+        } else if is_local_archive_arg(package) {
             installer.install_local_root(package, args.sha256.clone())?
         } else {
             settle_capability_intent(package, args.dry_run, args.locked)?;
