@@ -45,6 +45,11 @@ heading when it is tagged.
 
 ### Fixed
 
+- The shared `/grm/store` is safe under concurrent multi-user use. Mutating commands now also take
+  an exclusive lock on the store directory (in addition to the per-user install-root lock), so two
+  users can no longer race store mutations; and `grm clean` treats every user's generations under
+  `/grm/profiles/*` as GC roots, so one user's collection can never reclaim a store path another
+  user's generation still links to. Isolated `GRIMOIRE_ROOT` installs are unaffected.
 - Generations are built stage-then-promote like every other state mutation: a new generation is
   assembled in a `.gen-N.staging` directory and atomically renamed into place, so a crash mid-build
   can no longer leave a registry-adoptable but snapshot-less `gen-N` (§9.1).

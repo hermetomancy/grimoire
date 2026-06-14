@@ -1,11 +1,18 @@
-//! Process-wide install-root lock.
+//! Process-wide install-root and store locks.
 //!
-//! Two `grm install`/`remove`/`clean`/`tome …`/`addendum …` runs against the same install root
-//! mutate shared state (store/, bin/, state/, transactions/, the lockfile, tomes/, addendums/);
-//! without coordination they can race and corrupt that state. Mutating CLI entry points acquire
-//! an exclusive OS-level advisory lock on `<install root>/.grimoire-lock` before doing any work
-//! and hold it for the entire command — released automatically when the file descriptor closes
-//! at process exit, so a crash never leaves a stale lock on disk.
+//! Two `grm install`/`remove`/`clean`/`tome …`/`addendum …` runs mutate shared state; without
+//! coordination they can race and corrupt it. A mutating command takes two advisory locks:
+//!
+//! - the **install-root lock** (`<install root>/.grimoire-lock`) serializes a single user's own
+//!   per-user state (state/, bin/, transactions/, the lockfile, tomes/, addendums/, generations);
+//! - the **store lock** serializes mutations of the content-addressed store, which on the fixed
+//!   `/grm/store` is *shared across users*. Without it, user B's `grm clean` could reclaim a store
+//!   path only user A's generation references (GC reachability is per-user). It is a `flock` on the
+//!   store directory itself, so no sentinel file lands in the store for GC to trip over.
+//!
+//! Both are held for the whole command and released when the fds close at process exit, so a crash
+//! never leaves a stale lock. They are always acquired install-root-first, so two processes cannot
+//! deadlock.
 
 use anyhow::{Context, Result, bail};
 use fs4::fs_std::FileExt;
@@ -16,11 +23,14 @@ use crate::util::paths;
 
 const LOCK_FILE_NAME: &str = ".grimoire-lock";
 
-/// RAII guard for the install-root lock. Dropping it releases the OS lock; the sentinel file
-/// itself is intentionally left on disk so a third process can't race in between our unlock
-/// and a delete and end up holding a lock on a freshly-recreated inode.
+/// RAII guard for the install-root and store locks. Dropping it releases both OS locks; the
+/// install-root sentinel file is intentionally left on disk so a third process can't race in
+/// between our unlock and a delete and end up holding a lock on a freshly-recreated inode.
 pub struct InstallRootGuard {
     _file: File,
+    /// The shared-store lock (a `flock` on the store directory). `None` only when the store does
+    /// not exist yet, so first-run setup is not blocked.
+    _store: Option<File>,
 }
 
 /// Acquires the install-root lock or fails fast with a diagnostic naming the holder. The lock
@@ -66,5 +76,35 @@ pub fn acquire() -> Result<InstallRootGuard> {
             .ok()
     })();
 
-    Ok(InstallRootGuard { _file: file })
+    // Then the shared-store lock. Order (install root first) is the same everywhere, so two
+    // processes can never deadlock holding one another's lock.
+    let store = acquire_store_lock()?;
+
+    Ok(InstallRootGuard {
+        _file: file,
+        _store: store,
+    })
+}
+
+/// Acquires an exclusive advisory lock on the content-addressed store so concurrent `grm`
+/// processes — including different users on the fixed `/grm/store` — serialize store mutations and
+/// GC. The lock is a `flock` on the store directory's own descriptor: no sentinel file is created
+/// inside the store (which `grm clean` would otherwise see as an unreferenced entry). Returns
+/// `None` when the store does not exist yet, so first-run installs and `grm setup` are not blocked.
+fn acquire_store_lock() -> Result<Option<File>> {
+    let store = paths::store_root()?;
+    if !store.exists() {
+        return Ok(None);
+    }
+    // Opening a directory read-only and `flock`-ing its descriptor is valid POSIX (the project is
+    // POSIX-only, §11) and needs no write access to the store directory itself.
+    let dir = File::open(&store).with_context(|| format!("open store {}", store.display()))?;
+    let acquired = FileExt::try_lock_exclusive(&dir).context("acquire store lock")?;
+    if !acquired {
+        bail!(
+            "another `grm` process is mutating the store {}; retry once it finishes",
+            store.display()
+        );
+    }
+    Ok(Some(dir))
 }
