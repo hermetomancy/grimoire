@@ -45,6 +45,8 @@ heading when it is tagged.
 
 ### Fixed
 
+- Single-package `grm tome build` now holds the install-root lock (previously only `--all` did),
+  so the build deps it installs store-only can no longer be reaped by a concurrent `grm clean`.
 - Reading rune metadata is now inert: the file-loading parse keywords (`use`, `source`,
   `overlay`, `module`, `register`, `plugin`) are refused before the parser runs, so reading the
   `package` record of an untrusted catalog rune can no longer open arbitrary host files at parse

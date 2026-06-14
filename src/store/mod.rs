@@ -193,6 +193,12 @@ fn hash_sources(hasher: &mut Sha256, sources: &BTreeMap<String, Source>) {
     }
 }
 
+/// Truncates the SHA-256 to 64 bits (16 hex). The store path also carries the package
+/// `name-version`, so the effective collision domain is two *different* input sets that share the
+/// same name **and** version (e.g. a rune that drifted colliding with its pre-drift address) — a
+/// 2^32 birthday bound within a single package, which a realistic catalog never approaches. The
+/// width is a deliberate path-length/readability trade-off; widen the slice here (and bump the
+/// `grimoire-store-v*` tag) if the domain ever warrants it.
 fn truncate(hasher: Sha256) -> String {
     let full_hash = format!("{:x}", hasher.finalize());
     full_hash[..16].to_string()
