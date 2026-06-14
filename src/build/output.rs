@@ -62,29 +62,106 @@ pub(super) fn discover_libs(package_dir: &Path) -> Vec<String> {
             if !path.is_file() {
                 continue;
             }
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            let Some(base) = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(lib_base_name)
+            else {
                 continue;
             };
-            let Some(base) = name.strip_prefix("lib") else {
-                continue;
-            };
-            let base = if let Some(stripped) = base.strip_suffix(".a") {
-                stripped
-            } else if let Some(stripped) = base.strip_suffix(".dylib") {
-                stripped
-            } else if let Some(idx) = base.find(".so") {
-                &base[..idx]
-            } else {
-                continue;
-            };
-            if !base.is_empty() {
-                libs.push(base.to_owned());
-            }
+            libs.push(base);
         }
     }
     libs.sort();
     libs.dedup();
     libs
+}
+
+/// The base name of a library file or soname: `libfoo.so.1` → `foo`, `libbar.a` → `bar`,
+/// `libbaz.dylib` → `baz`, `libfoo-1.2.so` → `foo-1.2`. `None` for anything not shaped like a
+/// library. Shared by discovery and the linkage lint so a soname matches a discovered lib name.
+pub(crate) fn lib_base_name(name: &str) -> Option<String> {
+    let base = name.strip_prefix("lib")?;
+    let base = if let Some(stripped) = base.strip_suffix(".a") {
+        stripped
+    } else if let Some(stripped) = base.strip_suffix(".dylib") {
+        stripped
+    } else if let Some(idx) = base.find(".so") {
+        &base[..idx]
+    } else {
+        return None;
+    };
+    (!base.is_empty()).then(|| base.to_owned())
+}
+
+/// The dynamic libraries a single Mach-O or ELF image references (its `LC_LOAD_DYLIB`
+/// install names or `DT_NEEDED` sonames). Empty for any other byte stream. Static linkage
+/// leaves no reference here, so a linkage lint built on this narrows the host-leak class,
+/// not closes it.
+pub(crate) fn needed_libraries(data: &[u8]) -> Vec<String> {
+    use object::elf::{FileHeader32, FileHeader64};
+    use object::macho::{MachHeader32, MachHeader64};
+    use object::{Endianness, FileKind};
+    match FileKind::parse(data) {
+        Ok(FileKind::Elf32) => elf_needed::<FileHeader32<Endianness>>(data),
+        Ok(FileKind::Elf64) => elf_needed::<FileHeader64<Endianness>>(data),
+        Ok(FileKind::MachO32) => macho_needed::<MachHeader32<Endianness>>(data),
+        Ok(FileKind::MachO64) => macho_needed::<MachHeader64<Endianness>>(data),
+        _ => Vec::new(),
+    }
+}
+
+fn elf_needed<Elf: object::read::elf::FileHeader<Endian = object::Endianness>>(
+    data: &[u8],
+) -> Vec<String> {
+    use object::read::elf::Dyn;
+    let mut out = Vec::new();
+    let Ok(header) = Elf::parse(data) else {
+        return out;
+    };
+    let Ok(endian) = header.endian() else {
+        return out;
+    };
+    let Ok(sections) = header.sections(endian, data) else {
+        return out;
+    };
+    let Ok(Some((dynamic, index))) = sections.dynamic(endian, data) else {
+        return out;
+    };
+    let Ok(strings) = sections.strings(endian, data, index) else {
+        return out;
+    };
+    for entry in dynamic {
+        if entry.tag32(endian) == Some(object::elf::DT_NEEDED)
+            && let Ok(name) = entry.string(endian, strings)
+        {
+            out.push(String::from_utf8_lossy(name).into_owned());
+        }
+    }
+    out
+}
+
+fn macho_needed<Mach: object::read::macho::MachHeader<Endian = object::Endianness>>(
+    data: &[u8],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(header) = Mach::parse(data, 0) else {
+        return out;
+    };
+    let Ok(endian) = header.endian() else {
+        return out;
+    };
+    let Ok(mut commands) = header.load_commands(endian, data, 0) else {
+        return out;
+    };
+    while let Ok(Some(command)) = commands.next() {
+        if let Ok(Some(dylib)) = command.dylib()
+            && let Ok(name) = command.string(endian, dylib.dylib.name)
+        {
+            out.push(String::from_utf8_lossy(name).into_owned());
+        }
+    }
+    out
 }
 
 /// Ensure every file in `bin/`, `sbin/`, and `libexec/` is executable.
@@ -126,6 +203,22 @@ pub(super) fn fix_bin_permissions(package_dir: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::fs::{self, File};
+
+    #[test]
+    fn needed_libraries_parses_the_host_binary() {
+        // The test binary is a real Mach-O/ELF image; the parser must read its dynamic
+        // references without choking. A dynamically linked binary names the platform libc; a
+        // fully static one legitimately names nothing.
+        let exe = std::env::current_exe().expect("current exe");
+        let data = fs::read(&exe).expect("read exe");
+        let needed = needed_libraries(&data);
+        #[cfg(target_os = "macos")]
+        assert!(
+            needed.iter().any(|n| n.contains("libSystem")),
+            "a dynamic macOS binary must link libSystem: {needed:?}"
+        );
+        let _ = needed;
+    }
 
     #[test]
     fn discover_libs_handles_various_names() {

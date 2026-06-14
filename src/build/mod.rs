@@ -8,7 +8,7 @@
 pub(crate) mod split;
 pub(crate) mod toolchain;
 
-mod output;
+pub(crate) mod output;
 mod sources;
 
 use output::*;
