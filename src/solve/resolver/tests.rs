@@ -75,8 +75,53 @@ fn expand(
         candidates: HashMap::new(),
         capabilities,
         preferences,
+        steps_remaining: RESOLVE_STEP_BUDGET,
     };
     resolver.expand_capability(&dep(dep_name, ">=1.0")).name
+}
+
+#[test]
+fn pathological_backtracking_aborts_within_budget() {
+    // A chain whose leaf is permanently unsatisfiable (`sink` exists only at 1.0.0 but is
+    // required at >=5) forces the resolver to try every combination of the upstream packages'
+    // two versions — exponential. With a small budget it must abort with a clear error rather
+    // than hang. The real budget is far larger; this drives the same mechanism cheaply.
+    let two = |next: &str, req: &str| {
+        vec![
+            cand("2.0.0", &[dep(next, req)]),
+            cand("1.0.0", &[dep(next, req)]),
+        ]
+    };
+    let src = source(&[
+        ("b0", two("b1", "*")),
+        ("b1", two("b2", "*")),
+        ("b2", two("b3", "*")),
+        ("b3", two("b4", "*")),
+        ("b4", two("b5", "*")),
+        ("b5", two("sink", ">=5.0.0")),
+        ("sink", vec![cand("1.0.0", &[])]),
+    ]);
+    let installed = BTreeMap::new();
+    let preferences = BTreeMap::new();
+    let mut resolver = Resolver {
+        installed: &installed,
+        pins: None,
+        source: &src,
+        candidates: HashMap::new(),
+        capabilities: CapabilityIndex {
+            map: HashMap::new(),
+        },
+        preferences: &preferences,
+        steps_remaining: 32,
+    };
+    let mut chosen = BTreeMap::new();
+    let err = resolver
+        .resolve_list(&[dep("b0", "*")], &mut chosen)
+        .expect_err("over-constrained graph must abort");
+    assert!(
+        format!("{err:#}").contains("did not converge"),
+        "expected a budget-exhaustion error, got: {err:#}"
+    );
 }
 
 #[test]

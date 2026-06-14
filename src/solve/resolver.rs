@@ -12,6 +12,12 @@ use crate::{model::Dependency, model::preferences::Preferences, util::paths, uti
 
 use super::*;
 
+/// Maximum number of backtracking steps before resolution gives up. Each step clones the full
+/// selection and recurses, so a pathologically over-constrained graph can blow up exponentially;
+/// this bound turns an unbounded hang into a clear error. Real resolutions use orders of
+/// magnitude fewer steps, so the ceiling is generous enough never to reject a realistic graph.
+const RESOLVE_STEP_BUDGET: usize = 500_000;
+
 /// Resolves `roots` (and their transitive runtime dependencies) into an ordered install plan.
 /// `installed` maps already-installed package names to their versions; an installed package that
 /// still satisfies a requirement is reused and produces no step.
@@ -50,6 +56,7 @@ pub(crate) fn resolve_with(
         candidates: HashMap::new(),
         capabilities,
         preferences,
+        steps_remaining: RESOLVE_STEP_BUDGET,
     };
     let mut chosen: BTreeMap<String, ChosenNode> = BTreeMap::new();
     // All roots are resolved as one worklist so backtracking can revise an early choice when a
@@ -89,6 +96,8 @@ pub(crate) struct Resolver<'a> {
     capabilities: CapabilityIndex,
     /// `grm prefer` choices: capability name -> preferred provider package.
     preferences: &'a BTreeMap<String, String>,
+    /// Remaining backtracking steps before resolution aborts (see [`RESOLVE_STEP_BUDGET`]).
+    steps_remaining: usize,
 }
 
 impl Resolver<'_> {
@@ -147,6 +156,15 @@ impl Resolver<'_> {
         worklist: &[Dependency],
         chosen: &mut BTreeMap<String, ChosenNode>,
     ) -> Result<()> {
+        // Bound the backtracking search so an over-constrained graph fails loudly instead of
+        // hanging (each recursion clones the selection, so the worst case is exponential).
+        if self.steps_remaining == 0 {
+            bail!(
+                "dependency resolution did not converge within {RESOLVE_STEP_BUDGET} backtracking \
+                 steps; the requirement graph is over-constrained or pathologically large"
+            );
+        }
+        self.steps_remaining -= 1;
         let Some((dep, rest)) = worklist.split_first() else {
             return Ok(());
         };
