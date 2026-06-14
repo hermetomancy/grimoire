@@ -18,6 +18,13 @@ heading when it is tagged.
   archive from `cache/builds` instead of rebuilding.
 - `grm tome build` purity lint: built archives are scanned for baked host paths
   (`/usr/local`, `/opt/homebrew`, …); warns by default, `--strict` fails the build.
+- `grm tome build` linkage lint: built binaries are parsed (ELF `DT_NEEDED`, Mach-O
+  `LC_LOAD_DYLIB`) for dynamic references to host libraries that are neither a declared
+  dependency nor the libc/platform floor — the host-link class the purity scan cannot see (a
+  library bound without a baked path). Warns by default, `--strict` fails the build.
+- `grm tome build --hermetic` drops the POSIX ambient PATH tail (`/usr/bin`, `/bin`) so a
+  build sees only declared deps and the managed core floor — a self-hosting diagnostic that
+  surfaces silent host-userland leaks. No effect on the store hash.
 - Capability runtime deps are content-addressable: the closure walker resolves providers
   like the solver (preference → installed → first by name, deterministically).
 
@@ -35,6 +42,13 @@ heading when it is tagged.
 - Generations, the lockfile, `grm list`, and bare `grm upgrade` cover the linked set only;
   store-only packages (cached build deps, residue) never reach the profile.
 - Rune command-subset violations fail at `tome add`/`info` time instead of mid-build.
+
+### Fixed
+
+- Split-group members address their external dependencies against the resolver-chosen
+  closure rather than an independent re-pick, so the address the resolver predicts always
+  equals the one the build produces, and the published address stays a pure function of the
+  runes. Prevents silent content-address drift and dropped binary substitution.
 
 ## 0.1.0 — unreleased baseline
 
