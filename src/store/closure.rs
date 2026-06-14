@@ -46,16 +46,24 @@ pub fn store_hash(name: &str) -> Result<String> {
 }
 
 /// Like [`store_hash`], but for a specific rune file (e.g. a `grm build <path>`), so the exact rune
-/// given is hashed rather than whatever `find_rune` would resolve for its name.
-pub fn store_hash_for_rune(rune: &Path) -> Result<String> {
+/// given is hashed rather than whatever `find_rune` would resolve for its name. `resolved` is the
+/// known dependency closure (see [`installed_resolved`]); it only affects split-member addressing
+/// and is ignored for ordinary packages, so callers without one pass an empty map.
+pub fn store_hash_for_rune(rune: &Path, resolved: &BTreeMap<String, String>) -> Result<String> {
     let mut walker = Walker::new()?;
+    walker.resolved = resolved.clone();
     let metadata = walker.metadata(rune)?;
     walker.of_rune(&metadata.name, rune)
 }
 
 /// Like [`store_hash_for_rune`], but for an explicit target triple instead of the host default.
-pub fn store_hash_for_rune_with_target(rune: &Path, target: &str) -> Result<String> {
+pub fn store_hash_for_rune_with_target(
+    rune: &Path,
+    target: &str,
+    resolved: &BTreeMap<String, String>,
+) -> Result<String> {
     let mut walker = Walker::with_target(target)?;
+    walker.resolved = resolved.clone();
     let metadata = walker.metadata(rune)?;
     walker.of_rune(&metadata.name, rune)
 }
@@ -88,12 +96,31 @@ pub fn split_member_hashes(
     Walker::new()?.group_hashes(&group_parts(group))
 }
 
-/// Like [`split_member_hashes`], for an explicit target triple.
+/// Like [`split_member_hashes`], for an explicit target triple, addressing the group's external
+/// deps against `resolved` (see [`installed_resolved`]) so the build reproduces the resolver's
+/// expected address. Pass an empty map to re-derive externals from runes (the re-index path).
 pub fn split_member_hashes_with_target(
     group: &[(crate::model::PackageMetadata, Vec<u8>)],
     target: &str,
+    resolved: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>> {
-    Walker::with_target(target)?.group_hashes(&group_parts(group))
+    let mut walker = Walker::with_target(target)?;
+    walker.resolved = resolved.clone();
+    walker.group_hashes(&group_parts(group))
+}
+
+/// The recorded store hashes of installed packages, keyed by name — the actual resolved
+/// dependency closure to address a build against. Handed to split-member addressing so a member's
+/// hash folds the external versions it is genuinely built against rather than an independent
+/// re-pick (AGENTS §9.8). A dependency is always installed at its resolver-computed address before
+/// a dependent builds, so this agrees with the resolver's `computed` map for the relevant deps.
+/// Empty when nothing is installed or state is unreadable.
+pub fn installed_resolved() -> BTreeMap<String, String> {
+    crate::install::installed_states()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|state| (state.name, state.store_hash))
+        .collect()
 }
 
 fn group_parts(group: &[(crate::model::PackageMetadata, Vec<u8>)]) -> Vec<GroupPart> {
@@ -117,16 +144,19 @@ pub fn store_hash_for_rune_with_deps(
     dep_hashes: &[String],
     target: &str,
     build_env: &str,
+    resolved: &BTreeMap<String, String>,
 ) -> Result<String> {
     let metadata = build::read_rune_metadata(rune, build::tome_name_for_rune(rune)?.as_deref())?;
 
     // A split group member's address folds the *whole group's* external deps, which the
-    // caller's positional list (the member's own deps) cannot supply. Fall back to the
-    // closure walk, which resolves the union deterministically — the same path the builder
-    // uses, so the addresses agree by construction.
+    // caller's positional list (the member's own deps) cannot supply. Address the group through
+    // the closure walk, but hand it the resolver's chosen closure (`resolved`) so external deps
+    // fold in at the versions the resolver actually picked — the same closure the builder
+    // addresses against, so the resolver's predicted address equals the build's produced one.
     if let Some(group) = build::split::group_for(rune)? {
         let mut walker = Walker::with_target(target)?;
         walker.build_env = build_env.to_string();
+        walker.resolved = resolved.clone();
         let hashes = walker.group_hashes(&disk_group_parts(&group)?)?;
         return hashes.get(&metadata.name).cloned().with_context(|| {
             format!("split group for `{}` did not yield its hash", metadata.name)
@@ -184,6 +214,17 @@ pub fn stale_installed(states: &[crate::model::PackageState]) -> Vec<StaleInstal
     let Ok(mut walker) = Walker::new() else {
         return Vec::new();
     };
+    // Address split-member externals that are *held* against their pinned installed address,
+    // matching the builder: a held dep is pinned to its installed bits, not its current rune, so
+    // without this a split member depending on it would be flagged drifted forever (re-realizing it
+    // reproduces the same address). Non-held externals stay on the canonical `of_name` walk, so a
+    // genuine rune edit to a group's external dep is still detected and rebuilds the group.
+    walker.resolved = crate::install::installed_states()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|state| state.held)
+        .map(|state| (state.name, state.store_hash))
+        .collect();
     let current_env = toolchain::build_env_id();
     let mut stale = Vec::new();
     for state in states {
@@ -255,6 +296,13 @@ struct Walker {
     build_env: String,
     cache: HashMap<String, String>,
     stack: Vec<String>,
+    /// Resolver-chosen (or installed) store hashes keyed by package name. When a split group's
+    /// external dependency appears here, its recorded address is folded in verbatim instead of
+    /// being re-derived from the rune — collapsing split-member addressing onto the same closure
+    /// the resolver/installer chose, so the address the resolver predicts equals the one the
+    /// build produces (AGENTS §9.8). Empty for bare prediction/stale walks, where the closure
+    /// walk is itself the canonical address.
+    resolved: BTreeMap<String, String>,
     /// Capability-resolution context (provider index, preferences, installed names), built
     /// lazily the first time a dependency name has no literal rune. Most walks never need it.
     caps: Option<CapabilityContext>,
@@ -280,6 +328,7 @@ impl Walker {
             build_env: toolchain::build_env_id().unwrap_or_default(),
             cache: HashMap::new(),
             stack: Vec::new(),
+            resolved: BTreeMap::new(),
             caps: None,
         })
     }
@@ -373,9 +422,31 @@ impl Walker {
         self.of_rune_with_bytes(name, &metadata, &rune_bytes)
     }
 
+    /// Resolves a split group's external dependency to a store hash, preferring the
+    /// resolver/installer's chosen address (`self.resolved`) over re-deriving it from the rune.
+    /// This is the single point where split-member addressing consumes resolver choices, so the
+    /// member's hash folds external deps at the versions the resolver actually picked rather than
+    /// an independent re-pick — the source of accidental address divergence (AGENTS §9.8). A
+    /// capability is keyed in `resolved` by its concrete provider, so it is resolved to that
+    /// provider the same deterministic way `of_name` does before the map is consulted. Anything
+    /// absent from `resolved` (no plan in scope, or a dep outside the resolved set) falls back to
+    /// the full closure walk, which is the canonical address when no resolved closure exists.
+    fn external_hash(&mut self, name: &str) -> Result<String> {
+        if let Some(hash) = self.resolved.get(name) {
+            return Ok(hash.clone());
+        }
+        if build::find_rune(name)?.is_none()
+            && let Some(provider) = self.resolve_capability(name)?
+            && let Some(hash) = self.resolved.get(&provider)
+        {
+            return Ok(hash.clone());
+        }
+        self.of_name(name)
+    }
+
     /// Computes the derived store hash of every member of a split group: external runtime
     /// deps (the union across all members, group-internal references excluded) resolve via
-    /// the normal closure walk, fold into the shared group hash, and each member's address
+    /// [`Self::external_hash`], fold into the shared group hash, and each member's address
     /// derives from that. All member hashes are cached before returning.
     fn group_hashes(&mut self, parts: &[GroupPart]) -> Result<BTreeMap<String, String>> {
         let parent = parts
@@ -403,7 +474,7 @@ impl Walker {
                     if parts.iter().any(|member| member.name == dep.name) {
                         continue;
                     }
-                    let hash = self.of_name(&dep.name)?;
+                    let hash = self.external_hash(&dep.name)?;
                     if !dep_hashes.contains(&hash) {
                         dep_hashes.push(hash);
                     }
@@ -486,7 +557,145 @@ impl Walker {
 
 #[cfg(test)]
 mod tests {
-    use super::diff_build_env;
+    use super::*;
+    use crate::model::{Dependency, Deps, PackageMetadata};
+
+    fn meta(name: &str, split_from: Option<&str>, runtime: Vec<Dependency>) -> PackageMetadata {
+        PackageMetadata {
+            name: name.to_string(),
+            version: "1.0.0".to_string(),
+            target: None,
+            store_path: None,
+            targets: Vec::new(),
+            fixed_output: false,
+            summary: None,
+            bins: BTreeMap::new(),
+            sources: BTreeMap::new(),
+            deps: Deps {
+                runtime,
+                ..Deps::default()
+            },
+            build_flags: BTreeMap::new(),
+            provides: Vec::new(),
+            libs: Vec::new(),
+            notes: Vec::new(),
+            upstream_version: None,
+            conflicts: Vec::new(),
+            replaces: Vec::new(),
+            split_from: split_from.map(str::to_string),
+            files: split_from
+                .map(|_| vec!["bin/extra*".to_string()])
+                .unwrap_or_default(),
+        }
+    }
+
+    fn part(metadata: PackageMetadata, rune_hash: &str) -> GroupPart {
+        GroupPart {
+            name: metadata.name.clone(),
+            metadata,
+            rune_hash: rune_hash.to_string(),
+        }
+    }
+
+    /// A walker with an explicit resolved closure and no host probing, so split addressing is a
+    /// pure function of its inputs when every external dep is covered by `resolved`.
+    fn walker(resolved: BTreeMap<String, String>) -> Walker {
+        Walker {
+            target: "linux-x86_64-gnu".to_string(),
+            build_env: "env".to_string(),
+            cache: HashMap::new(),
+            stack: Vec::new(),
+            resolved,
+            caps: None,
+        }
+    }
+
+    /// A split group whose parent has a real *external* runtime dep (`libdep`); the member's only
+    /// runtime dep is the parent (group-internal, excluded from the external union).
+    fn group() -> Vec<GroupPart> {
+        vec![
+            part(
+                meta("core", None, vec![Dependency::any("libdep")]),
+                "PARENT_RUNE",
+            ),
+            part(
+                meta("extra", Some("core"), vec![Dependency::any("core")]),
+                "MEMBER_RUNE",
+            ),
+        ]
+    }
+
+    #[test]
+    fn split_member_address_tracks_the_resolved_external_version() {
+        // The member (and parent) address must fold whatever version the resolver chose for the
+        // external dep — supplied via `resolved` — not an independent re-pick. Two different
+        // resolved closures must yield two different addresses; the same closure, the same address.
+        let a = walker(BTreeMap::from([(
+            "libdep".to_string(),
+            "DEPHASH_A".to_string(),
+        )]))
+        .group_hashes(&group())
+        .expect("a resolved external dep needs no rune lookup");
+        let b = walker(BTreeMap::from([(
+            "libdep".to_string(),
+            "DEPHASH_B".to_string(),
+        )]))
+        .group_hashes(&group())
+        .expect("a resolved external dep needs no rune lookup");
+        let a2 = walker(BTreeMap::from([(
+            "libdep".to_string(),
+            "DEPHASH_A".to_string(),
+        )]))
+        .group_hashes(&group())
+        .unwrap();
+        assert_eq!(
+            a, a2,
+            "the same resolved closure derives the same addresses"
+        );
+        assert_ne!(
+            a["core"], b["core"],
+            "the parent's address must track the resolved external version"
+        );
+        assert_ne!(
+            a["extra"], b["extra"],
+            "the member's address must track the resolved external version"
+        );
+    }
+
+    #[test]
+    fn split_member_address_is_the_canonical_derivation_over_resolved_deps() {
+        // Pin that `group_hashes` folds *exactly* the resolved external hash through the public
+        // split primitives — there is one canonical derivation, and the resolved closure is its
+        // only variable input. A second code path that derived the address differently would fail
+        // this equality.
+        let parent = meta("core", None, vec![Dependency::any("libdep")]);
+        let hashes = walker(BTreeMap::from([(
+            "libdep".to_string(),
+            "DEPHASH".to_string(),
+        )]))
+        .group_hashes(&group())
+        .unwrap();
+
+        let rune_hashes = BTreeMap::from([
+            ("core".to_string(), "PARENT_RUNE".to_string()),
+            ("extra".to_string(), "MEMBER_RUNE".to_string()),
+        ]);
+        let group_hash = store::split_group_hash(
+            &parent,
+            &rune_hashes,
+            &["DEPHASH".to_string()],
+            "linux-x86_64-gnu",
+            "env",
+        );
+        assert_eq!(
+            hashes["core"],
+            store::split_member_hash(&group_hash, "core")
+        );
+        assert_eq!(
+            hashes["extra"],
+            store::split_member_hash(&group_hash, "extra")
+        );
+    }
 
     #[test]
     fn diff_renders_only_changed_identity_components() {

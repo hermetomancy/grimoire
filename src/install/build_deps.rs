@@ -108,8 +108,11 @@ pub(crate) fn ensure_build_deps_installed_inner(
                 InstallOrigin::BuildDep,
             )
         } else if let Some(rune) = &step.rune {
-            let store_hash = crate::store::closure::store_hash_for_rune(rune)
-                .with_context(|| format!("cannot compute store hash for `{}`", step.name))?;
+            let store_hash = crate::store::closure::store_hash_for_rune(
+                rune,
+                &crate::store::closure::installed_resolved(),
+            )
+            .with_context(|| format!("cannot compute store hash for `{}`", step.name))?;
             let metadata =
                 build::read_rune_metadata(rune, build::tome_name_for_rune(rune)?.as_deref())?;
             // Reuse a verified cached build of these exact inputs instead of rebuilding.
@@ -136,6 +139,7 @@ pub(crate) fn ensure_build_deps_installed_inner(
                 &paths::build_output_dir()?,
                 &env,
                 &store_hash,
+                &crate::store::closure::installed_resolved(),
             )?;
             install_store_only(
                 &result.primary.archive,

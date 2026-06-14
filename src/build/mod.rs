@@ -16,6 +16,7 @@ use sources::*;
 
 use anyhow::{Context, Result, bail};
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -208,7 +209,13 @@ pub fn build_package(
     let rune = resolve_rune(package)?;
     tome::verify_rune(&rune).with_context(|| format!("verify rune signature for {package}"))?;
     let target = target.map_or_else(paths::target_triple, |t| t.to_string());
-    let store_hash = crate::store::closure::store_hash_for_rune_with_target(&rune, &target)?;
+    // The published/standalone address must be a pure function of the runes and the resolved
+    // closure (canonical `of_name`), never the publisher's ambient installed state — otherwise
+    // `tome build` and `tome build --index` would key the same archive differently and a clean
+    // consumer would miss the substitute (AGENTS §9.8). The install paths own a resolved closure
+    // and pass it explicitly through `build_package_with_env`; here it is empty.
+    let store_hash =
+        crate::store::closure::store_hash_for_rune_with_target(&rune, &target, &BTreeMap::new())?;
     let metadata = EmbeddedNuRuntime.package_metadata(&rune)?;
     let build_deps = effective_build_deps(&rune, &metadata, &target)?;
 
@@ -231,17 +238,21 @@ pub fn build_package(
     };
     env.target = target;
     env.hermetic = hermetic;
-    build_package_with_env(package, output, &env, &store_hash)
+    build_package_with_env(package, output, &env, &store_hash, &BTreeMap::new())
 }
 
 /// Builds `package` into an archive recorded under the already-computed `store_hash` (the package's
 /// content address over its resolved dependency closure). The caller owns hash computation so the
-/// installer can reuse the address it derived from the dependencies it actually installed.
+/// installer can reuse the address it derived from the dependencies it actually installed. For a
+/// split group, `resolved` is the closure that produced `store_hash` (the installer's actual
+/// closure; empty for a canonical publisher/standalone build), so the recompute-and-cross-check
+/// addresses the members identically.
 pub fn build_package_with_env(
     package: &str,
     output: &Path,
     env: &BuildEnv,
     store_hash: &str,
+    resolved: &BTreeMap<String, String>,
 ) -> Result<BuildResult> {
     let target = env.target.clone();
     // A space in the install root breaks source builds: configure records the absolute paths of
@@ -271,6 +282,7 @@ pub fn build_package_with_env(
             output,
             env,
             store_hash,
+            resolved,
             &original_cwd,
         );
     }
@@ -320,6 +332,7 @@ fn build_group_with_env(
     output: &Path,
     env: &BuildEnv,
     store_hash: &str,
+    resolved: &BTreeMap<String, String>,
     original_cwd: &Path,
 ) -> Result<BuildResult> {
     let target = env.target.clone();
@@ -336,7 +349,10 @@ fn build_group_with_env(
             Ok((member.metadata.clone(), bytes))
         })
         .collect::<Result<_>>()?;
-    let hashes = crate::store::closure::split_member_hashes_with_target(&parts, &target)?;
+    // Recompute the group's member addresses against `resolved` — the closure that produced the
+    // planned `store_hash` (the installer's actual closure, or empty for a canonical build) — then
+    // cross-check the requested member below.
+    let hashes = crate::store::closure::split_member_hashes_with_target(&parts, &target, resolved)?;
     let member_hash = |name: &str| -> Result<&String> {
         hashes
             .get(name)

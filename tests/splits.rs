@@ -269,6 +269,69 @@ fn member_install_resolves_parents_build_deps() {
 }
 
 #[test]
+fn split_group_with_external_dep_installs_and_addresses_consistently() {
+    // A split group whose parent has a real *external* runtime dep exercises the external-dep
+    // fold in the group hash (the empty-union `core`/`extra` group never does). The resolver
+    // predicts each member's address by folding the dep's chosen hash; the build recomputes it
+    // against the installed closure. If those diverge, build_group_with_env's cross-check aborts
+    // the install — so a clean install is the end-to-end proof the two paths address identically.
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let tome = TempDir::new().unwrap();
+    let runes = tome.path().join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::create_dir_all(tome.path().join("dist")).unwrap();
+    fs::write(
+        tome.path().join("tome.rn"),
+        "export const tome = {\n  name: 'splitexternal'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("libdep.rn"),
+        "export const package = {\n  name: 'libdep'\n  version: '0.1.0'\n \n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'libdep\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'libdep')\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("core.rn"),
+        "export const package = {\n  name: 'core'\n  version: '0.1.0'\n  deps: { runtime: ['libdep'] }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'core\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'core')\n  \"#!/usr/bin/env sh\\nprintf 'extra\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'extra')\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("extra.rn"),
+        "export const package = {\n  name: 'extra'\n  version: '0.1.0'\n  split_from: 'core'\n  files: ['bin/extra*']\n  deps: { runtime: ['core'] }\n}\n",
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &[
+            "tome",
+            "add",
+            tome.path().to_str().unwrap(),
+            "--ref",
+            "main",
+        ],
+    );
+    assert_success(&add, "add splitexternal tome");
+
+    // Installing the member pulls the parent and the parent's external runtime dep, then builds
+    // the group with that dep on the installed closure.
+    let install = run(root, &["install", "extra"]);
+    assert_success(
+        &install,
+        "install split member whose group has an external dep",
+    );
+
+    assert!(
+        store_has_package(root, "libdep")
+            && store_has_package(root, "core")
+            && store_has_package(root, "extra"),
+        "the external dep, parent, and member must all be installed"
+    );
+    assert_eq!(stdout(&run_shim(root, "extra")).trim(), "extra");
+}
+
+#[test]
 fn store_hash_accepts_member_rune_paths() {
     let root = TempDir::new().unwrap();
     let root = root.path();
