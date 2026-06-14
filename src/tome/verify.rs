@@ -55,14 +55,27 @@ pub fn verify_rune(rune: &std::path::Path) -> Result<()> {
         .with_context(|| format!("verify rune signature for {}", rune.display()))
 }
 
-/// Verifies an archive's detached signature (`archive.tar.zst.minisig`) against the tome's pinned
-/// signers. Returns `Ok` when the tome has no pinned signers or when the signature verifies.
-pub fn verify_archive(archive: &std::path::Path, tome: &TomeState) -> Result<()> {
+/// Verifies a fetched archive's detached signature against the tome's pinned signers. The
+/// `.minisig` is fetched over the *same transport* the archive came from — `local_archive` is the
+/// already-downloaded-and-checksummed file, `archive_location`/`base_dir` are where it was fetched
+/// from (an `http(s)` URL or a path under the tome's package repo) — so a signed remote binhost
+/// verifies, not just a local-path one. Returns `Ok` when the tome has no pinned signers.
+pub fn verify_archive(
+    local_archive: &Path,
+    archive_location: &str,
+    base_dir: &Path,
+    tome: &TomeState,
+) -> Result<()> {
     if tome.signer_pubkeys.is_empty() {
         return Ok(());
     }
-    signing::verify_detached(archive, &tome.signer_pubkeys)
-        .with_context(|| format!("verify archive signature for {}", archive.display()))
+    let signature_location = format!("{archive_location}.{}", signing::SIGNATURE_EXTENSION);
+    let signature = crate::fetch::fetch_companion_text(&signature_location, base_dir)
+        .with_context(|| format!("fetch archive signature {signature_location}"))?;
+    let data = fs::read(local_archive)
+        .with_context(|| format!("read archive {}", local_archive.display()))?;
+    signing::verify_any(&data, &signature, &tome.signer_pubkeys)
+        .with_context(|| format!("verify archive signature for {archive_location}"))
 }
 
 /// Loads a tome's binary package index along with the package-repository root that its

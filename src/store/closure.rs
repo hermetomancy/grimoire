@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use semver::{Version, VersionReq};
 
 use crate::{build, build::toolchain, store, util::paths};
 
@@ -42,7 +43,7 @@ fn disk_group_parts(group: &build::split::SplitGroup) -> Result<Vec<GroupPart>> 
 /// Computes the content address (store hash) of the package named `name`, resolving its runtime
 /// dependency closure to store hashes.
 pub fn store_hash(name: &str) -> Result<String> {
-    Walker::new()?.of_name(name)
+    Walker::new()?.of_name(name, &VersionReq::STAR)
 }
 
 /// Like [`store_hash`], but for a specific rune file (e.g. a `grm build <path>`), so the exact rune
@@ -68,14 +69,16 @@ pub fn store_hash_for_rune_with_target(
     walker.of_rune(&metadata.name, rune)
 }
 
-/// Computes the store hash from already-read rune bytes and metadata.
-/// Avoids writing a temporary file when the bytes are already in memory.
-///
-/// Split group members cannot be addressed from a single rune: use
-/// [`store_hash_for_split_archive`], which takes the whole group.
-pub fn store_hash_for_rune_bytes(
+/// Computes the store hash from already-read rune bytes and metadata for an explicit target
+/// triple, avoiding a temporary file when the bytes are already in memory. The re-index path
+/// (`grm tome build --index`) addresses an archive against the target it was built for — read from
+/// the archive's own metadata — not the indexing host's, so a cross-target build keeps the address
+/// a consumer on that target reproduces (AGENTS §9.8). Split group members cannot be addressed
+/// from a single rune; use [`split_member_hashes_with_target`], which takes the whole group.
+pub fn store_hash_for_rune_bytes_with_target(
     rune_bytes: &[u8],
     metadata: &crate::model::PackageMetadata,
+    target: &str,
 ) -> Result<String> {
     if metadata.is_split_member() {
         bail!(
@@ -83,22 +86,15 @@ pub fn store_hash_for_rune_bytes(
             metadata.name
         );
     }
-    let mut walker = Walker::new()?;
+    let mut walker = Walker::with_target(target)?;
     walker.of_rune_with_bytes(&metadata.name, metadata, rune_bytes)
 }
 
-/// The store hashes of every member of a split group, keyed by package name, for the host
-/// target. `group` carries each member's metadata and raw rune bytes (parent included), as
-/// read from disk or from a member archive's embedded `.grimoire/group/` copies.
-pub fn split_member_hashes(
-    group: &[(crate::model::PackageMetadata, Vec<u8>)],
-) -> Result<BTreeMap<String, String>> {
-    Walker::new()?.group_hashes(&group_parts(group))
-}
-
-/// Like [`split_member_hashes`], for an explicit target triple, addressing the group's external
-/// deps against `resolved` (see [`installed_resolved`]) so the build reproduces the resolver's
-/// expected address. Pass an empty map to re-derive externals from runes (the re-index path).
+/// The store hashes of every member of a split group, keyed by package name, for an explicit
+/// target triple. `group` carries each member's metadata and raw rune bytes (parent included), as
+/// read from disk or from a member archive's embedded `.grimoire/group/` copies. External deps
+/// address against `resolved` (see [`installed_resolved`]) so the build reproduces the resolver's
+/// expected address; pass an empty map to re-derive externals from runes (the re-index path).
 pub fn split_member_hashes_with_target(
     group: &[(crate::model::PackageMetadata, Vec<u8>)],
     target: &str,
@@ -276,15 +272,19 @@ fn diff_build_env(recorded: &str, current: &str) -> String {
     };
     let old_parts = parse(recorded);
     let new_parts = parse(current);
+    // Dedup by exact tool name. A `starts_with` check would let one tool's change mask another
+    // whose name it is a prefix of (`ld` vs `ldd`, `as` vs `asm`), silently dropping a real
+    // change from the explanation; a sorted set visits each tool once.
+    let tools: BTreeMap<&String, ()> = old_parts
+        .keys()
+        .chain(new_parts.keys())
+        .map(|t| (t, ()))
+        .collect();
     let mut changes = Vec::new();
-    for tool in old_parts.keys().chain(new_parts.keys()) {
+    for tool in tools.into_keys() {
         let old = old_parts.get(tool).map(String::as_str).unwrap_or("(none)");
         let new = new_parts.get(tool).map(String::as_str).unwrap_or("(none)");
-        if old != new
-            && !changes
-                .iter()
-                .any(|c: &String| c.starts_with(tool.as_str()))
-        {
+        if old != new {
             changes.push(format!("{tool}: {old} → {new}"));
         }
     }
@@ -311,7 +311,10 @@ struct Walker {
 struct CapabilityContext {
     index: crate::solve::CapabilityIndex,
     preferences: std::collections::BTreeMap<String, String>,
-    installed: std::collections::HashSet<String>,
+    /// Installed provider names mapped to their version, so capability resolution can apply the
+    /// dependency's `VersionReq` exactly as the resolver's `expand_capability` does (AGENTS §9.8).
+    /// A provider whose recorded version does not parse is omitted — it cannot req-match anyway.
+    installed: BTreeMap<String, Version>,
 }
 
 impl Walker {
@@ -333,40 +336,55 @@ impl Walker {
         })
     }
 
-    fn of_name(&mut self, name: &str) -> Result<String> {
+    fn of_name(&mut self, name: &str, req: &VersionReq) -> Result<String> {
         if let Some(hash) = self.cache.get(name) {
             return Ok(hash.clone());
         }
         if let Some(rune) = build::find_rune(name)? {
             return self.of_rune(name, &rune);
         }
+        // No rune, but a resolved package of its own: this is a binary-index-only package (an
+        // x-bin published as a prebuilt with no source rune), not a capability. The resolver
+        // treats any name with candidates as literal, so address it by its recorded hash here too
+        // — otherwise a name that is *both* a binary-only package and a capability provided by
+        // others would fold a provider's hash on this side and the package's on the resolver's,
+        // diverging the dependent's address (AGENTS §9.8).
+        if let Some(hash) = self.resolved.get(name) {
+            let hash = hash.clone();
+            self.cache.insert(name.to_string(), hash.clone());
+            return Ok(hash);
+        }
         // No literal rune: resolve the name as a capability to a concrete provider, mirroring
-        // the solver. The chosen provider folds into the hash, which is the point — a package
-        // built against `gawk`'s awk is different content from one built against `mawk`'s, so
-        // it gets a different address (and a prebuilt only substitutes for users whose
+        // the solver — including the version requirement, so the provider chosen here is the one
+        // the resolver picked. The chosen provider folds into the hash, which is the point — a
+        // package built against `gawk`'s awk is different content from one built against `mawk`'s,
+        // so it gets a different address (and a prebuilt only substitutes for users whose
         // resolution matches the builder's).
-        let Some(provider) = self.resolve_capability(name)? else {
+        let Some(provider) = self.resolve_capability(name, req)? else {
             bail!(
                 "no rune found for `{name}` and no package provides it; every runtime \
                  dependency must resolve to a rune or a capability provider"
             );
         };
-        let hash = self.of_name(&provider)?;
+        // The provider is a literal package; resolving it needs no further req (it has a rune).
+        let hash = self.of_name(&provider, &VersionReq::STAR)?;
         self.cache.insert(name.to_string(), hash.clone());
         Ok(hash)
     }
 
-    /// Resolves a capability name to one provider package, in the solver's order — the
-    /// `grm prefer` choice when it still provides the capability, else an installed provider,
-    /// else the first provider — except every step here is deterministic (providers sorted by
-    /// name) because the result feeds a content address. Returns `None` when nothing provides
-    /// the capability.
-    fn resolve_capability(&mut self, name: &str) -> Result<Option<String>> {
+    /// Resolves a capability name to one provider package, in the solver's order and against the
+    /// same version requirement: the `grm prefer` choice when it still provides the capability,
+    /// else the first installed provider *that satisfies `req`*, else the first provider by name.
+    /// This mirrors `solve::resolver::expand_capability` step for step — including the req filter
+    /// on installed providers — so the provider folded into a dependent's content address is the
+    /// same one the resolver picked (AGENTS §9.8). Every step is deterministic (providers sorted
+    /// by name). Returns `None` when nothing provides the capability.
+    fn resolve_capability(&mut self, name: &str, req: &VersionReq) -> Result<Option<String>> {
         if self.caps.is_none() {
             let installed = crate::install::installed_states()
                 .unwrap_or_default()
                 .into_iter()
-                .map(|state| state.name)
+                .filter_map(|state| Some((state.name, Version::parse(&state.version).ok()?)))
                 .collect();
             self.caps = Some(CapabilityContext {
                 index: crate::solve::CapabilityIndex::build()?,
@@ -382,18 +400,13 @@ impl Walker {
             return Ok(None);
         }
         providers.sort();
-        if let Some(preferred) = caps.preferences.get(name)
-            && providers.contains(preferred)
-        {
-            return Ok(Some(preferred.clone()));
-        }
-        if let Some(installed) = providers
-            .iter()
-            .find(|provider| caps.installed.contains(*provider))
-        {
-            return Ok(Some(installed.clone()));
-        }
-        Ok(Some(providers[0].clone()))
+        Ok(crate::solve::select_provider(
+            &providers,
+            caps.preferences.get(name),
+            &caps.installed,
+            req,
+            |provider| crate::solve::provider_satisfies_req(provider, req, &caps.installed),
+        ))
     }
 
     fn of_rune(&mut self, name: &str, rune: &Path) -> Result<String> {
@@ -431,17 +444,17 @@ impl Walker {
     /// provider the same deterministic way `of_name` does before the map is consulted. Anything
     /// absent from `resolved` (no plan in scope, or a dep outside the resolved set) falls back to
     /// the full closure walk, which is the canonical address when no resolved closure exists.
-    fn external_hash(&mut self, name: &str) -> Result<String> {
+    fn external_hash(&mut self, name: &str, req: &VersionReq) -> Result<String> {
         if let Some(hash) = self.resolved.get(name) {
             return Ok(hash.clone());
         }
         if build::find_rune(name)?.is_none()
-            && let Some(provider) = self.resolve_capability(name)?
+            && let Some(provider) = self.resolve_capability(name, req)?
             && let Some(hash) = self.resolved.get(&provider)
         {
             return Ok(hash.clone());
         }
-        self.of_name(name)
+        self.of_name(name, req)
     }
 
     /// Computes the derived store hash of every member of a split group: external runtime
@@ -474,7 +487,7 @@ impl Walker {
                     if parts.iter().any(|member| member.name == dep.name) {
                         continue;
                     }
-                    let hash = self.external_hash(&dep.name)?;
+                    let hash = self.external_hash(&dep.name, &dep.req)?;
                     if !dep_hashes.contains(&hash) {
                         dep_hashes.push(hash);
                     }
@@ -531,7 +544,7 @@ impl Walker {
                 if !dep.matches_platform(&self.target) {
                     continue;
                 }
-                dep_hashes.push(self.of_name(&dep.name)?);
+                dep_hashes.push(self.of_name(&dep.name, &dep.req)?);
             }
             Ok(dep_hashes)
         })();

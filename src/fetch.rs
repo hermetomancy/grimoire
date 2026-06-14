@@ -130,7 +130,19 @@ pub enum IndexFetch {
 pub fn http_get_index(url: &str) -> Result<IndexFetch> {
     require_https_for_index(url)?;
     status(&format!("fetching index ({url})"));
-    match http_get_bounded(http_agent(), url, Some(INDEX_TIMEOUT)) {
+    match http_get_bounded(index_agent(), url, Some(INDEX_TIMEOUT)) {
+        // The index agent refuses to follow redirects (see `index_agent`), so a 3xx arrives here
+        // as a normal response rather than a chased download. Treat it as unreachable: an https
+        // index that 30x-redirects to plain http would otherwise silently downgrade the trust
+        // root. The tome must point at the canonical index URL directly.
+        Ok(response) if (300..400).contains(&response.status()) => {
+            Ok(IndexFetch::Unreachable(anyhow!(
+                "index at {url} responded with a redirect (HTTP {}); point the tome at the \
+                 canonical index URL directly — redirects are refused so an https index cannot \
+                 be downgraded to http",
+                response.status()
+            )))
+        }
         Ok(response) => match response.into_string() {
             Ok(text) => Ok(IndexFetch::Document(text)),
             Err(err) => Ok(IndexFetch::Unreachable(anyhow!(
@@ -152,6 +164,12 @@ fn require_https_for_index(url: &str) -> Result<()> {
         bail!("expected an http(s) URL, got `{url}`");
     };
     let authority = rest.split('/').next().unwrap_or("");
+    // Userinfo (`user@host`) lets `http://[::1]@evil.com/index.nuon` present a loopback-looking
+    // host while ureq actually connects to `evil.com`. Refuse any embedded credentials so the
+    // loopback exemption below can only ever match the real connect host.
+    if authority.contains('@') {
+        bail!("refusing to fetch a package index from a URL with embedded credentials: `{url}`");
+    }
     let host = if let Some(bracketed) = authority.strip_prefix('[') {
         bracketed.split(']').next().unwrap_or("")
     } else {
@@ -161,13 +179,16 @@ fn require_https_for_index(url: &str) -> Result<()> {
         return Ok(());
     }
     bail!(
-        "refusing to fetch a package index over plain http: `{url}`. The index is the trust          root for binary installs; serve it over https (plain http is permitted only for          loopback addresses)"
+        "refusing to fetch a package index over plain http: `{url}`. The index is the trust \
+         root for binary installs; serve it over https (plain http is permitted only for \
+         loopback addresses)"
     )
 }
 
 /// The process-wide HTTP agent, with connect/read/write timeouts so no request can hang the
 /// install. Shared so consecutive downloads reuse connections instead of re-handshaking
-/// TCP/TLS per request.
+/// TCP/TLS per request. Used for checksum-verified downloads (sources, archives), where a
+/// redirect is harmless because the bytes are hashed against the trusted index.
 fn http_agent() -> &'static ureq::Agent {
     static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     AGENT.get_or_init(|| {
@@ -175,6 +196,22 @@ fn http_agent() -> &'static ureq::Agent {
             .timeout_connect(HTTP_CONNECT_TIMEOUT)
             .timeout_read(HTTP_IO_TIMEOUT)
             .timeout_write(HTTP_IO_TIMEOUT)
+            .build()
+    })
+}
+
+/// The agent for fetching index documents — the binary-install trust root, which is *not*
+/// checksum-verified. It refuses to follow redirects (`redirects(0)`), so an `https` index that
+/// 30x-redirects to plain `http` cannot silently downgrade the transport: with the limit at 0,
+/// ureq returns the 3xx response unfollowed and `http_get_index` rejects it (AGENTS.md §10.6).
+fn index_agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout_connect(HTTP_CONNECT_TIMEOUT)
+            .timeout_read(HTTP_IO_TIMEOUT)
+            .timeout_write(HTTP_IO_TIMEOUT)
+            .redirects(0)
             .build()
     })
 }
@@ -235,6 +272,23 @@ fn http_error(url: &str, err: ureq::Error) -> anyhow::Error {
             anyhow!("request {url} failed: HTTP {code} {reason}")
         }
         ureq::Error::Transport(transport) => anyhow!("request {url} failed: {transport}"),
+    }
+}
+
+/// Fetches a small companion file (e.g. a detached `.minisig`) as text, over the same transport
+/// the artifact it accompanies came from: an `http(s)` URL is downloaded, anything else is read
+/// relative to `base_dir`. No content hash is required — a detached signature is verified against
+/// the already-checksummed artifact it signs, so a tampered signature simply fails verification.
+pub fn fetch_companion_text(location: &str, base_dir: &Path) -> Result<String> {
+    if location.starts_with("http://") || location.starts_with("https://") {
+        let response =
+            http_get(http_agent(), location).map_err(|err| http_error(location, *err))?;
+        response
+            .into_string()
+            .with_context(|| format!("read {location}"))
+    } else {
+        let path = local_source_path(location, base_dir);
+        fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))
     }
 }
 
@@ -342,6 +396,20 @@ mod tests {
             "http://example.com/index.nuon",
             "http://127.0.0.1.evil.com/index.nuon",
             "ftp://example.com/index.nuon",
+        ] {
+            assert!(require_https_for_index(url).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn userinfo_loopback_spoof_is_refused() {
+        // Embedded credentials whose host *looks* like loopback but whose real connect host is
+        // arbitrary must not slip through the loopback exemption (AGENTS.md §10.6).
+        for url in [
+            "http://[::1]@evil.com/index.nuon",
+            "http://127.0.0.1@evil.com/index.nuon",
+            "http://localhost@evil.com/index.nuon",
+            "http://[::1]:8080@evil.com/index.nuon",
         ] {
             assert!(require_https_for_index(url).is_err(), "{url}");
         }

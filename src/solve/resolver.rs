@@ -12,6 +12,12 @@ use crate::{model::Dependency, model::preferences::Preferences, util::paths, uti
 
 use super::*;
 
+/// Maximum number of backtracking steps before resolution gives up. Each step clones the full
+/// selection and recurses, so a pathologically over-constrained graph can blow up exponentially;
+/// this bound turns an unbounded hang into a clear error. Real resolutions use orders of
+/// magnitude fewer steps, so the ceiling is generous enough never to reject a realistic graph.
+const RESOLVE_STEP_BUDGET: usize = 500_000;
+
 /// Resolves `roots` (and their transitive runtime dependencies) into an ordered install plan.
 /// `installed` maps already-installed package names to their versions; an installed package that
 /// still satisfies a requirement is reused and produces no step.
@@ -38,9 +44,11 @@ pub(crate) fn resolve_with(
     source: &dyn CandidateSource,
     preferences: &BTreeMap<String, String>,
 ) -> Result<Plan> {
-    let capabilities = CapabilityIndex::build().unwrap_or_else(|_| CapabilityIndex {
-        map: HashMap::new(),
-    });
+    // Propagate a genuine build failure (corrupt tome cache, unreadable index) instead of
+    // swallowing it into an empty map: the closure walker does the same (`build()?`), and an
+    // empty map would make every capability dep fail to expand and surface as a misleading
+    // "no version of X satisfies …" rather than the real cause.
+    let capabilities = CapabilityIndex::build().context("build capability index")?;
     let mut resolver = Resolver {
         installed,
         pins,
@@ -48,6 +56,7 @@ pub(crate) fn resolve_with(
         candidates: HashMap::new(),
         capabilities,
         preferences,
+        steps_remaining: RESOLVE_STEP_BUDGET,
     };
     let mut chosen: BTreeMap<String, ChosenNode> = BTreeMap::new();
     // All roots are resolved as one worklist so backtracking can revise an early choice when a
@@ -87,6 +96,8 @@ pub(crate) struct Resolver<'a> {
     capabilities: CapabilityIndex,
     /// `grm prefer` choices: capability name -> preferred provider package.
     preferences: &'a BTreeMap<String, String>,
+    /// Remaining backtracking steps before resolution aborts (see [`RESOLVE_STEP_BUDGET`]).
+    steps_remaining: usize,
 }
 
 impl Resolver<'_> {
@@ -105,43 +116,31 @@ impl Resolver<'_> {
             return dep.clone();
         }
         // Provider order must be deterministic: the choice folds into the chosen package's
-        // dependents' store hashes, and the closure walker (`store::closure`) mirrors this
-        // resolution when hashing straight from a rune — both sides must agree.
+        // dependents' store hashes, and the closure walker (`store::closure`) shares the very
+        // same `select_provider` when hashing straight from a rune — both sides must agree.
         providers.sort();
-        // A `grm prefer` choice wins over everything: it is explicit user intent. If the
-        // preferred package cannot satisfy the version requirement, resolution fails loudly
-        // downstream instead of silently substituting a different provider. Only a *stale*
-        // preference — the named package no longer provides the capability at all — warns and
-        // falls through to the default selection.
-        if let Some(preferred) = self.preferences.get(&dep.name) {
-            if providers.contains(preferred) {
-                return Dependency {
-                    name: preferred.clone(),
-                    req: dep.req.clone(),
-                    platform: dep.platform.clone(),
-                };
-            }
+        // A stale preference — the named package no longer provides the capability at all —
+        // warns; a preference that still provides it wins inside `select_provider` even when it
+        // cannot satisfy `req` (resolution then fails loudly downstream rather than silently
+        // substituting a different provider).
+        if let Some(preferred) = self.preferences.get(&dep.name)
+            && !providers.contains(preferred)
+        {
             progress::warn(&format!(
                 "preference for `{}` names `{preferred}`, which no longer provides it; ignoring",
                 dep.name
             ));
         }
-        // Prefer an already-installed provider that satisfies the version constraint.
-        for provider in &providers {
-            if let Some(version) = self.installed.get(provider)
-                && crate::model::req_matches(&dep.req, version)
-            {
-                return Dependency {
-                    name: provider.clone(),
-                    req: dep.req.clone(),
-                    platform: dep.platform.clone(),
-                };
-            }
-        }
-        // No installed provider matches; use the first by name. With multiple uninstalled
-        // providers `grm prefer <capability> <package>` is how the user overrides this pick.
+        let name = select_provider(
+            &providers,
+            self.preferences.get(&dep.name),
+            self.installed,
+            &dep.req,
+            |provider| provider_satisfies_req(provider, &dep.req, self.installed),
+        )
+        .unwrap_or_else(|| dep.name.clone()); // providers is non-empty, so always Some
         Dependency {
-            name: providers[0].clone(),
+            name,
             req: dep.req.clone(),
             platform: dep.platform.clone(),
         }
@@ -158,6 +157,15 @@ impl Resolver<'_> {
         worklist: &[Dependency],
         chosen: &mut BTreeMap<String, ChosenNode>,
     ) -> Result<()> {
+        // Bound the backtracking search so an over-constrained graph fails loudly instead of
+        // hanging (each recursion clones the selection, so the worst case is exponential).
+        if self.steps_remaining == 0 {
+            bail!(
+                "dependency resolution did not converge within {RESOLVE_STEP_BUDGET} backtracking \
+                 steps; the requirement graph is over-constrained or pathologically large"
+            );
+        }
+        self.steps_remaining -= 1;
         let Some((dep, rest)) = worklist.split_first() else {
             return Ok(());
         };

@@ -139,14 +139,20 @@ pub fn rebuild_and_activate(states: &[PackageState]) -> Result<u64> {
 /// The generation is built by symlinking profile-relevant files (`bin/`, `share/man/`, etc.)
 /// from each package's store path into the generation directory.
 pub fn create_generation(states: &[PackageState]) -> Result<u64> {
-    fs::create_dir_all(profiles_dir()?)?;
+    let profiles = profiles_dir()?;
+    fs::create_dir_all(&profiles)?;
 
     let next_id = next_generation_id()?;
     let gen_dir = generation_dir(next_id)?;
-    if gen_dir.exists() {
-        fs::remove_dir_all(&gen_dir)?;
+    // Build into a staging directory and promote with a single atomic rename, like every other
+    // state mutation (AGENTS §9.1). Building directly into `gen-N` would let a crash between the
+    // `gen.nuon` and `state.nuon` writes leave a registry-adoptable but snapshot-less generation
+    // (adoption keys off `gen.nuon` presence alone). The `.`-prefixed name is never adopted.
+    let staging = profiles.join(format!(".gen-{next_id}.staging"));
+    if staging.exists() {
+        fs::remove_dir_all(&staging)?;
     }
-    fs::create_dir_all(&gen_dir)?;
+    fs::create_dir_all(&staging)?;
 
     status(&format!("building generation {next_id}"));
 
@@ -178,7 +184,7 @@ pub fn create_generation(states: &[PackageState]) -> Result<u64> {
             continue;
         }
         let skips = skip_bins.get(state.name.as_str()).unwrap_or(&no_skips);
-        link_package_into_generation(state, &gen_dir, skips)?;
+        link_package_into_generation(state, &staging, skips)?;
     }
 
     let generation = Generation {
@@ -187,16 +193,24 @@ pub fn create_generation(states: &[PackageState]) -> Result<u64> {
         packages: linked.iter().map(|s| s.name.clone()).collect(),
         store_paths: linked.iter().map(|s| s.store_path.clone()).collect(),
     };
-    write_generation_metadata(&gen_dir, &generation)?;
     // The linked state snapshot is what makes activation *semantic*: rollback/switch restore
     // `state/packages/` from it, so the rolled-back-to generation really is the system state.
+    // Write it before `gen.nuon` (the adoption marker), then promote the whole tree atomically.
     let linked_states: Vec<PackageState> = linked.iter().map(|s| (*s).clone()).collect();
-    write_state_snapshot(&gen_dir, &linked_states)?;
+    write_state_snapshot(&staging, &linked_states)?;
+    write_generation_metadata(&staging, &generation)?;
+
+    if gen_dir.exists() {
+        fs::remove_dir_all(&gen_dir)?;
+    }
+    fs::rename(&staging, &gen_dir)
+        .with_context(|| format!("promote generation {next_id} into place"))?;
+    crate::util::fs_util::fsync_dir(&profiles)?;
 
     let mut registry = read_registry().unwrap_or_default();
     registry.push(generation);
     if let Err(e) = write_registry(&registry) {
-        warn(&format!("could not write generations registry: {e}"));
+        warn(&format!("could not write generations registry: {e:#}"));
     }
 
     success(&format!("created generation {next_id}"));
@@ -260,6 +274,9 @@ fn switch_symlink(id: u64) -> Result<()> {
     std::os::unix::fs::symlink(&gen_dir, &tmp)
         .with_context(|| format!("stage current symlink -> {}", gen_dir.display()))?;
     fs::rename(&tmp, &current).with_context(|| format!("activate generation {id}"))?;
+    // The symlink flip is the user-visible commit (§9.7); fsync the profile dir so a crash
+    // immediately after activation cannot lose it and resurrect the prior generation.
+    crate::util::fs_util::fsync_dir(parent)?;
     Ok(())
 }
 

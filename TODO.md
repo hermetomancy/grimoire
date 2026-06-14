@@ -72,6 +72,26 @@ toybox-ambient, and package the failures. One deferred deliverable:
 - **The resolver does not backtrack over conflicts.** `conflicts` metadata refuses a plan
   early and precisely, but pubgrub never steers version selection *around* a conflict.
   Correct for mutual-exclusion semantics; spec before changing.
+- **Lockfile rebuild is per-step, not per-command.** The lockfile is regenerated inside
+  `install_archive` (per package) and at several other sites (`install/orphans.rs`,
+  `install/state.rs`, `profile/generations.rs`), so a multi-package command that fails partway
+  leaves the on-disk lock describing the half-applied residue rather than the pre-command world.
+  Not release-blocking: the lock is derived from `state/packages/` (the authoritative source),
+  the active generation is the real environment, and the lock self-heals on the next mutation.
+  Fix is cross-cutting: rebuild the lock once at the `Installer::finalize()` commit point and
+  drop the scattered per-step rebuilds, after confirming every mutating path funnels through it.
+- **No installed-state repository type.** `installed_states()` / `linked_set()` are uncached,
+  unlocked fresh disk scans of `state/packages/*.nuon` reached from ~7 modules (build, cmd,
+  install, profile, solve, store, tome), and `sweep_orphans` re-reads on every iteration (O(n²)).
+  A maintainability/altitude smell, not a bug. Introduce an `InstalledWorld` repository that
+  loads once and is threaded where needed, replacing the de-facto global accessors.
+- **Split `src/store/closure.rs` along its seams.** At ~730 lines (over the 500 soft limit, under
+  the 800 hard limit) it conflates four concerns under a "leaf" name it has outgrown — simple
+  addressing, split-group addressing, capability resolution, and stale/`diff_build_env`
+  reporting — and depends *up* on build/install/solve. The pure address primitive already lives
+  in `store/mod.rs`; this is the closure-walking service misfiled. Extract capability resolution
+  and the stale/diff reporting into their own modules before the next change crosses 800. Pure
+  reorganization, no behavior change.
 
 ## Expansion projects (spec before code)
 

@@ -341,9 +341,20 @@ pub(crate) fn read_archive_index_entry(path: &Path) -> Result<(String, IndexEntr
         anyhow::anyhow!("archive {} is missing .grimoire/rune.rn", path.display())
     })?;
 
+    // Address against the target the archive was built for (recorded in its own metadata), not the
+    // indexing host's, or a cross-target build is re-indexed under the wrong hash (AGENTS §9.8).
+    let target = metadata
+        .target
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("metadata in {} is missing target", path.display()))?;
+
     let store_hash = if group_runes.is_empty() {
-        crate::store::closure::store_hash_for_rune_bytes(&rune_bytes, &metadata)
-            .with_context(|| format!("compute store hash for {}", path.display()))?
+        crate::store::closure::store_hash_for_rune_bytes_with_target(
+            &rune_bytes,
+            &metadata,
+            &target,
+        )
+        .with_context(|| format!("compute store hash for {}", path.display()))?
     } else {
         // A split-group member: its address derives from the whole group, whose runes the
         // archive carries under `.grimoire/group/`.
@@ -355,7 +366,7 @@ pub(crate) fn read_archive_index_entry(path: &Path) -> Result<(String, IndexEntr
                 Ok((member_metadata, bytes))
             })
             .collect::<Result<_>>()?;
-        crate::store::closure::split_member_hashes(&group)
+        crate::store::closure::split_member_hashes_with_target(&group, &target, &BTreeMap::new())
             .with_context(|| format!("compute split group hashes for {}", path.display()))?
             .get(&metadata.name)
             .cloned()
@@ -375,10 +386,6 @@ pub(crate) fn read_archive_index_entry(path: &Path) -> Result<(String, IndexEntr
         .and_then(|n| n.to_str())
         .with_context(|| format!("archive path has no file name: {}", path.display()))?
         .to_owned();
-
-    let target = metadata
-        .target
-        .ok_or_else(|| anyhow::anyhow!("metadata in {} is missing target", path.display()))?;
 
     Ok((
         store_hash,
