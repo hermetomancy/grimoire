@@ -45,6 +45,10 @@ heading when it is tagged.
 
 ### Fixed
 
+- Index transport can no longer be downgraded: index fetches use a dedicated agent that
+  refuses HTTP redirects, so an `https` index that 30x-redirects to plain `http` is rejected
+  instead of silently re-fetched in cleartext, and a URL with embedded credentials
+  (`http://[::1]@evil.com/…`) can no longer spoof the loopback exemption (AGENTS.md §10.6).
 - Split-group members address their external dependencies against the resolver-chosen
   closure rather than an independent re-pick, so the address the resolver predicts always
   equals the one the build produces, and the published address stays a pure function of the
