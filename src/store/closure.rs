@@ -343,6 +343,17 @@ impl Walker {
         if let Some(rune) = build::find_rune(name)? {
             return self.of_rune(name, &rune);
         }
+        // No rune, but a resolved package of its own: this is a binary-index-only package (an
+        // x-bin published as a prebuilt with no source rune), not a capability. The resolver
+        // treats any name with candidates as literal, so address it by its recorded hash here too
+        // — otherwise a name that is *both* a binary-only package and a capability provided by
+        // others would fold a provider's hash on this side and the package's on the resolver's,
+        // diverging the dependent's address (AGENTS §9.8).
+        if let Some(hash) = self.resolved.get(name) {
+            let hash = hash.clone();
+            self.cache.insert(name.to_string(), hash.clone());
+            return Ok(hash);
+        }
         // No literal rune: resolve the name as a capability to a concrete provider, mirroring
         // the solver — including the version requirement, so the provider chosen here is the one
         // the resolver picked. The chosen provider folds into the hash, which is the point — a
