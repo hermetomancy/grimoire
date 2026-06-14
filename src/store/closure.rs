@@ -69,14 +69,16 @@ pub fn store_hash_for_rune_with_target(
     walker.of_rune(&metadata.name, rune)
 }
 
-/// Computes the store hash from already-read rune bytes and metadata.
-/// Avoids writing a temporary file when the bytes are already in memory.
-///
-/// Split group members cannot be addressed from a single rune: use
-/// [`store_hash_for_split_archive`], which takes the whole group.
-pub fn store_hash_for_rune_bytes(
+/// Computes the store hash from already-read rune bytes and metadata for an explicit target
+/// triple, avoiding a temporary file when the bytes are already in memory. The re-index path
+/// (`grm tome build --index`) addresses an archive against the target it was built for — read from
+/// the archive's own metadata — not the indexing host's, so a cross-target build keeps the address
+/// a consumer on that target reproduces (AGENTS §9.8). Split group members cannot be addressed
+/// from a single rune; use [`split_member_hashes_with_target`], which takes the whole group.
+pub fn store_hash_for_rune_bytes_with_target(
     rune_bytes: &[u8],
     metadata: &crate::model::PackageMetadata,
+    target: &str,
 ) -> Result<String> {
     if metadata.is_split_member() {
         bail!(
@@ -84,22 +86,15 @@ pub fn store_hash_for_rune_bytes(
             metadata.name
         );
     }
-    let mut walker = Walker::new()?;
+    let mut walker = Walker::with_target(target)?;
     walker.of_rune_with_bytes(&metadata.name, metadata, rune_bytes)
 }
 
-/// The store hashes of every member of a split group, keyed by package name, for the host
-/// target. `group` carries each member's metadata and raw rune bytes (parent included), as
-/// read from disk or from a member archive's embedded `.grimoire/group/` copies.
-pub fn split_member_hashes(
-    group: &[(crate::model::PackageMetadata, Vec<u8>)],
-) -> Result<BTreeMap<String, String>> {
-    Walker::new()?.group_hashes(&group_parts(group))
-}
-
-/// Like [`split_member_hashes`], for an explicit target triple, addressing the group's external
-/// deps against `resolved` (see [`installed_resolved`]) so the build reproduces the resolver's
-/// expected address. Pass an empty map to re-derive externals from runes (the re-index path).
+/// The store hashes of every member of a split group, keyed by package name, for an explicit
+/// target triple. `group` carries each member's metadata and raw rune bytes (parent included), as
+/// read from disk or from a member archive's embedded `.grimoire/group/` copies. External deps
+/// address against `resolved` (see [`installed_resolved`]) so the build reproduces the resolver's
+/// expected address; pass an empty map to re-derive externals from runes (the re-index path).
 pub fn split_member_hashes_with_target(
     group: &[(crate::model::PackageMetadata, Vec<u8>)],
     target: &str,

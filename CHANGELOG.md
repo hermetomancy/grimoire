@@ -45,6 +45,13 @@ heading when it is tagged.
 
 ### Fixed
 
+- Re-indexing (`grm tome build --index`) addresses each archive against the target it was built
+  for (read from the archive's own metadata) rather than the indexing host's, so a cross-target
+  archive is no longer registered under a hash its consumers cannot reproduce (§9.8).
+- Standalone source builds recompute the store address from the rune and resolved closure and
+  refuse to lay out a store prefix that disagrees with the planned hash — the same cross-check
+  the split-group path already had, so a silent mis-address can no longer surface only as a
+  later dropped substitution (§9.8).
 - Single-package `grm tome build` now holds the install-root lock (previously only `--all` did),
   so the build deps it installs store-only can no longer be reaped by a concurrent `grm clean`.
 - Reading rune metadata is now inert: the file-loading parse keywords (`use`, `source`,
