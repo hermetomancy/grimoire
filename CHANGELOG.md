@@ -45,6 +45,9 @@ heading when it is tagged.
 
 ### Fixed
 
+- Dependency resolution is bounded: an over-constrained or pathologically large requirement
+  graph now aborts with a clear error after a fixed backtracking budget instead of spinning
+  indefinitely (the search clones state per candidate, so the worst case was exponential).
 - Addendum source patches round-trip their `platform` glob: a platform-scoped patch source no
   longer loses its constraint when the addendum manifest is re-serialized.
 - Resolution surfaces a capability-index build failure (corrupt tome cache, unreadable index)
