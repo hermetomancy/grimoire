@@ -1,10 +1,10 @@
 # Builds every rune in tome-core from source on each supported platform — the end-to-end
-# proof that the catalog and the bootstrap toolchain actually work together.
-#
-# Currently manual (workflow_dispatch): the core bootstrap (TODO.md "Bootstrap stage 1") has
-# not landed on every platform yet, and a multi-hour llvm+rust build per push would be
-# noise. Once bootstrap lands, promote this to a release-blocking gate: trigger on tags
-# alongside release.yml and drop `continue-on-error`.
+# proof that the catalog and the bootstrap toolchain actually work together — as a
+# release-blocking gate. A tag push runs `grm tome build --all --strict` on every platform
+# alongside release.yml; any rune that fails to build cleanly fails the tag's checks. Until
+# Bootstrap stage 1 (TODO.md) lands on a platform, that platform's job will fail — which is
+# the gate doing its job: it refuses to bless a release whose core does not build. Also
+# runnable manually (workflow_dispatch) against an arbitrary tome repo for proving runs.
 #
 # Store-path correctness: archives bake absolute store paths, so publishable artifacts
 # must build against the fixed `/grm` store. Linux runners create it; hosted macOS
@@ -12,14 +12,16 @@
 # macOS job builds under GRIMOIRE_ROOT and its artifacts are bootstrap *proof*, not
 # publishable — publish macOS dists from a machine with /grm.
 #
-# Hosted runners cover linux-gnu (x86_64 + aarch64) and macos-aarch64. The musl and
-# FreeBSD stage-1 targets need containers/VMs — add them when those bootstraps land.
+# The matrix covers linux-gnu (x86_64 + aarch64) and macos-aarch64. The musl and FreeBSD
+# stage-1 targets need containers/VMs — add them to the gate as those bootstraps land.
 #
 # tome-core is intentionally not in this repository (gitignored); the workflow clones it.
 
 name: tome-build
 
 on:
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       tome_repo:
@@ -36,9 +38,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     # llvm + rust from source: hours, not minutes.
     timeout-minutes: 360
-    # Manual proving runs should report per-platform results without failing the whole
-    # dispatch; remove when this becomes a release gate.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -67,7 +66,8 @@ jobs:
         run: cargo build --release
 
       - name: Clone the core tome
-        run: git clone --depth 1 "${{ inputs.tome_repo }}" core-tome
+        # `inputs.tome_repo` is unset on a tag push; fall back to the canonical tome-core.
+        run: git clone --depth 1 "${{ inputs.tome_repo || 'https://github.com/grimoire-of-glass/tome-core' }}" core-tome
 
       - name: Build every rune
         run: ./target/release/grm tome build --all --strict --path core-tome
