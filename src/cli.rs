@@ -171,6 +171,11 @@ pub struct BuildArgs {
     /// This is useful for bootstrapping before the managed core userland is installed.
     #[arg(long)]
     pub bootstrap: bool,
+    /// Drop the POSIX ambient PATH tail (`/usr/bin`, `/bin`) so the build sees only declared
+    /// deps and the managed core floor. Diagnostic for stage-2 self-hosting: a build that fails
+    /// for a missing tool names a host-userland leak to package. Does not affect the store hash.
+    #[arg(long, conflicts_with = "bootstrap")]
+    pub hermetic: bool,
     /// Target triple to build for (defaults to the host target).
     #[arg(short, long)]
     pub target: Option<String>,
@@ -389,6 +394,11 @@ pub struct TomeBuildArgs {
     /// Allow host build-tool discovery instead of using only the grimoire-managed toolchain.
     #[arg(long)]
     pub bootstrap: bool,
+    /// Drop the POSIX ambient PATH tail (`/usr/bin`, `/bin`) so each rune builds against only
+    /// declared deps and the managed core floor. Diagnostic for stage-2 self-hosting: a rune
+    /// that fails for a missing tool names a host-userland leak to package. No store-hash impact.
+    #[arg(long, conflicts_with = "bootstrap")]
+    pub hermetic: bool,
     /// Target triple to build for (defaults to the host target).
     #[arg(short, long)]
     pub target: Option<String>,

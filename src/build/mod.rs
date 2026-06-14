@@ -189,6 +189,7 @@ pub fn build(args: BuildArgs) -> Result<()> {
         &args.package,
         &args.output,
         args.bootstrap,
+        args.hermetic,
         args.target.as_deref(),
     )?;
     for product in result.products() {
@@ -201,6 +202,7 @@ pub fn build_package(
     package: &str,
     output: &Path,
     bootstrap: bool,
+    hermetic: bool,
     target: Option<&str>,
 ) -> Result<BuildResult> {
     let rune = resolve_rune(package)?;
@@ -228,6 +230,7 @@ pub fn build_package(
         )?
     };
     env.target = target;
+    env.hermetic = hermetic;
     build_package_with_env(package, output, &env, &store_hash)
 }
 

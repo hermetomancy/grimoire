@@ -83,6 +83,7 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
         &index_path,
         args.all,
         args.bootstrap,
+        args.hermetic,
         args.target.as_deref(),
         args.force,
         args.strict,
@@ -105,6 +106,7 @@ pub(crate) fn build_runes(
     index_path: &Path,
     all: bool,
     bootstrap: bool,
+    hermetic: bool,
     target: Option<&str>,
     force: bool,
     strict: bool,
@@ -141,7 +143,7 @@ pub(crate) fn build_runes(
             continue;
         }
         for (store_hash, entry, archive) in
-            build_rune_into(root, name, dist_dir, bootstrap, target)?
+            build_rune_into(root, name, dist_dir, bootstrap, hermetic, target)?
         {
             lint_archive_purity(&archive, strict)
                 .with_context(|| format!("purity lint for `{}`", entry.name))?;
@@ -270,6 +272,7 @@ pub(crate) fn build_rune_into(
     name: &str,
     dist_dir: &Path,
     bootstrap: bool,
+    hermetic: bool,
     target: Option<&str>,
 ) -> Result<Vec<(String, IndexEntry, PathBuf)>> {
     validate_package_name(name)?;
@@ -278,8 +281,13 @@ pub(crate) fn build_rune_into(
         bail!("rune not found: {}", rune_path.display());
     }
 
-    let result =
-        crate::build::build_package(&rune_path.to_string_lossy(), dist_dir, bootstrap, target)?;
+    let result = crate::build::build_package(
+        &rune_path.to_string_lossy(),
+        dist_dir,
+        bootstrap,
+        hermetic,
+        target,
+    )?;
     let resolved_target = target.map_or_else(paths::target_triple, |t| t.to_string());
 
     result
