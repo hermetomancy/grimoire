@@ -136,6 +136,7 @@ impl Resolver<'_> {
             self.preferences.get(&dep.name),
             self.installed,
             &dep.req,
+            |provider| provider_satisfies_req(provider, &dep.req, self.installed),
         )
         .unwrap_or_else(|| dep.name.clone()); // providers is non-empty, so always Some
         Dependency {

@@ -113,19 +113,25 @@ pub fn capability_providers(capability: &str) -> Result<Vec<String>> {
 
 /// Picks the provider of a capability from `providers` (which MUST already be sorted by name),
 /// honoring, in order: a `grm prefer` choice that still provides the capability; the first
-/// installed provider whose version satisfies `req`; the first provider by name. Returns `None`
-/// only when `providers` is empty.
+/// installed provider whose version satisfies `req`; the first provider that *can* satisfy `req`
+/// (per `can_satisfy`); the first provider by name. Returns `None` only when `providers` is empty.
+///
+/// The `can_satisfy` step is what keeps a satisfiable graph from being reported unsatisfiable when
+/// the lexically-first provider has no version matching `req` but another does. It must be a
+/// deterministic function of inputs both the resolver and the walk see identically (the provider's
+/// rune-declared version plus installed versions — see [`provider_satisfies_req`]); a check over
+/// the prebuilt index, which the walk cannot see, would reintroduce divergence.
 ///
 /// This is the **single** definition of provider selection. Both the resolver
 /// ([`super::resolver`]) and the closure walker ([`crate::store::closure`]) call it, so the
 /// provider folded into a dependent's content address is identical on both paths — the store
-/// address determinism §9.8 depends on. A second, subtly-different copy here was the source of a
-/// real address divergence (the walker ignored `req`).
+/// address determinism §9.8 depends on.
 pub(crate) fn select_provider(
     providers: &[String],
     preference: Option<&String>,
     installed: &BTreeMap<String, Version>,
     req: &VersionReq,
+    can_satisfy: impl Fn(&str) -> bool,
 ) -> Option<String> {
     if let Some(preferred) = preference
         && providers.contains(preferred)
@@ -139,7 +145,32 @@ pub(crate) fn select_provider(
     }) {
         return Some(installed.clone());
     }
+    if let Some(capable) = providers.iter().find(|provider| can_satisfy(provider)) {
+        return Some(capable.clone());
+    }
     providers.first().cloned()
+}
+
+/// Whether `provider` has a version satisfying `req`, judged only from inputs both the resolver and
+/// the closure walk read identically: an installed version, or the version its rune declares. This
+/// deliberately excludes the prebuilt index (visible to the resolver, not the walk) so the two
+/// paths agree on the chosen provider and the store address stays reproducible (§9.8).
+pub(crate) fn provider_satisfies_req(
+    provider: &str,
+    req: &VersionReq,
+    installed: &BTreeMap<String, Version>,
+) -> bool {
+    if installed.get(provider).is_some_and(|v| req_matches(req, v)) {
+        return true;
+    }
+    let Ok(Some(rune)) = crate::build::find_rune(provider) else {
+        return false;
+    };
+    let Ok(metadata) = EmbeddedNuRuntime.package_metadata(&rune) else {
+        return false;
+    };
+    crate::model::parse_version_relaxed(&metadata.version)
+        .is_ok_and(|version| req_matches(req, &version))
 }
 
 #[cfg(test)]
@@ -200,6 +231,12 @@ mod tests {
             .collect()
     }
 
+    // The req-aware `can_satisfy` step is only consulted when no preference and no installed
+    // provider matches; the `none_capable` default exercises the older steps in isolation.
+    fn none_capable(_: &str) -> bool {
+        false
+    }
+
     #[test]
     fn installed_provider_must_satisfy_the_requirement() {
         // The exact §9.8 divergence: `afoo` sorts first and is installed but only `zfoo`
@@ -209,7 +246,7 @@ mod tests {
         let installed = installed(&[("afoo", "1.0.0"), ("zfoo", "2.0.0")]);
         let req = VersionReq::parse(">=2.0.0").unwrap();
         assert_eq!(
-            select_provider(&providers, None, &installed, &req),
+            select_provider(&providers, None, &installed, &req, none_capable),
             Some("zfoo".to_string())
         );
     }
@@ -220,7 +257,7 @@ mod tests {
         let installed = installed(&[("afoo", "2.1.0"), ("zfoo", "2.0.0")]);
         let req = VersionReq::parse(">=2.0.0").unwrap();
         assert_eq!(
-            select_provider(&providers, None, &installed, &req),
+            select_provider(&providers, None, &installed, &req, none_capable),
             Some("afoo".to_string())
         );
     }
@@ -237,18 +274,33 @@ mod tests {
                 &providers,
                 Some(&pref),
                 &installed,
-                &VersionReq::parse(">=9").unwrap()
+                &VersionReq::parse(">=9").unwrap(),
+                none_capable,
             ),
             Some("zfoo".to_string())
         );
     }
 
     #[test]
-    fn falls_back_to_first_by_name_when_none_installed_matches() {
+    fn capable_provider_is_preferred_over_first_by_name() {
+        // #15: `afoo` sorts first but cannot satisfy `>=2`; `zfoo` can. With nothing installed,
+        // the req-aware step picks `zfoo` instead of failing on the unsatisfiable `afoo`.
         let providers = providers(&["afoo", "zfoo"]);
         let req = VersionReq::parse(">=2.0.0").unwrap();
         assert_eq!(
-            select_provider(&providers, None, &BTreeMap::new(), &req),
+            select_provider(&providers, None, &BTreeMap::new(), &req, |p| p == "zfoo"),
+            Some("zfoo".to_string())
+        );
+    }
+
+    #[test]
+    fn falls_back_to_first_by_name_when_no_provider_can_satisfy() {
+        // Genuinely unsatisfiable: fall back to the first by name so resolution fails loudly
+        // downstream with a clear "no version satisfies" rather than here.
+        let providers = providers(&["afoo", "zfoo"]);
+        let req = VersionReq::parse(">=2.0.0").unwrap();
+        assert_eq!(
+            select_provider(&providers, None, &BTreeMap::new(), &req, none_capable),
             Some("afoo".to_string())
         );
     }
@@ -256,7 +308,7 @@ mod tests {
     #[test]
     fn empty_providers_yields_none() {
         assert_eq!(
-            select_provider(&[], None, &BTreeMap::new(), &VersionReq::STAR),
+            select_provider(&[], None, &BTreeMap::new(), &VersionReq::STAR, none_capable),
             None
         );
     }
