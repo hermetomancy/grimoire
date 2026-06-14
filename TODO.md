@@ -79,7 +79,7 @@ capabilities rather than direct binaries on PATH.
 - `src/install/`: resolve and install `features` deps alongside runtime deps (store-only
   is fine).
 - `src/profile/`: when linking a package with `features` deps into a generation, create
-  wrapper scripts in `gen-N/bin/` instead of hard-linking the binaries directly. The
+  wrapper scripts in `gen-N/bin/` instead of symlinking the binaries directly. The
   wrapper invokes `grm fhs-run` with the FHS tree store path and the real binary store
   path.
 - New `src/fhs.rs`: implement `grm fhs-run <tree> <binary> [args...]` using

@@ -186,7 +186,8 @@ pub(crate) fn collect_unreferenced_stores(referenced: &BTreeSet<String>) -> Resu
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Rough disk usage of a directory in bytes (follows hard links, so it may overcount).
+/// Rough disk usage of a directory in bytes: sums regular files, skipping symlinks (so it
+/// never follows a generation symlink out of the tree into the store).
 pub(crate) fn du(path: &Path) -> Result<u64> {
     let mut total = 0u64;
     for entry in walkdir::WalkDir::new(path) {
