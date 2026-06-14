@@ -394,6 +394,7 @@ impl Walker {
             caps.preferences.get(name),
             &caps.installed,
             req,
+            |provider| crate::solve::provider_satisfies_req(provider, req, &caps.installed),
         ))
     }
 

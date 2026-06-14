@@ -45,6 +45,12 @@ heading when it is tagged.
 
 ### Fixed
 
+- Capability resolution no longer reports a satisfiable graph unsatisfiable: when the
+  lexically-first provider has no version matching the requirement but another provider does, the
+  one that can satisfy it is chosen. The check is requirement-aware over inputs the resolver and
+  the closure walk read identically (the provider's rune-declared version plus installed
+  versions), so both paths still pick the same provider and the store address stays reproducible
+  (§9.8) — no graph-search backtracking, which would have made the address search-dependent.
 - The shared `/grm/store` is safe under concurrent multi-user use. Mutating commands now also take
   an exclusive lock on the store directory (in addition to the per-user install-root lock), so two
   users can no longer race store mutations; and `grm clean` treats every user's generations under
