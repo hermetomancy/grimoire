@@ -393,22 +393,74 @@ fn signed_tome_pins_key_and_rejects_archive_tampering() {
     // short-circuiting as already-installed.
     assert_success(&run(root, &["remove", "sgnpkg"]), "remove before reinstall");
 
-    // Tamper the cached archive without re-signing: the read path must refuse it before
-    // extracting.
+    // Tamper the cached archive AND rewrite the index hash to match, simulating a compromised
+    // host/index. The checksum gate then passes, so the per-archive signature — which the attacker
+    // cannot forge without the private key — is the only remaining defense and must refuse it.
     let archive_name = format!("sgnpkg-0.1.0-{triple}.tar.zst");
-    let cached_archive = root
+    let dist = root
         .join("cache")
         .join("tomes")
         .join("signedcore")
-        .join("dist")
-        .join(&archive_name);
-    let tampered = fs::read(&cached_archive).unwrap();
-    let mut tampered = tampered;
+        .join("dist");
+    let cached_archive = dist.join(&archive_name);
+    let original_hash = sha256_file(&cached_archive);
+    let mut tampered = fs::read(&cached_archive).unwrap();
     tampered[0] ^= 0xFF; // flip first byte
-    fs::write(&cached_archive, tampered).unwrap();
+    fs::write(&cached_archive, &tampered).unwrap();
+    let tampered_hash = sha256_file(&cached_archive);
+    let index_path = dist.join("index.nuon");
+    let index = fs::read_to_string(&index_path).unwrap();
+    fs::write(&index_path, index.replace(&original_hash, &tampered_hash)).unwrap();
 
     let blocked = run(root, &["install", "sgnpkg"]);
-    assert_failure_contains(&blocked, "signature", "tampered archive is refused");
+    assert_failure_contains(
+        &blocked,
+        "signature",
+        "tampered archive is refused by signature",
+    );
+}
+
+#[test]
+fn signed_binary_installs_over_http() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let triple = target_triple();
+
+    let keypair = gen_keypair();
+    let pubkey = keypair.pk.to_base64();
+
+    // A fully-signed tome, then re-pointed at an HTTP binhost serving its dist/ (archive,
+    // archive.minisig, index.nuon). Installing must fetch the detached `.minisig` over the same
+    // transport as the archive and verify it against the downloaded bytes — the path that was
+    // previously broken (the signature was only ever looked up on the local filesystem).
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    build_signed_tome(tome, "signedhttp", &triple, &keypair);
+
+    let base_url = serve_dir(tome.join("dist"));
+    let manifest = format!(
+        "export const tome = {{\n  name: 'signedhttp'\n  signers: ['{pubkey}']\n  packages: {{ repo: '{base_url}', format: 'http', index: 'index.nuon' }}\n}}\n"
+    );
+    fs::write(tome.join("tome.rn"), &manifest).unwrap();
+    sign_to(&tome.join("tome.rn.minisig"), manifest.as_bytes(), &keypair);
+
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome.to_str().unwrap(), "--ref", "main"],
+        ),
+        "add signed http tome",
+    );
+    assert_success(
+        &run(root, &["tome", "update", "signedhttp"]),
+        "update signed http tome",
+    );
+
+    assert_success(
+        &run(root, &["install", "sgnpkg"]),
+        "install signed binary over http",
+    );
+    assert_eq!(stdout(&run_shim(root, "sgnpkg")).trim(), "signed");
 }
 
 #[test]
