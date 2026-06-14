@@ -41,13 +41,30 @@ to enumerate what actually leaks; passing runes are certified toybox-ambient, fa
 name what stage 2 must package. Folding "toybox-ambient or not" into `build_env_id` is
 the cheap interim fix if prebuilts ever come from heterogeneous builders.
 
+### Store-address determinism
+
+A package's content address must be a single-source-of-truth, path-independent function of
+its declared inputs — no two code paths may derive it differently (AGENTS §9.8). Today they
+can: normal packages fold the *resolver-chosen* dep versions into the hash, but split members
+can't supply them, so `store_hash_for_rune_with_deps` falls back to a deterministic *closure
+walk*. Each path is deterministic alone, but when they pick different versions for the same
+dep the resolver's *expected* address and the artifact's *actual* address diverge — silently:
+phantom drift cascades into world rebuilds, and a computed hash that no longer matches the
+published index drops binary substitution to source. Dormant today (llvm/clang is the only
+split group and resolves unambiguously), but a latent correctness landmine — harden before
+stable:
+
+- Collapse to one hash path: feed the resolver's chosen versions into split-member
+  addressing so there is no closure-walk fallback to diverge from.
+- Guard the class with a property test — every address-derivation path produces an identical
+  hash for the same inputs — so future code that adds a new derivation path is caught.
+
+(Distinct from *intended* drift: a rune/source/build-env edit re-addressing a package is the
+content-addressing working as designed. The bug class is *accidental* divergence — same
+inputs, different hash depending on who asks.)
+
 ## Known debts (not release-blocking)
 
-- **Split members and the solver's positional dep hashes.** A split member's address
-  folds the whole group's external deps, which the solver's positional list cannot
-  supply, so `store_hash_for_rune_with_deps` falls back to a deterministic closure walk
-  instead of resolver-chosen versions. Fine while groups resolve unambiguously; revisit
-  if a group member ever has multiple installable versions in flight.
 - **The resolver does not backtrack over conflicts.** `conflicts` metadata refuses a plan
   early and precisely, but pubgrub never steers version selection *around* a conflict.
   Correct for mutual-exclusion semantics; spec before changing.
@@ -62,6 +79,38 @@ the cheap interim fix if prebuilts ever come from heterogeneous builders.
   cross story: build deps resolved for the *host* triple while runtime deps and outputs
   target the *target* triple (the model currently conflates them), cross
   toolchain-wrappers, rust cross-std. Project-sized; write the design doc first.
+- **Scoped profiles and dev shells (`grm profile` / `grm shell`).** Named, imperative
+  profiles for development against managed libraries — e.g. a `rust-devel` profile where
+  `cargo install`'s `openssl-sys` finds the managed OpenSSL instead of host Homebrew.
+  Converged design:
+  - *Model.* A named profile is the existing profile generalized: its own state (installed
+    set, lockfile), generation chain, and rollback; the unnamed default is the reserved
+    case. The store stays shared (cross-profile sharing is free); GC roots become the union
+    over all profiles' retained generations.
+  - *Activation = spawn a subshell* (not in-place eval — sidesteps the PATH
+    idempotency/restore bookkeeping and the per-shell-dialect codegen entirely). `grm
+    profile rust-devel` / `grm shell <pkgs>` exec `$SHELL` with the computed env; `exit`
+    leaves; nesting is a literal shell stack; `--pure` clears host discovery vars (additive,
+    managed-prepended, otherwise); `-- <cmd>` runs non-interactively for CI. `GRM_PROFILE`
+    marks the active one and is the default target for flag-less `grm install`.
+  - *Named profiles are a real per-profile prefix.* The generation links not just `bin/` +
+    `share/` but also merged `lib/`, `include/`, and `lib/pkgconfig/` symlink forests, and
+    the spawned env points at the *stable* `…/profiles/<name>/current/{bin,lib,include,
+    lib/pkgconfig,share/man}`. So `grm install … --profile rust-devel` (the default target
+    when inside it) flips `current` and the new package is live *immediately* — bins and
+    headers/libs/`.pc` alike — with no shell re-exec. The **default** profile stays
+    `bin/`+`share/` only: no global `lib/include` prefix (that reintroduces cross-package
+    collisions and ambient, non-hermetic builds — rejected under the host-floor rule, §5).
+    Collisions within a named profile's forests resolve like contested bins (`grm prefer`).
+  - *Bright line.* Rune builds remain hermetic — they never read a profile or ambient state,
+    so package reproducibility is unaffected. A binary built *inside* a dev profile is pinned
+    to that profile (and, additively, possibly host) — fine for dev tools, not a
+    reproducible artifact.
+  - *Surface.* `grm profile create|list|rm <name>`; `grm profile <name> [--pure] [-- cmd]`;
+    `grm shell <pkgs> [--pure] [-- cmd]`; `grm install <pkg> [--profile <name>]`.
+  - *Work.* Per-profile state/generation plumbing across install/remove/upgrade/rollback/
+    gc/doctor; the stable per-profile-prefix builder + forest collision handling; reuse the
+    build env's discovery-var computation (`src/nu/runtime/`) for the forest contents.
 
 ## Planned: Grimoire OS
 
