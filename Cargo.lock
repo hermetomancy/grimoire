@@ -1731,6 +1731,7 @@ dependencies = [
  "nu-protocol",
  "nu-system",
  "nuon",
+ "object",
  "os_pipe",
  "owo-colors",
  "regex",
@@ -2855,6 +2856,15 @@ checksum = "33fafba39597d6dc1fb709123dfa8289d39406734be322956a69f0931c73bb15"
 dependencies = [
  "libc",
  "objc2-core-foundation",
+]
+
+[[package]]
+name = "object"
+version = "0.36.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62948e14d923ea95ea2c7c86c71013138b66525b86bdc08d2dcc262bdb497b87"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

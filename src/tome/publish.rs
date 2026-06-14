@@ -19,6 +19,8 @@ use crate::{
     util::progress::{report, status},
 };
 
+use super::lint;
+
 /// Builds a tome's rune into a `.tar.zst` inside the tome's git-untracked publish directory
 /// (`dist/`) and registers (or replaces) its entry in the publish directory's `index.nuon`. The
 /// author uploads the whole `dist/` directory to the host named by `packages.repo`; the git
@@ -145,8 +147,10 @@ pub(crate) fn build_runes(
         for (store_hash, entry, archive) in
             build_rune_into(root, name, dist_dir, bootstrap, hermetic, target)?
         {
-            lint_archive_purity(&archive, strict)
+            lint::archive_purity(&archive, strict)
                 .with_context(|| format!("purity lint for `{}`", entry.name))?;
+            lint::archive_linkage(&archive, &entry, strict)
+                .with_context(|| format!("linkage lint for `{}`", entry.name))?;
             report(&format!(
                 "built {} {}",
                 crate::util::progress::accent(&format!("{} {}", entry.name, entry.version)),
@@ -174,78 +178,6 @@ pub(crate) fn build_runes(
     if any_built {
         nuon_io::write_nuon(index_path, &catalog.to_value())
             .with_context(|| format!("update index {}", index_path.display()))?;
-    }
-    Ok(())
-}
-
-/// Host path prefixes that must never appear in a store package's output: host
-/// package-manager trees and the build's own ephemeral staging dir.
-const IMPURE_PATTERNS: &[&str] = &[
-    "/usr/local/",
-    "/opt/homebrew/",
-    "/opt/local/",
-    "/nix/store/",
-    "/var/folders/",
-];
-
-/// Every impure pattern `bytes` contains, in `IMPURE_PATTERNS` order. Returns *all*
-/// matches, not the first: a benign hit (a `/usr/local/` string baked into some default)
-/// must never shadow a real one (the build's own `/var/folders/` temp dir smeared through
-/// a binary) in the same file. First-match-then-break once hid exactly that.
-fn impure_patterns_in(bytes: &[u8]) -> Vec<&'static str> {
-    IMPURE_PATTERNS
-        .iter()
-        .filter(|pattern| {
-            bytes
-                .windows(pattern.len())
-                .any(|window| window == pattern.as_bytes())
-        })
-        .copied()
-        .collect()
-}
-
-/// Post-build purity lint: scans every archive member for absolute host paths that should
-/// never be baked into a store package — host package-manager prefixes and the build's own
-/// ephemeral staging tree. A hit usually means the build linked a host library, baked a
-/// host tool path, or embedded its own temp directory instead of the final store prefix.
-/// Warns by default; `--strict` makes it fatal. The `.grimoire/` members (embedded rune
-/// source) are exempt — comments legitimately mention such paths.
-fn lint_archive_purity(archive: &Path, strict: bool) -> Result<()> {
-    let file = fs::File::open(archive)?;
-    let decoder = zstd::stream::read::Decoder::new(file)?;
-    let mut tar = tar::Archive::new(decoder);
-    let mut hits: Vec<(String, &str)> = Vec::new();
-    for entry in tar.entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?.display().to_string();
-        if path.starts_with(".grimoire/") || path.starts_with("./.grimoire/") {
-            continue;
-        }
-        let mut bytes = Vec::new();
-        use std::io::Read;
-        entry.read_to_end(&mut bytes)?;
-        for pattern in impure_patterns_in(&bytes) {
-            hits.push((path.clone(), pattern));
-        }
-        if hits.len() >= 8 {
-            break;
-        }
-    }
-    if hits.is_empty() {
-        return Ok(());
-    }
-    let listing: Vec<String> = hits
-        .iter()
-        .map(|(path, pattern)| format!("{path} contains `{pattern}`"))
-        .collect();
-    if strict {
-        bail!(
-            "impure build output ({}); the package bakes host paths that will not exist on              other machines",
-            listing.join("; ")
-        );
-    }
-    for line in &listing {
-        crate::util::progress::warn(&format!("impure build output: {line}"));
     }
     Ok(())
 }
@@ -597,29 +529,4 @@ pub(crate) fn rune_names_ordered(root: &Path) -> Result<Vec<String>> {
     }
 
     Ok(ordered)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::impure_patterns_in;
-
-    #[test]
-    fn a_benign_match_does_not_shadow_a_real_one_in_the_same_file() {
-        // The exact shape that masked the bug: a nushell binary carrying both the benign
-        // XDG default string and the build's own temp dir.
-        let bytes = b"...XDG_DATA_DIRS /usr/local/share/:/usr/share/ ... \
-                      /var/folders/yk/T/.tmpLm8MUZ/work/.grimoire-home/.cargo/foo.rs ...";
-        let matched = impure_patterns_in(bytes);
-        assert!(matched.contains(&"/usr/local/"), "{matched:?}");
-        assert!(
-            matched.contains(&"/var/folders/"),
-            "the real leak must not be shadowed by the benign one: {matched:?}"
-        );
-    }
-
-    #[test]
-    fn a_remapped_clean_binary_reports_nothing() {
-        let bytes = b"/grimoire-build/.grimoire-home/.cargo/registry/src/foo-1.0/src/lib.rs";
-        assert!(impure_patterns_in(bytes).is_empty());
-    }
 }

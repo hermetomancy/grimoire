@@ -9,6 +9,7 @@ pub(crate) mod git;
 pub(crate) mod news;
 
 mod authoring;
+mod lint;
 mod publish;
 mod sync;
 mod verify;
