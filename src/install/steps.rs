@@ -224,7 +224,10 @@ impl Installer {
     fn realize_step(&mut self, step: &PlanStep) -> Result<InstalledArchive> {
         if self.pins.is_some() {
             return match (step.substitutes.first(), &step.rune) {
-                (Some(sub), _) => self.install_substitute(sub),
+                (Some(sub), _) => {
+                    self.verify_pinned_substitute(step, sub)?;
+                    self.install_substitute(sub)
+                }
                 (None, Some(rune)) => self.build_and_install(rune, require_store_hash(step)?),
                 (None, None) => bail!("no pinned artifact available for `{}`", step.name),
             };
@@ -252,6 +255,41 @@ impl Installer {
                 step.version
             ),
         }
+    }
+
+    /// Under `--locked`, independently re-asserts that the chosen substitute is the exact artifact
+    /// the lockfile pinned — both its archive hash and, when recorded, its content address — rather
+    /// than trusting the solver's candidate filtering alone. Without this the `store_hash` pin goes
+    /// unenforced for a prebuilt-only package: its `step.store_hash` is just the substitute's own,
+    /// so the drift check in `execute_step` compares the substitute against itself.
+    fn verify_pinned_substitute(&self, step: &PlanStep, sub: &Substitute) -> Result<()> {
+        let Some(pins) = &self.pins else {
+            return Ok(());
+        };
+        let Some(pin) = pins.get(&step.name) else {
+            bail!(
+                "`{}` is not recorded in the lockfile; cannot install --locked",
+                step.name
+            );
+        };
+        crate::archive::verify_hash(&sub.entry.archive_hash, &pin.archive_hash).with_context(
+            || {
+                format!(
+                    "substitute for `{}` does not match the locked archive hash",
+                    step.name
+                )
+            },
+        )?;
+        if let Some(pinned) = &pin.store_hash
+            && sub.store_hash != *pinned
+        {
+            bail!(
+                "substitute for `{}` has content address {} but the lock pins {pinned}",
+                step.name,
+                sub.store_hash
+            );
+        }
+        Ok(())
     }
 
     /// Fetches, verifies, and installs a prebuilt substitute.
