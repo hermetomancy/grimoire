@@ -287,6 +287,21 @@ pub fn build_package_with_env(
         );
     }
 
+    // Mirror the split-group path: independently recompute the address from the rune and the
+    // resolved closure, and refuse to lay out a store prefix that disagrees with the planned hash.
+    // A silent mis-address would otherwise surface only later as a dropped binary substitution
+    // (AGENTS §9.8).
+    let recomputed =
+        crate::store::closure::store_hash_for_rune_with_target(&rune, &target, resolved)
+            .with_context(|| format!("recompute store hash for `{}`", metadata.name))?;
+    if recomputed != store_hash {
+        bail!(
+            "computed store hash {recomputed} for `{}` does not match the planned {store_hash}; \
+             its inputs changed between resolution and build — re-run the install",
+            metadata.name
+        );
+    }
+
     let final_prefix = paths::store_path(store_hash, &metadata.name, &metadata.version)?;
     let raw = run_rune_build(
         &rune,
