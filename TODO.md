@@ -51,13 +51,11 @@ does not ship (perl, m4, bash-isms) falls through to the host silently — an un
 build input, same class as the Homebrew-zstd leak. Path to severance is empirical: a
 hermetic build mode that drops the ambient tail, run per rune to enumerate what actually
 leaks; passing runes are certified toybox-ambient, failures name what stage 2 must package.
-Two separable deliverables:
+The `grm tome build --hermetic` diagnostic has shipped: it drops the ambient tail so a build
+that reaches for an unpackaged tool fails and names the leak. The remaining stage-2 work is
+empirical — run it per rune to enumerate what actually leaks, certify the passing runes as
+toybox-ambient, and package the failures. One deferred deliverable:
 
-- **`grm tome build --hermetic` (diagnostic; ship first).** `build_path_entries`
-  (`src/nu/runtime/env.rs`) is the only place the ambient tail is appended — gate the
-  `posix_ambient_dirs()` loop behind a `BuildEnv.hermetic` flag threaded from the CLI exactly
-  like `--bootstrap`, `conflicts_with` bootstrap. Pure diagnostic: does **not** touch the
-  store hash. A build that fails on a missing `perl`/`m4`/bash-ism is the leak signal.
 - **Fold a toybox-ambient marker into `build_env_id` (deferred; needs a decision).** The
   cheap interim fix if prebuilts ever come from heterogeneous builders, but blocked by an
   architecture mismatch: `build_env_id` is a process-global cached pure fn with no per-build
@@ -66,37 +64,11 @@ Two separable deliverables:
   identically or §9.8 breaks. Decide between a host-property marker and plumbing per-build
   env identity end-to-end before writing it.
 
-### Store-address determinism
-
-A package's content address must be a single-source-of-truth, path-independent function of
-its declared inputs — no two code paths may derive it differently (AGENTS §9.8). Today they
-can: normal packages fold the *resolver-chosen* dep versions into the hash, but split members
-can't supply them, so `store_hash_for_rune_with_deps` falls back to a deterministic *closure
-walk*. Each path is deterministic alone, but when they pick different versions for the same
-dep the resolver's *expected* address and the artifact's *actual* address diverge — silently:
-phantom drift cascades into world rebuilds, and a computed hash that no longer matches the
-published index drops binary substitution to source. Dormant today (llvm/clang is the only
-split group and resolves unambiguously), but a latent correctness landmine — harden before
-stable:
-
-- Collapse to one hash path: feed the resolver's chosen versions into split-member
-  addressing so there is no closure-walk fallback to diverge from.
-- Guard the class with a property test — every address-derivation path produces an identical
-  hash for the same inputs — so future code that adds a new derivation path is caught.
-
-(Distinct from *intended* drift: a rune/source/build-env edit re-addressing a package is the
-content-addressing working as designed. The bug class is *accidental* divergence — same
-inputs, different hash depending on who asks.)
-
 ## Known debts (not release-blocking)
 
 - **The resolver does not backtrack over conflicts.** `conflicts` metadata refuses a plan
   early and precisely, but pubgrub never steers version selection *around* a conflict.
   Correct for mutual-exclusion semantics; spec before changing.
-- **Linked-libraries lint.** Configure-time feature detection can link a host library
-  without baking a path string (the LLVM-22/Homebrew-zstd incident), invisible to the
-  purity lint. A `tome build` check diffing actual linkage against declared deps would
-  catch the class.
 
 ## Expansion projects (spec before code)
 
