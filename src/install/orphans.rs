@@ -2,7 +2,7 @@
 //!
 //! Removal is store-preserving: it drops state records, the lockfile entry, and the package's
 //! presence in the next generation, but leaves the store directory in place — older
-//! generations hard-link from it and `grm clean` reclaims it once nothing references it.
+//! generations symlink into it and `grm clean` reclaims it once nothing references it.
 
 use anyhow::{Context, Result, bail};
 use std::{

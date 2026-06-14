@@ -42,30 +42,24 @@ pub fn files(args: PackageArg) -> Result<()> {
     Ok(())
 }
 
-/// Resolves which installed package(s) own `path`. Accepts store paths and generation paths
-/// (including through the `profiles/current` symlink, which `canonicalize` follows).
+/// Resolves which installed package(s) own `path`. Accepts store paths and generation paths.
 ///
-/// Ownership is resolved by path shape, never by inode: generation files are CoW clones when
-/// the filesystem supports it, so they do not share inodes with their store sources.
+/// Every generation entry is an absolute symlink into the store, and `canonicalize` follows it
+/// (through `profiles/current` and the leaf link) to its store target, so ownership reduces to a
+/// store-path prefix match. For a `grm prefer`-contested bin this reports the provider actually
+/// linked into the generation — the package the symlink targets — not every package that merely
+/// declares the name.
 pub fn owns(args: OwnsArgs) -> Result<()> {
     let path = fs::canonicalize(&args.path)
         .with_context(|| format!("path `{}` does not exist", args.path.display()))?;
     let states = install::installed_states()?;
-
     let store_root = canonical_or_self(&paths::store_root()?);
-    let profiles = canonical_or_self(&paths::profiles_dir()?);
 
     let owners: Vec<&PackageState> = if path.starts_with(&store_root) {
         states
             .iter()
             .filter(|state| path.starts_with(canonical_or_self(Path::new(&state.store_path))))
             .collect()
-    } else if let Ok(rel) = path.strip_prefix(&profiles) {
-        // `rel` is `gen-N/<profile-relative path>`; drop the generation component so the rest
-        // can be matched against what each package contributed.
-        let mut components = rel.components();
-        components.next();
-        owners_of_profile_path(&states, components.as_path())
     } else {
         Vec::new()
     };
@@ -80,30 +74,6 @@ pub fn owns(args: OwnsArgs) -> Result<()> {
         println!("{}\t{}", state.name, state.version);
     }
     Ok(())
-}
-
-/// Owners of a profile-relative path like `bin/hello` or `share/man/man1/hello.1`.
-///
-/// Declared bins are matched through each package's `bins` map — the exact source generation
-/// linking uses — so the answer is authoritative even when several packages ship a file at the
-/// same relative path. `share/` trees are linked by existence (and collide silently, last
-/// package wins), so every package containing the path is reported.
-fn owners_of_profile_path<'a>(states: &'a [PackageState], rel: &Path) -> Vec<&'a PackageState> {
-    if let Ok(bin) = rel.strip_prefix("bin")
-        && let Some(name) = bin.to_str()
-    {
-        let owners: Vec<&PackageState> = states
-            .iter()
-            .filter(|state| state.bins.contains_key(name))
-            .collect();
-        if !owners.is_empty() {
-            return owners;
-        }
-    }
-    states
-        .iter()
-        .filter(|state| Path::new(&state.store_path).join(rel).is_file())
-        .collect()
 }
 
 fn canonical_or_self(path: &Path) -> PathBuf {

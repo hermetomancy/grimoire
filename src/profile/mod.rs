@@ -1,13 +1,15 @@
 //! Profile and generation management.
 //!
-//! A profile is the user-facing view into the store. Each generation is a real directory tree
-//! containing hard links into store paths. The active generation is selected by a single symlink:
+//! A profile is the user-facing view into the store. Each generation is a directory tree of
+//! symlinks into the immutable store. The active generation is selected by a single symlink:
 //! `profiles/current -> gen-N`.
 //!
-//! Because Grimoire binaries bake absolute store paths (RPATH, install_name, pkg-config prefix),
-//! generations only need to surface executables and human-facing artifacts: `bin/`, `share/man/`,
-//! shell completions, and desktop files. Everything else stays in the store and is found via baked
-//! absolute paths.
+//! Generations only surface executables and human-facing artifacts: `bin/`, `share/man/`, shell
+//! completions, and desktop files. Everything else stays in the store and is found via the
+//! absolute paths binaries bake (RPATH, install_name, pkg-config prefix). Linking by symlink —
+//! rather than hard link or copy — keeps each binary's own `@loader_path`/`current_exe` resolving
+//! back to the store, where `bin/` and `lib/` are siblings (rust's rustc finds its sysroot that
+//! way), and lets a generation span filesystems for free (see `linking`).
 
 use anyhow::{Context, Result, bail};
 use std::{collections::BTreeSet, fs, path::PathBuf};
@@ -35,7 +37,7 @@ pub struct Generation {
     pub store_paths: Vec<String>,
 }
 
-/// The directory that holds the actual generation trees (hard links into the store).
+/// The directory that holds the actual generation trees (symlinks into the store).
 pub fn profiles_dir() -> Result<PathBuf> {
     paths::profiles_dir()
 }
@@ -134,7 +136,7 @@ pub fn rebuild_and_activate(states: &[PackageState]) -> Result<u64> {
 
 /// Creates a new generation directory from the given package states and returns its ID.
 ///
-/// The generation is built by hard-linking profile-relevant files (`bin/`, `share/man/`, etc.)
+/// The generation is built by symlinking profile-relevant files (`bin/`, `share/man/`, etc.)
 /// from each package's store path into the generation directory.
 pub fn create_generation(states: &[PackageState]) -> Result<u64> {
     fs::create_dir_all(profiles_dir()?)?;

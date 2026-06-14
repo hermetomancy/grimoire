@@ -162,7 +162,7 @@ profiles:
 ├── store/<hash>-<name>-<version>/   # package contents
 ├── profiles/
 │   ├── current -> gen-3             # symlink to active generation
-│   └── gen-3/                       # hard links into store
+│   └── gen-3/                       # symlinks into store
 │       ├── bin/
 │       └── share/man/
 ├── state/packages/<name>.nuon       # installed state

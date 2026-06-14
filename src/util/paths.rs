@@ -79,9 +79,10 @@ pub fn store_root() -> Result<PathBuf> {
 
 /// The directory where actual generation trees live.
 ///
-/// When using the fixed store (`/grm`) this is `/grm/profiles/<user>` so that hard links
-/// into the store are on the same filesystem and multiple users do not collide. When
-/// `GRIMOIRE_ROOT` is set (tests, isolated installs) generations live under the install root.
+/// When using the fixed store (`/grm`) this is `/grm/profiles/<user>` so that multiple users
+/// do not collide. (Generations are symlinks into the store, which cross filesystems freely,
+/// so co-location is no longer required.) When `GRIMOIRE_ROOT` is set (tests, isolated
+/// installs) generations live under the install root.
 pub fn profiles_dir() -> Result<PathBuf> {
     if std::env::var_os("GRIMOIRE_ROOT").is_some() {
         Ok(install_root()?.join("profiles"))

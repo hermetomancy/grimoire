@@ -311,3 +311,71 @@ fn failed_generation_link_is_retried_by_the_next_install() {
         "awk goes to the preferred provider"
     );
 }
+
+/// Generation bins are symlinks into the immutable store, so a binary's `@loader_path` /
+/// `current_exe` resolves back to the store where `bin/` and `lib/` are siblings — what rust's
+/// `rustc` needs to find `librustc_driver` and its sysroot. This holds whether or not the
+/// package ships a `lib/`, and the symlinked tool still runs through the profile.
+#[test]
+fn generation_bins_are_symlinks_into_the_store() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let tome = TempDir::new().unwrap();
+    let tome_path = tome.path();
+    let runes = tome_path.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome_path.join("tome.rn"),
+        "export const tome = {\n  name: 'libtome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    // `libtool` installs a lib/ alongside its bin (the rust shape); `plaintool` ships only a
+    // bin. Both must be symlinked uniformly.
+    fs::write(
+        runes.join("libtool.rn"),
+        "export const package = {\n  name: 'libtool'\n  version: '0.1.0'\n  bins: { default: { libtool: 'bin/libtool' } }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  mkdir ($ctx.package_dir | path join 'lib')\n  \"#!/usr/bin/env sh\\nprintf 'libtool\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'libtool')\n  \"x\" | save ($ctx.package_dir | path join 'lib' 'libfoo.dylib')\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        runes.join("plaintool.rn"),
+        "export const package = {\n  name: 'plaintool'\n  version: '0.1.0'\n  bins: { default: { plaintool: 'bin/plaintool' } }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'plaintool\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'plaintool')\n}\n",
+    )
+    .unwrap();
+
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome_path.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add libtome",
+    );
+    assert_success(
+        &run(root, &["install", "libtool", "plaintool"]),
+        "install libtool + plaintool",
+    );
+
+    let gen_bin = |name: &str| root.join("profiles").join("current").join("bin").join(name);
+
+    // Both bins are symlinks pointing into the store, regardless of whether the package ships
+    // a lib/.
+    for name in ["libtool", "plaintool"] {
+        let bin = gen_bin(name);
+        let meta = fs::symlink_metadata(&bin).expect("bin linked into generation");
+        assert!(
+            meta.file_type().is_symlink(),
+            "{name}'s generation bin must be a symlink"
+        );
+        let target = fs::read_link(&bin).unwrap();
+        assert!(
+            target.starts_with(root.join("store")),
+            "{name}'s symlink must point into the store, got {}",
+            target.display()
+        );
+    }
+
+    // The symlinked tool still runs through the profile.
+    let out = run_shim(root, "libtool");
+    assert_success(&out, "run libtool from the generation symlink");
+    assert_eq!(stdout(&out).trim(), "libtool", "libtool output");
+}

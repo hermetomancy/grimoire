@@ -187,7 +187,7 @@ These must never be regressed:
 ## 11. Platform support
 
 Grimoire is **POSIX-only**: Linux, macOS, FreeBSD — no `#[cfg(windows)]` code. Gating on
-supported POSIX targets is allowed where necessary (`clonefile`, `FICLONE`). The bootstrap
+supported POSIX targets is allowed where necessary (platform-specific paths, SDK discovery). The bootstrap
 depends on a POSIX userland at `/usr/bin` and `/bin`. Default target triples:
 `linux-{x86_64,aarch64}-musl`, `macos-{x86_64,aarch64}-darwin`,
 `freebsd-{x86_64,aarch64}-unknown`; the Linux `-gnu` variants remain supported via explicit

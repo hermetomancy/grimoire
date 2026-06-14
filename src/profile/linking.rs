@@ -1,5 +1,12 @@
-//! Materializing a generation: linking declared bins (with `grm prefer` resolving
-//! contested names) and share/ trees from store paths via CoW clone or hard link.
+//! Materializing a generation: linking declared bins (with `grm prefer` resolving contested
+//! names) and share/ trees from the store. Every entry is a **symlink** to its absolute store
+//! path. The store is the immutable, content-addressed source of truth and a generation is a
+//! forest of pointers into it: GC roots come from each generation's recorded `store_paths`,
+//! not link counts, so the symlinks never dangle under a correct GC, and cross-filesystem
+//! installs work without a copy fallback. Absolute symlinks also make a binary's own
+//! `@loader_path`/`current_exe` resolve back to the store, where `bin/` and `lib/` are
+//! siblings — which a hard link into the bin-only generation dir would break (rust's `rustc`
+//! finds `librustc_driver` and its sysroot that way).
 
 use anyhow::{Context, Result, bail};
 use std::{
@@ -81,8 +88,8 @@ pub(crate) fn link_package_into_generation(
         );
     }
 
-    // Link declared bins into the generation's bin/ directory.
-    // The bin name in the profile is the key from `state.bins`; the source path is the value.
+    // Symlink declared bins into the generation's bin/ directory. The bin name in the profile
+    // is the key from `state.bins`; the link target is the value resolved against the store.
     for (bin_name, bin_path) in &state.bins {
         // This package lost the contested bin to a `grm prefer` choice; the winner links it.
         if skip_bins.contains(bin_name) {
@@ -98,7 +105,9 @@ pub(crate) fn link_package_into_generation(
             continue;
         }
         let dst = gen_dir.join("bin").join(bin_name);
-        if dst.exists() {
+        // Presence of the link itself (symlink_metadata, not exists) so a present-but-broken
+        // prior link is still reported as a collision rather than an opaque EEXIST below.
+        if dst.symlink_metadata().is_ok() {
             // Backstop only: contested declared bins are resolved order-independently by
             // `contested_bin_skips` before linking starts.
             bail!(
@@ -108,14 +117,10 @@ pub(crate) fn link_package_into_generation(
                 state.name
             );
         }
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        clone_or_hard_link(&src, &dst)
-            .with_context(|| format!("link {} -> {}", dst.display(), src.display()))?;
+        symlink_into_store(&src, &dst)?;
     }
 
-    // Scan share/ subdirectories for human-facing artifacts (man pages, completions, etc.)
+    // Symlink human-facing artifacts under share/ (man pages, completions, etc.).
     for subdir in PROFILE_SHARE_SUBDIRS {
         let src = store_path.join(subdir);
         if !src.exists() {
@@ -127,115 +132,23 @@ pub(crate) fn link_package_into_generation(
     Ok(())
 }
 
-/// Try a CoW clone (APFS `clonefile` on macOS, `FICLONE` on Linux), falling back to a hard
-/// link when the filesystem or platform does not support it, and to a plain file copy when
-/// the store and the profiles directory sit on different filesystems (`EXDEV`), where both
-/// cloning and hard-linking are impossible.
-pub(crate) fn clone_or_hard_link(src: &Path, dst: &Path) -> Result<()> {
-    // A symlink is reproduced as a symlink. Cloning or hard-linking would either follow it
-    // (a reflink materializes the *target* as a regular file) or pin the link inode, and
-    // both lose the validated relative-link semantics archives guarantee.
-    let metadata =
-        fs::symlink_metadata(src).with_context(|| format!("stat link source {}", src.display()))?;
-    if metadata.file_type().is_symlink() {
-        let target = fs::read_link(src)?;
-        std::os::unix::fs::symlink(&target, dst).with_context(|| {
-            format!("recreate symlink {} -> {}", dst.display(), target.display())
-        })?;
-        return Ok(());
+/// Creates a symlink at `dst` pointing at the absolute store path `src`, creating parent
+/// directories as needed. `src` is always an absolute path inside the immutable store, so the
+/// link resolves the same content from any generation; for store entries that are themselves
+/// symlinks (`gmake -> make`, relative man-page `.so` stubs) the link chain resolves through
+/// to the real file.
+fn symlink_into_store(src: &Path, dst: &Path) -> Result<()> {
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)?;
     }
-    if let Err(e) = try_cow_clone(src, dst) {
-        if !is_cow_unsupported(&e) {
-            return Err(e);
-        }
-    } else {
-        return Ok(());
-    }
-    match fs::hard_link(src, dst) {
-        Ok(()) => Ok(()),
-        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-            fs::copy(src, dst)
-                .with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
-            Ok(())
-        }
-        Err(e) => {
-            Err(e).with_context(|| format!("hard link {} -> {}", dst.display(), src.display()))
-        }
-    }
+    std::os::unix::fs::symlink(src, dst)
+        .with_context(|| format!("symlink {} -> {}", dst.display(), src.display()))
 }
 
-/// Whether an error indicates that CoW cloning is unsupported on this filesystem.
-pub(crate) fn is_cow_unsupported(err: &anyhow::Error) -> bool {
-    if let Some(io_err) = err.root_cause().downcast_ref::<std::io::Error>() {
-        // Comparisons rather than a match: ENOTSUP and EOPNOTSUPP are the same value on
-        // Linux (a match arm would be unreachable there) but distinct on macOS/BSD.
-        let code = io_err.raw_os_error();
-        code == Some(libc::ENOTSUP) || code == Some(libc::EOPNOTSUPP) || code == Some(libc::EINVAL)
-    } else {
-        false
-    }
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn try_cow_clone(src: &Path, dst: &Path) -> Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-
-    let src_c = std::ffi::CString::new(src.as_os_str().as_bytes())
-        .with_context(|| format!("convert src path to C string: {}", src.display()))?;
-    let dst_c = std::ffi::CString::new(dst.as_os_str().as_bytes())
-        .with_context(|| format!("convert dst path to C string: {}", dst.display()))?;
-    // SAFETY: `clonefile` is a read-only CoW clone syscall. `src_c` and `dst_c` are valid
-    // NUL-terminated CStrings that outlive the call, derived from existing paths.
-    let rc = unsafe { libc::clonefile(src_c.as_ptr(), dst_c.as_ptr(), 0) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error().into())
-    }
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn try_cow_clone(src: &Path, dst: &Path) -> Result<()> {
-    use std::os::unix::io::AsRawFd;
-
-    let src_file =
-        fs::File::open(src).with_context(|| format!("open src for reflink: {}", src.display()))?;
-    let dst_file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(dst)
-        .with_context(|| format!("open dst for reflink: {}", dst.display()))?;
-
-    let src_fd = src_file.as_raw_fd();
-    let dst_fd = dst_file.as_raw_fd();
-    // FICLONE = _IOW(0x94, 9, int)
-    const FICLONE: libc::c_ulong = 0x40049409;
-
-    // SAFETY: `ioctl(FICLONE)` is a reflink operation. `src_fd` and `dst_fd` are valid,
-    // owned file descriptors that outlive the call. `FICLONE` is the correct ioctl constant
-    // for Linux reflink (`_IOW(0x94, 9, int)`).
-    let rc = unsafe { libc::ioctl(dst_fd, FICLONE, src_fd) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        let err = std::io::Error::last_os_error();
-        // The OpenOptions above already created an empty `dst`; remove it, or the
-        // hard-link fallback fails with EEXIST on filesystems without reflink support.
-        drop(dst_file);
-        let _ = fs::remove_file(dst);
-        Err(err.into())
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub(crate) fn try_cow_clone(_src: &Path, _dst: &Path) -> Result<()> {
-    // ENOTSUP as a real io::Error so `is_cow_unsupported` recognizes it and the caller
-    // falls back to a hard link — a bare anyhow string here made every FreeBSD link fail.
-    Err(std::io::Error::from_raw_os_error(libc::ENOTSUP).into())
-}
-
-/// Recursively hard-links files from `src` into `dst`, preserving directory structure.
+/// Recursively symlinks every file under `src` (a store subtree) into `dst`, preserving the
+/// directory structure. Each leaf — regular file or store symlink alike — becomes a symlink to
+/// its absolute store path. Existing targets are replaced, so packages that contribute to the
+/// same share/ tree (e.g. several packages' `share/man/man1`) merge.
 pub(crate) fn link_tree(src: &Path, dst: &Path) -> Result<()> {
     for entry in walkdir::WalkDir::new(src) {
         let entry = entry?;
@@ -248,27 +161,60 @@ pub(crate) fn link_tree(src: &Path, dst: &Path) -> Result<()> {
             .with_context(|| format!("strip prefix from {}", path.display()))?;
         let target = dst.join(relative);
 
-        let meta = entry.metadata()?;
-        if meta.is_dir() {
+        // walkdir does not follow symlinks, so a store symlink arrives here as a symlink entry
+        // (not a dir) and is linked by absolute path like any other leaf.
+        if entry.file_type().is_dir() {
             fs::create_dir_all(&target)?;
-        } else if meta.is_file() {
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            // Remove any existing file so we don't fail on collision
+        } else {
             let _ = fs::remove_file(&target);
-            clone_or_hard_link(path, &target)
-                .with_context(|| format!("link {} -> {}", target.display(), path.display()))?;
-        } else if meta.file_type().is_symlink() {
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let link_target = fs::read_link(path)?;
-            let _ = fs::remove_file(&target);
-            std::os::unix::fs::symlink(&link_target, &target).with_context(|| {
-                format!("symlink {} -> {}", target.display(), link_target.display())
-            })?;
+            symlink_into_store(path, &target)?;
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+    use tempfile::TempDir;
+
+    #[test]
+    fn link_tree_symlinks_each_leaf_to_its_absolute_store_path() {
+        let store = TempDir::new().unwrap();
+        let store = store.path();
+        let gen_dir = TempDir::new().unwrap();
+        let share = gen_dir.path().join("share");
+
+        fs::create_dir_all(store.join("man1")).unwrap();
+        fs::write(store.join("man1").join("tool.1"), b"page").unwrap();
+        // A store symlink (e.g. a man-page alias) must be linked by absolute path and resolve
+        // through to the real file, not recreated as a dangling relative link.
+        symlink("tool.1", store.join("man1").join("alias.1")).unwrap();
+
+        link_tree(store, &share).unwrap();
+
+        let leaf = share.join("man1").join("tool.1");
+        let meta = fs::symlink_metadata(&leaf).unwrap();
+        assert!(meta.file_type().is_symlink(), "leaf must be a symlink");
+        assert_eq!(
+            fs::read_link(&leaf).unwrap(),
+            store.join("man1").join("tool.1"),
+            "leaf must point at its absolute store path"
+        );
+
+        let alias = share.join("man1").join("alias.1");
+        assert!(
+            fs::symlink_metadata(&alias)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "a store symlink must itself be linked, not dereferenced"
+        );
+        assert_eq!(
+            fs::read_to_string(&alias).unwrap(),
+            "page",
+            "the alias must resolve through to the real file"
+        );
+    }
 }

@@ -665,3 +665,62 @@ fn upstream_version_is_displayed_by_info() {
         stdout(&info)
     );
 }
+
+/// `grm owns` on a `grm prefer`-contested bin reports the provider actually linked into the
+/// generation — the package the profile symlink targets — not every package that declares the
+/// name. The bin is an absolute symlink into the store, so `canonicalize` resolves it to the
+/// winner's store path.
+#[test]
+fn owns_reports_only_the_linked_provider_for_a_contested_bin() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let tome = TempDir::new().unwrap();
+    let tome_path = tome.path();
+    let runes = tome_path.join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::write(
+        tome_path.join("tome.rn"),
+        "export const tome = {\n  name: 'awktome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    // gawk and mawk both declare an `awk` bin; `grm prefer` settles the contest.
+    for provider in ["gawk", "mawk"] {
+        fs::write(
+            runes.join(format!("{provider}.rn")),
+            format!(
+                "export const package = {{\n  name: '{provider}'\n  version: '0.1.0'\n  bins: {{ default: {{ {provider}: 'bin/{provider}', awk: 'bin/{provider}' }} }}\n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf '{provider}\\n'\\n\" | save ($ctx.package_dir | path join 'bin' '{provider}')\n}}\n"
+            ),
+        )
+        .unwrap();
+    }
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", tome_path.to_str().unwrap(), "--ref", "main"],
+        ),
+        "tome add awktome",
+    );
+    assert_success(&run(root, &["prefer", "awk", "gawk"]), "prefer awk gawk");
+    assert_success(
+        &run(root, &["install", "gawk", "mawk"]),
+        "install gawk + mawk",
+    );
+
+    let awk_bin = root
+        .join("profiles")
+        .join("current")
+        .join("bin")
+        .join("awk");
+    let owns = run(root, &["owns", awk_bin.to_str().unwrap()]);
+    assert_success(&owns, "owns contested awk bin");
+    let out = stdout(&owns);
+    assert!(
+        out.contains("gawk"),
+        "owns must report the linked provider gawk: {out}"
+    );
+    assert!(
+        !out.contains("mawk"),
+        "owns must not report the losing declarant mawk: {out}"
+    );
+}

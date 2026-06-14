@@ -184,8 +184,8 @@ pub fn validate_package_version(version: &str) -> Result<()> {
         .with_context(|| format!("package version `{version}` is not valid semver"))
 }
 
-/// A bin name becomes a profile entry *file name* under `profiles/current/bin/` — a hard link
-/// into the store on all platforms — and is never interpreted as code. So, unlike package/tome
+/// A bin name becomes a profile entry *file name* under `profiles/current/bin/` — a symlink
+/// into the store — and is never interpreted as code. So, unlike package/tome
 /// identifiers, a bin name only has to be a safe single path component that works on both
 /// platforms. We allow the extra punctuation real command names use (notably `[` from coreutils)
 /// but reject path separators, control characters, the `.`/`..` directory names, a leading `.`
