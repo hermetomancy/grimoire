@@ -45,6 +45,10 @@ heading when it is tagged.
 
 ### Fixed
 
+- Reading rune metadata is now inert: the file-loading parse keywords (`use`, `source`,
+  `overlay`, `module`, `register`, `plugin`) are refused before the parser runs, so reading the
+  `package` record of an untrusted catalog rune can no longer open arbitrary host files at parse
+  time (`grm info`/`search`/plan-time confused-deputy read). §4.3.
 - Dependency resolution is bounded: an over-constrained or pathologically large requirement
   graph now aborts with a clear error after a fixed backtracking budget instead of spinning
   indefinitely (the search clones state per candidate, so the worst case was exponential).
