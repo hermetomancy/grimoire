@@ -45,6 +45,11 @@ heading when it is tagged.
 
 ### Fixed
 
+- `--locked` installs independently re-assert the pinned artifact at realize time: the chosen
+  substitute must match both the locked archive hash and (when recorded) the locked content
+  address, rather than relying solely on the solver's candidate filtering. Previously the
+  `store_hash` pin went unenforced for a prebuilt-only package (its step hash was the
+  substitute's own, so the drift check compared it against itself).
 - Re-indexing (`grm tome build --index`) addresses each archive against the target it was built
   for (read from the archive's own metadata) rather than the indexing host's, so a cross-target
   archive is no longer registered under a hash its consumers cannot reproduce (§9.8).
