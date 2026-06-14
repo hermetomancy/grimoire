@@ -151,7 +151,57 @@ pub(crate) fn collect_referenced_paths(to_retain: &BTreeSet<u64>) -> Result<BTre
             referenced.extend(g.store_paths);
         }
     }
+    // On the shared `/grm/store`, every other user's generations are GC roots too: this user's
+    // `clean` must never reclaim a store path another user's generation still links to (§9).
+    referenced.extend(foreign_referenced_paths());
     Ok(referenced)
+}
+
+/// Store paths referenced by *other users'* generations under the shared `/grm/profiles/*`. We
+/// cannot know another user's retention policy, so every generation they have is treated as a
+/// root. Returns an empty set for a `GRIMOIRE_ROOT`-isolated install (single owner) or when the
+/// shared profiles root cannot be read. Best-effort by design — a foreign profile we cannot read
+/// simply contributes no roots, and the worst case is retaining a path slightly longer.
+fn foreign_referenced_paths() -> BTreeSet<String> {
+    // An isolated install owns its whole store; only the fixed `/grm` store is shared across users.
+    if std::env::var_os("GRIMOIRE_ROOT").is_some() {
+        return BTreeSet::new();
+    }
+    let mine = paths::profiles_dir().ok();
+    referenced_paths_under(Path::new("/grm/profiles"), mine.as_deref())
+}
+
+/// Collects the store paths named by every `gen-*/gen.nuon` under each user directory in
+/// `profiles_root`, skipping `exclude` (the current user, whose retained generations are gathered
+/// by the normal path). Pure traversal — unreadable entries are skipped rather than failing.
+fn referenced_paths_under(profiles_root: &Path, exclude: Option<&Path>) -> BTreeSet<String> {
+    let mut referenced = BTreeSet::new();
+    let Ok(users) = fs::read_dir(profiles_root) else {
+        return referenced;
+    };
+    for user in users.flatten() {
+        let user_dir = user.path();
+        if Some(user_dir.as_path()) == exclude || !user_dir.is_dir() {
+            continue;
+        }
+        let Ok(generations) = fs::read_dir(&user_dir) else {
+            continue;
+        };
+        for generation in generations.flatten() {
+            let name = generation.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name == "current" || !name.starts_with("gen-") {
+                continue;
+            }
+            let dir = generation.path();
+            if dir.join("gen.nuon").exists()
+                && let Ok(meta) = read_generation_metadata(&dir)
+            {
+                referenced.extend(meta.store_paths);
+            }
+        }
+    }
+    referenced
 }
 
 pub(crate) fn collect_unreferenced_stores(referenced: &BTreeSet<String>) -> Result<(usize, u64)> {
@@ -197,4 +247,51 @@ pub(crate) fn du(path: &Path) -> Result<u64> {
         }
     }
     Ok(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn foreign_generations_are_gc_roots() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let profiles = root.path();
+
+        // Two foreign users, each with a generation referencing a store path, plus the current
+        // user (excluded) and assorted noise that must be ignored.
+        let write_gen = |user: &str, gen_name: &str, store_paths: &[&str]| {
+            let dir = profiles.join(user).join(gen_name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let generation = Generation {
+                id: 1,
+                created: 0,
+                packages: vec!["pkg".to_string()],
+                store_paths: store_paths.iter().map(|s| s.to_string()).collect(),
+            };
+            write_generation_metadata(&dir, &generation).unwrap();
+        };
+        write_gen("alice", "gen-1", &["/grm/store/aaaa-pkg-1.0"]);
+        write_gen("bob", "gen-3", &["/grm/store/bbbb-pkg-2.0"]);
+        write_gen("me", "gen-1", &["/grm/store/cccc-mine-1.0"]);
+        // Noise: a non-generation dir and a gen dir without gen.nuon are both ignored.
+        std::fs::create_dir_all(profiles.join("alice").join("current")).unwrap();
+        std::fs::create_dir_all(profiles.join("carol").join("gen-9")).unwrap();
+
+        let referenced = referenced_paths_under(profiles, Some(&profiles.join("me")));
+        assert!(referenced.contains("/grm/store/aaaa-pkg-1.0"));
+        assert!(referenced.contains("/grm/store/bbbb-pkg-2.0"));
+        assert!(
+            !referenced.contains("/grm/store/cccc-mine-1.0"),
+            "the excluded current user must not be folded in here"
+        );
+        assert_eq!(referenced.len(), 2);
+    }
+
+    #[test]
+    fn missing_profiles_root_yields_no_roots() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let absent = root.path().join("does-not-exist");
+        assert!(referenced_paths_under(&absent, None).is_empty());
+    }
 }
