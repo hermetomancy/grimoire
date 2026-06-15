@@ -27,7 +27,7 @@ on:
       tome_repo:
         description: Git URL of the core tome repository
         required: false
-        default: https://github.com/grimoire-of-glass/tome-core
+        default: https://github.com/hermetomancy/tome-core
 
 jobs:
   build-all:
@@ -67,7 +67,7 @@ jobs:
 
       - name: Clone the core tome
         # `inputs.tome_repo` is unset on a tag push; fall back to the canonical tome-core.
-        run: git clone --depth 1 "${{ inputs.tome_repo || 'https://github.com/grimoire-of-glass/tome-core' }}" core-tome
+        run: git clone --depth 1 "${{ inputs.tome_repo || 'https://github.com/hermetomancy/tome-core' }}" core-tome
 
       - name: Build every rune
         run: ./target/release/grm tome build --all --strict --path core-tome

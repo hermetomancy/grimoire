@@ -1,6 +1,6 @@
 [submodule "tome-example"]
 	path = tome-example
-	url = https://github.com/grimoire-of-glass/tome-example
+	url = https://github.com/hermetomancy/tome-example
 [submodule "addendum-example"]
 	path = addendum-example
-	url = https://github.com/grimoire-of-glass/addendum-example.git
+	url = https://github.com/hermetomancy/addendum-example.git

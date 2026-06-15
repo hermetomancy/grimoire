@@ -58,7 +58,7 @@ now-unneeded dependencies with it in the same transaction — file-ownership que
 ## Install
 
 ```sh
-cargo install --git https://github.com/grimoire-of-glass/grimoire
+cargo install --git https://github.com/hermetomancy/grimoire
 grm setup
 ```
 
@@ -70,7 +70,7 @@ through itself — from then on `grm upgrade grimoire` is self-update.
 
 ```sh
 # Add a package catalog (grm setup already adds the core tome)
-grm tome add https://github.com/grimoire-of-glass/tome-core --ref main
+grm tome add https://github.com/hermetomancy/tome-core --ref main
 
 # Search, inspect, install
 grm search hello

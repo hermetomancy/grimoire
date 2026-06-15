@@ -137,8 +137,8 @@ fn display_with_home(path: &Path, home: &str) -> String {
     }
 }
 
-const CORE_TOME_URL: &str = "https://github.com/grimoire-of-glass/tome-core";
-const WORLD_TOME_URL: &str = "https://github.com/grimoire-of-glass/tome-world";
+const CORE_TOME_URL: &str = "https://github.com/hermetomancy/tome-core";
+const WORLD_TOME_URL: &str = "https://github.com/hermetomancy/tome-world";
 
 /// The dogfooding tail of `grm setup`: once the store is usable, configure the core and
 /// world tomes (when none are configured yet) and install `grimoire` through itself.
