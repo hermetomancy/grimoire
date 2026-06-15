@@ -386,6 +386,7 @@ impl Installer {
                 build_dep_bin_dirs(&build_deps)?,
                 build_dep_env_vars(&build_deps)?,
                 &paths::target_triple(),
+                &metadata.name,
             )?;
             let result = build::build_package_with_env(
                 &rune.to_string_lossy(),

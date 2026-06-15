@@ -33,6 +33,10 @@ heading when it is tagged.
 - The managed core userland references `python3-minimal` (the stdlib-only build interpreter) rather
   than `python3`: the build-PATH floor and `grm doctor`'s readiness check are updated to match the
   tome split. The full `python3` is no longer a core package.
+- Linux musl C++ builds get the managed `libcxx` (libc++) as a floor: once it is installed, every
+  musl-target C++ build is pointed at it (`-stdlib=libc++` + its headers/libs, `--unwindlib=libunwind`),
+  except libcxx's own build. It is injected as environment, not a declared dep, so a C++ package like
+  `cmake` does not cycle with `libcxx` (whose own build deps include cmake).
 - Linux musl builds retarget the compiler to musl. Once `musl` and `linux-headers` are installed,
   a musl-target build sets `--target=<arch>-linux-musl` plus a musl sysroot (`-isystem` for musl +
   kernel headers, `-B`/`-L` for musl's CRT and libc, `--rtlib=compiler-rt --unwindlib=none`), so

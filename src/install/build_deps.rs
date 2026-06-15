@@ -133,6 +133,7 @@ pub(crate) fn ensure_build_deps_installed_inner(
                 build_dep_bin_dirs(&build_deps)?,
                 build_dep_env_vars(&build_deps)?,
                 &paths::target_triple(),
+                &metadata.name,
             )?;
             let result = build::build_package_with_env(
                 &rune.to_string_lossy(),

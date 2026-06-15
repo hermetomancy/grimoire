@@ -164,6 +164,24 @@ fn musl_target_env_vars(target: &str, musl: &str, headers: &str) -> Vec<(String,
     env
 }
 
+/// Adds the managed musl libc++ to a C++ build's flags: its headers ahead of the C headers in
+/// `CXXFLAGS` (`-nostdinc++` + libc++'s include dir, where `-stdlib=libc++` then resolves the
+/// library) and its lib dir plus the LLVM unwinder in `LDFLAGS`. `CFLAGS` (C) is left untouched —
+/// only C++ wants a C++ stdlib — and `-static`/`--unwindlib=libunwind` (appended after the base
+/// `--unwindlib=none`) win as the last occurrence.
+fn inject_libcxx_flags(env: &mut [(String, String)], libcxx: &str) {
+    for (key, value) in env.iter_mut() {
+        match key.as_str() {
+            "CXXFLAGS" => {
+                *value =
+                    format!("-stdlib=libc++ -nostdinc++ -isystem {libcxx}/include/c++/v1 {value}");
+            }
+            "LDFLAGS" => value.push_str(&format!(" -L{libcxx}/lib --unwindlib=libunwind")),
+            _ => {}
+        }
+    }
+}
+
 /// Constructs a [`BuildEnv`] for a build on `target`. Declared build-dep `bin/` dirs come
 /// first — declaration is specificity, so a rune that declares `gsed` gets GNU sed as
 /// plain `sed` even though the core floor (toybox) also ships one — then the core package
@@ -173,6 +191,7 @@ pub fn build_env_for_target(
     path_dirs: Vec<PathBuf>,
     extra_env: Vec<(String, String)>,
     target: &str,
+    package_name: &str,
 ) -> Result<BuildEnv> {
     let mut all_path_dirs = path_dirs;
     all_path_dirs.extend(core_bin_dirs()?);
@@ -213,6 +232,17 @@ pub fn build_env_for_target(
             crate::model::Dependency::any("linux-headers"),
         ])?;
         merge_path_env(&mut env, floor);
+
+        // libc++ is the C++ half of the musl floor (musl has no C++ standard library of its own).
+        // Inject it for every C++ build on musl once `libcxx` is installed — but NOT for libcxx's
+        // own build, which *provides* libc++ and compiles `-nostdinc++` against its own tree. It is
+        // a floor (env, never a declared dep), so a C++ package like cmake does not cycle with
+        // libcxx — whose own build deps include cmake.
+        if package_name != "libcxx"
+            && let Some(libcxx) = prefix("libcxx")
+        {
+            inject_libcxx_flags(&mut env, &libcxx);
+        }
     }
     if target.starts_with("macos-")
         && let Some(sdk) = toolchain::macos_sdk_path()
@@ -331,6 +361,7 @@ pub fn build_package(
             install::build_dep_bin_dirs(&build_deps)?,
             install::build_dep_env_vars(&build_deps)?,
             &target,
+            &metadata.name,
         )?
     };
     env.target = target;
@@ -787,6 +818,45 @@ mod tests {
     }
 
     #[test]
+    fn inject_libcxx_flags_adds_cxx_not_c() {
+        let mut env = vec![
+            (
+                "CFLAGS".to_string(),
+                "--target=aarch64-linux-musl -isystem /musl/include".to_string(),
+            ),
+            (
+                "CXXFLAGS".to_string(),
+                "--target=aarch64-linux-musl -isystem /musl/include".to_string(),
+            ),
+            (
+                "LDFLAGS".to_string(),
+                "--unwindlib=none -static".to_string(),
+            ),
+        ];
+        inject_libcxx_flags(&mut env, "/store/libcxx");
+        let get = |k: &str| {
+            env.iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.as_str())
+        };
+        // C is untouched; C++ gets libc++ headers *before* the musl headers.
+        assert_eq!(
+            get("CFLAGS"),
+            Some("--target=aarch64-linux-musl -isystem /musl/include")
+        );
+        let cxx = get("CXXFLAGS").unwrap();
+        assert!(
+            cxx.starts_with("-stdlib=libc++ -nostdinc++ -isystem /store/libcxx/include/c++/v1 ")
+        );
+        assert!(cxx.ends_with("-isystem /musl/include"));
+        // Link gains libc++'s lib dir and the LLVM unwinder (last --unwindlib wins).
+        assert_eq!(
+            get("LDFLAGS"),
+            Some("--unwindlib=none -static -L/store/libcxx/lib --unwindlib=libunwind")
+        );
+    }
+
+    #[test]
     fn clang_musl_triple_swaps_os_and_arch() {
         assert_eq!(
             clang_musl_triple("linux-aarch64-musl"),
@@ -825,7 +895,8 @@ mod tests {
     fn core_available_skips_host_boundary() {
         // When the managed core boundary is available, host tools must not be present.
         if core_compiler_boundary_available().unwrap() {
-            let env = build_env_for_target(Vec::new(), Vec::new(), "macos-aarch64-darwin").unwrap();
+            let env = build_env_for_target(Vec::new(), Vec::new(), "macos-aarch64-darwin", "pkg")
+                .unwrap();
             assert!(env.host_tools.is_empty());
         }
     }
@@ -835,14 +906,15 @@ mod tests {
         // When the managed core boundary is not available, the host compiler boundary
         // must be present (if the host has one).
         if !core_compiler_boundary_available().unwrap() {
-            let env = build_env_for_target(Vec::new(), Vec::new(), "macos-aarch64-darwin").unwrap();
+            let env = build_env_for_target(Vec::new(), Vec::new(), "macos-aarch64-darwin", "pkg")
+                .unwrap();
             assert!(!env.host_tools.is_empty());
         }
     }
 
     #[test]
     fn musl_target_sets_static_flags() {
-        let env = build_env_for_target(Vec::new(), Vec::new(), "linux-x86_64-musl").unwrap();
+        let env = build_env_for_target(Vec::new(), Vec::new(), "linux-x86_64-musl", "pkg").unwrap();
         let get = |key: &str| {
             env.extra_env
                 .iter()
