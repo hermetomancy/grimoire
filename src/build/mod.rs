@@ -197,7 +197,17 @@ pub fn build_env_for_target(
     all_path_dirs.extend(core_bin_dirs()?);
 
     let mut env = extra_env;
-    if is_musl_target(target) {
+    let managed_boundary = core_compiler_boundary_available()?;
+    // A pure-musl build host's system clang is already musl, with its own libc/libc++/libunwind —
+    // but it ships no *static* libc/libunwind/libatomic by default and force-links libatomic on
+    // `-static`. The cross-from-glibc floor (the musl retarget, `-static`, the managed libc++ inject)
+    // therefore can't link there at the host boundary. These pre-managed builds are transient
+    // scaffolding — re-forged against the managed musl+clang once the boundary flips — so on a musl
+    // host, before that flip, skip the floor and build natively against the host toolchain instead.
+    let native_musl_host_boundary =
+        is_musl_target(target) && !managed_boundary && paths::host_libc() == "musl";
+
+    if is_musl_target(target) && !native_musl_host_boundary {
         let states = install::installed_states()?;
         let prefix = |name: &str| {
             states
@@ -248,28 +258,6 @@ pub fn build_env_for_target(
         && let Some(sdk) = toolchain::macos_sdk_path()
     {
         env.push(("SDKROOT".to_string(), sdk));
-    }
-
-    let managed_boundary = core_compiler_boundary_available()?;
-
-    // On a musl host the system clang ships no static libc/libunwind/libatomic by default, so the
-    // floor's `-static` fails at the host boundary. (The cross-from-glibc path assumes a glibc host,
-    // where static-glibc just works — and clang there does not force-link libatomic.) These
-    // pre-managed builds are transient scaffolding: once the managed musl+clang exist the boundary
-    // flips and everything is re-forged static against them (the managed clang carries grimoire's
-    // defaults, not the host distro's, so it does not pull `-latomic`). So while the host toolchain
-    // is still in use on a musl host, build dynamic against the host musl by dropping `-static`; the
-    // managed-clang phase, and every glibc host, keep it.
-    if is_musl_target(target) && !managed_boundary && paths::host_libc() == "musl" {
-        for (key, value) in env.iter_mut() {
-            if matches!(key.as_str(), "CFLAGS" | "CXXFLAGS" | "LDFLAGS") {
-                *value = value
-                    .split_whitespace()
-                    .filter(|tok| *tok != "-static")
-                    .collect::<Vec<_>>()
-                    .join(" ");
-            }
-        }
     }
 
     if managed_boundary {
