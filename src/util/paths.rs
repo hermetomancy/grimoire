@@ -163,6 +163,32 @@ fn resolve_target_triple(os: &str, arch: &str) -> String {
     format!("{os}-{arch}-{abi}")
 }
 
+/// The build *host's* libc, detected at runtime and cached. Distinct from `target_triple()` (the
+/// OUTPUT ABI — always `-musl` on Linux): this reflects the machine grm runs on. A glibc host
+/// cross-builds the musl toolchain from a gnu rust seed; a pure-musl host (e.g. Chimera Linux) must
+/// seed from the musl release, whose binaries only its `ld-musl` loader can run. Probed by the
+/// presence of the musl dynamic loader (the canonical signal — same soname family as `tome::lint`'s
+/// LIBC_FLOOR). `GRM_HOST_LIBC` overrides for unusual hosts. "musl" | "glibc" on Linux, "none" else.
+pub fn host_libc() -> &'static str {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CACHE.get_or_init(detect_host_libc).as_str()
+}
+
+fn detect_host_libc() -> String {
+    if let Some(over) = env::var_os("GRM_HOST_LIBC") {
+        return over.to_string_lossy().into_owned();
+    }
+    if env::consts::OS != "linux" {
+        return "none".to_string();
+    }
+    // musl ships exactly one `ld-musl-<arch>.so.1`; its presence is the host-is-musl signal.
+    if std::path::Path::new(&format!("/lib/ld-musl-{}.so.1", env::consts::ARCH)).exists() {
+        "musl".to_string()
+    } else {
+        "glibc".to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

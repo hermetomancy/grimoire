@@ -84,6 +84,13 @@ pub struct Source {
     /// how a fixed-output package pins different prebuilt artifacts per platform.
     #[serde(default)]
     pub platform: Option<String>,
+    /// Optional build-HOST libc filter (`"musl"` | `"glibc"`). When set, the source is selected
+    /// only where grm's own host libc (see [`crate::util::paths::host_libc`]) matches — how
+    /// `rust-stage0` pins a different bootstrap seed per host: a glibc host cross-seeds from the gnu
+    /// release, a pure-musl host seeds from the musl release that only its `ld-musl` loader can run.
+    /// `None` matches any host, so this never perturbs ordinary single-seed packages.
+    #[serde(default)]
+    pub host_libc: Option<String>,
 }
 
 impl PackageMetadata {
@@ -176,10 +183,15 @@ impl PackageMetadata {
     }
 
     /// The declared sources that apply to `target`: platform-filtered sources whose glob does
-    /// not match are excluded, exactly like platform-conditional deps. This filtered view is
-    /// what gets fetched *and* what the store hash covers, so per-platform artifacts do not
-    /// perturb other platforms' content addresses.
+    /// not match are excluded, exactly like platform-conditional deps, AND host-filtered by the
+    /// optional `host_libc` field against this machine's [`crate::util::paths::host_libc`]. This
+    /// filtered view is what gets fetched *and* what the store hash covers, so per-platform (and,
+    /// for `rust-stage0`, per-host) artifacts do not perturb other platforms' content addresses.
+    /// Like `target_triple()`, the host-libc input is a machine property — so a source set that
+    /// declares `host_libc` is intentionally addressed per build host (correct for a bootstrap seed
+    /// that must run on the host); sources that omit it are host-independent as before.
     pub fn sources_for(&self, target: &str) -> BTreeMap<String, Source> {
+        let host_libc = crate::util::paths::host_libc();
         self.sources
             .iter()
             .filter(|(_, source)| {
@@ -187,6 +199,7 @@ impl PackageMetadata {
                     .platform
                     .as_deref()
                     .is_none_or(|pattern| dep_matches_platform(pattern, target))
+                    && source.host_libc.as_deref().is_none_or(|h| h == host_libc)
             })
             .map(|(name, source)| (name.clone(), source.clone()))
             .collect()
@@ -457,12 +470,14 @@ pub(crate) fn parse_sources(value: &Value) -> Result<BTreeMap<String, Source>> {
         let sha256 = required_field_string(source, &format!("source `{name}`"), "sha256")?;
         validate_sha256(&sha256, &format!("source `{name}` sha256"))?;
         let platform = optional_string(source, "platform")?;
+        let host_libc = optional_string(source, "host_libc")?;
         out.insert(
             name.clone(),
             Source {
                 url,
                 sha256,
                 platform,
+                host_libc,
             },
         );
     }
@@ -482,6 +497,7 @@ mod tests {
                 url: "https://example.com/all.tar.gz".to_owned(),
                 sha256: "sha256:aaa".to_owned(),
                 platform: None,
+                host_libc: None,
             },
         );
         sources.insert(
@@ -490,6 +506,7 @@ mod tests {
                 url: "https://example.com/mac.tar.xz".to_owned(),
                 sha256: "sha256:bbb".to_owned(),
                 platform: Some("macos-*".to_owned()),
+                host_libc: None,
             },
         );
         let metadata = PackageMetadata {

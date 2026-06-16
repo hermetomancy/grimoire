@@ -130,6 +130,13 @@ fn build_context(
     ctx.push("prefix", path_value(final_prefix));
     ctx.push("store_path", path_value(final_prefix));
     ctx.push("target", Value::string(target, span));
+    // The build HOST's libc ("musl"|"glibc" on Linux, "none" elsewhere) — distinct from the target
+    // ABI. Lets a rune branch its bootstrap on whether it is cross-building the musl toolchain from a
+    // glibc host or building it natively on a pure-musl host.
+    ctx.push(
+        "host_libc",
+        Value::string(crate::util::paths::host_libc(), span),
+    );
 
     let mut sources_record = Record::new();
     for (name, source) in sources {

@@ -237,6 +237,7 @@ mod tests {
                     url: "https://example.com/src.tar.gz".to_string(),
                     sha256: "sha256:abc123".to_string(),
                     platform: None,
+                    host_libc: None,
                 },
             )]),
             deps: Deps::default(),
