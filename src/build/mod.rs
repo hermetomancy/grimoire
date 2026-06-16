@@ -250,7 +250,29 @@ pub fn build_env_for_target(
         env.push(("SDKROOT".to_string(), sdk));
     }
 
-    if core_compiler_boundary_available()? {
+    let managed_boundary = core_compiler_boundary_available()?;
+
+    // On a musl host the system clang ships no static libc/libunwind/libatomic by default, so the
+    // floor's `-static` fails at the host boundary. (The cross-from-glibc path assumes a glibc host,
+    // where static-glibc just works — and clang there does not force-link libatomic.) These
+    // pre-managed builds are transient scaffolding: once the managed musl+clang exist the boundary
+    // flips and everything is re-forged static against them (the managed clang carries grimoire's
+    // defaults, not the host distro's, so it does not pull `-latomic`). So while the host toolchain
+    // is still in use on a musl host, build dynamic against the host musl by dropping `-static`; the
+    // managed-clang phase, and every glibc host, keep it.
+    if is_musl_target(target) && !managed_boundary && paths::host_libc() == "musl" {
+        for (key, value) in env.iter_mut() {
+            if matches!(key.as_str(), "CFLAGS" | "CXXFLAGS" | "LDFLAGS") {
+                *value = value
+                    .split_whitespace()
+                    .filter(|tok| *tok != "-static")
+                    .collect::<Vec<_>>()
+                    .join(" ");
+            }
+        }
+    }
+
+    if managed_boundary {
         Ok(BuildEnv::managed(all_path_dirs, Vec::new(), env))
     } else {
         Ok(BuildEnv::managed(
