@@ -617,7 +617,12 @@ fn run_rune_build(
     )
     .with_context(|| format!("fetch sources for {}", rune.display()))?;
 
-    let temp = tempfile::tempdir()?;
+    // Build scratch lives under a disk-backed root, not `$TMPDIR`/`/tmp` — the latter is a small
+    // tmpfs on many hosts and an llvm-sized build overflows it (`No space left on device`).
+    let build_tmp = paths::build_tmp_dir()?;
+    std::fs::create_dir_all(&build_tmp)
+        .with_context(|| format!("create build scratch root {}", build_tmp.display()))?;
+    let temp = tempfile::tempdir_in(&build_tmp)?;
     let work_dir = temp.path().join("work");
     let package_dir = temp.path().join("package");
     let log_file = build_log_path(&metadata.name, &metadata.version, &env.target, store_hash);

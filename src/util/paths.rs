@@ -60,6 +60,14 @@ pub fn build_log_dir() -> Result<PathBuf> {
     Ok(install_root()?.join("logs").join("builds"))
 }
 
+/// Disk-backed scratch root for source builds. The per-build work/package/sandbox tree is created
+/// under here via `tempfile::tempdir_in` instead of inheriting `$TMPDIR` (which defaults to `/tmp`,
+/// a small tmpfs on many hosts that an llvm-sized build overflows: `No space left on device`).
+/// `GRIMOIRE_ROOT` relocates it alongside the rest of the install root for tests/isolated installs.
+pub fn build_tmp_dir() -> Result<PathBuf> {
+    Ok(install_root()?.join("buildtmp"))
+}
+
 /// The content-addressed store root.
 ///
 /// By default this is `/grm/store` — a single fixed path that is identical on every machine
