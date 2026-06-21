@@ -30,12 +30,14 @@ mod orphans;
 mod realize;
 mod state;
 mod transaction;
+mod world;
 
 pub(crate) use build_deps::*;
 pub use orphans::*;
 pub(crate) use realize::*;
 pub use state::*;
 pub(crate) use transaction::*;
+pub use world::*;
 
 /// Drives one top-level install and its dependency tree. `installed` maps already-installed
 /// package names to their versions; it is read from disk once up front, handed to the solver so
