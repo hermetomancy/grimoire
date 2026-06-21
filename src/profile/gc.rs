@@ -19,12 +19,22 @@ use super::*;
 /// target), deletes older generations, then deletes any store path not referenced by a
 /// retained generation. With no generations at all nothing is touched: store reachability is
 /// derived from generation metadata, so an empty registry must not condemn the whole store.
-pub fn collect_garbage(keep: usize) -> Result<(usize, usize, u64)> {
+/// Generations sorted newest-first plus the set of generation IDs to keep, as computed by
+/// [`retain_plan`].
+struct RetainPlan {
+    generations: Vec<Generation>,
+    to_retain: BTreeSet<u64>,
+    current: Option<u64>,
+}
+
+/// Sorts generations newest-first and computes the set of generation IDs to keep: the `keep`
+/// most recent, plus the current generation and the rollback target. Returns `None` when there
+/// are no generations at all, so the store is left untouched.
+fn retain_plan(keep: usize) -> Result<Option<RetainPlan>> {
     let mut generations = list_generations()?;
     generations.sort_by_key(|b| std::cmp::Reverse(b.id));
-
     if generations.is_empty() {
-        return Ok((0, 0, 0));
+        return Ok(None);
     }
 
     let current = current_generation_id()?;
@@ -42,6 +52,22 @@ pub fn collect_garbage(keep: usize) -> Result<(usize, usize, u64)> {
             to_retain.insert(previous);
         }
     }
+    Ok(Some(RetainPlan {
+        generations,
+        to_retain,
+        current,
+    }))
+}
+
+pub fn collect_garbage(keep: usize) -> Result<(usize, usize, u64)> {
+    let Some(RetainPlan {
+        generations,
+        to_retain,
+        current,
+    }) = retain_plan(keep)?
+    else {
+        return Ok((0, 0, 0));
+    };
 
     let freed_generations = delete_old_generations(&generations, &to_retain, current)?;
     prune_registry()?;
@@ -54,25 +80,14 @@ pub fn collect_garbage(keep: usize) -> Result<(usize, usize, u64)> {
 /// Pure version of [`collect_garbage`]: what *would* be reclaimed, with nothing deleted.
 /// Returns `(unreferenced_store_paths, old_generations, bytes)`.
 pub fn plan_garbage(keep: usize) -> Result<(Vec<String>, usize, u64)> {
-    let mut generations = list_generations()?;
-    generations.sort_by_key(|b| std::cmp::Reverse(b.id));
-    if generations.is_empty() {
+    let Some(RetainPlan {
+        generations,
+        to_retain,
+        current,
+    }) = retain_plan(keep)?
+    else {
         return Ok((Vec::new(), 0, 0));
-    }
-
-    let current = current_generation_id()?;
-    let mut to_retain: BTreeSet<u64> = generations.iter().take(keep).map(|g| g.id).collect();
-    if let Some(current_id) = current {
-        to_retain.insert(current_id);
-        if let Some(previous) = generations
-            .iter()
-            .map(|g| g.id)
-            .filter(|id| *id < current_id)
-            .max()
-        {
-            to_retain.insert(previous);
-        }
-    }
+    };
 
     let old_generations = generations
         .iter()

@@ -8,12 +8,8 @@ use nu_protocol::{Record, Span, Value};
 use semver::Version;
 
 pub fn validate_relative_package_path(path: &str, label: &str) -> Result<()> {
-    if path.starts_with('/') || path.starts_with('\\') || looks_windows_absolute(path) {
+    if path.starts_with('/') {
         bail!("{label} path `{path}` must be relative");
-    }
-
-    if path.contains('\\') {
-        bail!("{label} path `{path}` must use / separators");
     }
 
     if path.split('/').any(|part| part == ".." || part.is_empty()) {
@@ -246,14 +242,6 @@ pub(crate) fn starts_valid(value: &str) -> bool {
         .chars()
         .next()
         .is_some_and(|c| c.is_ascii_alphanumeric())
-}
-
-pub(crate) fn looks_windows_absolute(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && (bytes[2] == b'/' || bytes[2] == b'\\')
 }
 
 pub fn validate_sha256(hash: &str, label: &str) -> Result<()> {

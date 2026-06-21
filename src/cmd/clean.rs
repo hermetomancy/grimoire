@@ -44,16 +44,7 @@ pub fn clean(args: CleanArgs) -> Result<()> {
     status("collecting old generations and unreferenced store paths");
     let (freed_stores, freed_generations, store_bytes) = profile::collect_garbage(args.keep)?;
 
-    let root = paths::install_root()?;
-    let targets: [(&str, PathBuf); 5] = [
-        ("cache/sources", paths::source_cache_dir()?),
-        ("cache/archives", paths::archive_cache_dir()?),
-        ("cache/builds", paths::build_output_dir()?),
-        // The whole rune-meta tree, not just this version's subdirectory: stale versions'
-        // entries are pure dead weight.
-        ("cache/rune-meta", root.join("cache").join("rune-meta")),
-        ("transactions", root.join("transactions")),
-    ];
+    let targets = cache_targets()?;
 
     let mut cache_bytes: u64 = 0;
     let mut cache_entries: u64 = 0;
@@ -110,14 +101,7 @@ fn dry_run_clean(args: &CleanArgs) -> Result<()> {
     let swept = install::simulate_orphan_sweep(&states, &[], &seeds);
     let (doomed_stores, old_generations, store_bytes) = profile::plan_garbage(args.keep)?;
 
-    let root = paths::install_root()?;
-    let targets: [(&str, PathBuf); 5] = [
-        ("cache/sources", paths::source_cache_dir()?),
-        ("cache/archives", paths::archive_cache_dir()?),
-        ("cache/builds", paths::build_output_dir()?),
-        ("cache/rune-meta", root.join("cache").join("rune-meta")),
-        ("transactions", root.join("transactions")),
-    ];
+    let targets = cache_targets()?;
     let mut cache_bytes = 0u64;
     let mut cache_entries = 0u64;
     for (_, dir) in &targets {
@@ -152,6 +136,21 @@ fn dry_run_clean(args: &CleanArgs) -> Result<()> {
     }
     println!("would reclaim {}", format_bytes(store_bytes + cache_bytes));
     Ok(())
+}
+
+/// The cache and transaction directories swept by both `clean` and `clean --dry-run`, paired
+/// with the labels shown in output.
+fn cache_targets() -> Result<[(&'static str, PathBuf); 5]> {
+    let root = paths::install_root()?;
+    Ok([
+        ("cache/sources", paths::source_cache_dir()?),
+        ("cache/archives", paths::archive_cache_dir()?),
+        ("cache/builds", paths::build_output_dir()?),
+        // The whole rune-meta tree, not just this version's subdirectory: stale versions'
+        // entries are pure dead weight.
+        ("cache/rune-meta", root.join("cache").join("rune-meta")),
+        ("transactions", root.join("transactions")),
+    ])
 }
 
 /// Removes every immediate child of `dir`, returning `(bytes_freed, entries_removed)`. A

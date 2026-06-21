@@ -94,8 +94,8 @@ pub(crate) fn package_payload_dir(package_dir: &Path, final_prefix: &Path) -> Re
 }
 
 /// Re-roots the absolute store prefix under the staging dir (`/grm/store/x` → `grm/store/x`):
-/// dropping the root is the point, but a `..` or Windows prefix in a store path is never
-/// legitimate and silently stripping it would pack the wrong directory.
+/// dropping the root is the point, but a `..` component in a store path is never legitimate and
+/// silently stripping it would pack the wrong directory.
 fn relative_destdir_prefix(prefix: &Path) -> Result<PathBuf> {
     let mut relative = PathBuf::new();
     for component in prefix.components() {

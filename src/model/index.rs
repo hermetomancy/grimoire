@@ -1,7 +1,6 @@
 //! Binary package repository indexes (`dist/index.nuon`): the prebuilt archives a tome
 //! publishes, keyed by store hash.
 
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
@@ -11,12 +10,12 @@ use super::*;
 
 /// A binary package repository index (`index.nuon`): the set of pre-built archives a tome's
 /// package repository offers. Read-only data — Grimoire reads it, never executes it (§4).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PackageIndex {
     pub entries: BTreeMap<String, IndexEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct IndexEntry {
     pub name: String,
     pub version: String,
@@ -25,20 +24,15 @@ pub struct IndexEntry {
     /// repository or an `http(s)` URL.
     pub archive: String,
     pub archive_hash: String,
-    #[serde(default)]
     pub runtime_deps: Vec<Dependency>,
     /// Command names this package provides, discovered at build time and cached in the index
     /// so consumers can resolve capabilities without reading the rune.
-    #[serde(default)]
     pub provides: Vec<String>,
     /// Library base names (e.g. "foo" for libfoo.so) discovered at build time.
-    #[serde(default)]
     pub libs: Vec<String>,
     /// Installed packages this one cannot coexist with (mirrors the rune's `conflicts`).
-    #[serde(default)]
     pub conflicts: Vec<String>,
     /// Package names this one supersedes (mirrors the rune's `replaces`).
-    #[serde(default)]
     pub replaces: Vec<String>,
 }
 

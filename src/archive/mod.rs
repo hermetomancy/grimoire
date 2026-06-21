@@ -59,16 +59,7 @@ pub fn copy_hashed(src: &Path, dst: &Path) -> Result<String> {
 pub fn archive_hash(path: &Path) -> Result<String> {
     let mut reader = BufReader::new(File::open(path)?);
     let mut hasher = Sha256::new();
-    let mut buf = [0_u8; 64 * 1024];
-
-    loop {
-        let read = reader.read(&mut buf)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buf[..read]);
-    }
-
+    std::io::copy(&mut reader, &mut hasher)?;
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 

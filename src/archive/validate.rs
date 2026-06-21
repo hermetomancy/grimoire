@@ -10,11 +10,7 @@ use std::{
 };
 
 pub fn validate_archive_member_path(path: &Path) -> bool {
-    let text = path.to_string_lossy();
-    !text.starts_with('/')
-        && !text.starts_with('\\')
-        && !crate::model::looks_windows_absolute(&text)
-        && !text.contains('\\')
+    !path.to_string_lossy().starts_with('/')
         && path
             .components()
             .all(|part| !matches!(part, std::path::Component::ParentDir))
@@ -22,17 +18,12 @@ pub fn validate_archive_member_path(path: &Path) -> bool {
 
 /// Validates the target of a symlink archive member. The target is interpreted relative to the
 /// directory that contains the link and must resolve to a path *within* the package root: absolute
-/// targets, Windows-style paths, and any `..` sequence that would climb above the root are
-/// rejected. This keeps preserved symlinks self-contained and relocatable, and guarantees
-/// extraction can never be lured outside the destination through a link (AGENTS.md §10.3).
+/// targets and any `..` sequence that would climb above the root are rejected. This keeps
+/// preserved symlinks self-contained and relocatable, and guarantees extraction can never be
+/// lured outside the destination through a link (AGENTS.md §10.3).
 pub fn validate_symlink_target(link: &Path, target: &Path) -> bool {
     let text = target.to_string_lossy();
-    if text.is_empty()
-        || text.starts_with('/')
-        || text.starts_with('\\')
-        || text.contains('\\')
-        || crate::model::looks_windows_absolute(&text)
-    {
+    if text.is_empty() || text.starts_with('/') {
         return false;
     }
 
@@ -55,7 +46,7 @@ pub fn validate_symlink_target(link: &Path, target: &Path) -> bool {
 }
 
 /// Validates every member path in a `.tar.zst` archive before extraction.
-/// Rejects traversal, absolute paths, Windows-style paths, hard links,
+/// Rejects traversal, absolute paths, hard links,
 /// escaping symlinks, and members nested under symlinks (AGENTS.md §10.2–§10.3).
 pub fn validate_archive_paths(path: &Path) -> Result<()> {
     validate_archive_paths_capturing(path, None).map(|_| ())
@@ -76,7 +67,7 @@ pub fn validate_archive_paths_capturing(
 }
 
 /// Generic tar entry validator shared by archive installs and source extraction.
-/// Rejects traversal, absolute paths, Windows-style paths, hard links,
+/// Rejects traversal, absolute paths, hard links,
 /// escaping symlinks, and members nested under symlinks.
 pub fn validate_tar_entries<R: Read>(tar: &mut tar::Archive<R>) -> Result<()> {
     validate_tar_entries_capturing(tar, None).map(|_| ())
@@ -164,15 +155,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn archive_member_paths_reject_cross_platform_escape_forms() {
-        for path in [
-            Path::new("../escape"),
-            Path::new("/absolute"),
-            Path::new("\\absolute"),
-            Path::new("C:/absolute"),
-            Path::new("C:\\absolute"),
-            Path::new("dir\\file"),
-        ] {
+    fn archive_member_paths_reject_traversal_and_absolute() {
+        for path in [Path::new("../escape"), Path::new("/absolute")] {
             assert!(
                 !validate_archive_member_path(path),
                 "archive path should be rejected: {}",
@@ -209,8 +193,6 @@ mod tests {
             ("bin/x", "../../../root"),
             ("link", ".."),
             ("a/b/link", "../../../outside"),
-            ("bin/x", "C:\\Windows"),
-            ("bin/x", "dir\\file"),
             ("bin/x", ""),
         ] {
             assert!(

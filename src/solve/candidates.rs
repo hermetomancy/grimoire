@@ -174,8 +174,7 @@ pub(crate) fn gather_index_candidates(name: &str, target: &str) -> Result<Versio
                 .collect();
             let slot = by_version
                 .entry(version)
-                .or_insert_with(|| (filtered_runtime.clone(), Vec::new()));
-            // Ensure the slot uses the filtered runtime deps even on first insertion.
+                .or_insert_with(|| (Vec::new(), Vec::new()));
             slot.0 = filtered_runtime;
             slot.1.push(Substitute {
                 root: root.clone(),

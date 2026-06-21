@@ -1,8 +1,8 @@
 //! Evaluating `.rn` definitions and running build steps in the embedded Nushell engine.
 //!
-//! The [`RuneRuntime`] trait exposes reading package/tome metadata and executing a rune's `build`
-//! function against a prepared context; [`EmbeddedNuRuntime`] is the in-process implementation.
-//! Runes are evaluated, not shelled out to — the engine is embedded (AGENTS.md §1).
+//! [`EmbeddedNuRuntime`] reads package/tome metadata and executes a rune's `build` function
+//! against a prepared context. Runes are evaluated, not shelled out to — the engine is embedded
+//! (AGENTS.md §1).
 
 use anyhow::{Context, Result};
 use nu_protocol::{Record, Span, Value};
@@ -85,9 +85,8 @@ impl EmbeddedNuRuntime {
             &sandbox_env.context,
             &env.target,
         );
-        let env_prefix = path_env_assignment(&path_entries)?;
         let source = format!(
-            "{env_prefix}use {} build\nbuild {}\n",
+            "use {} build\nbuild {}\n",
             nuon_io::to_nuon_string(&Value::string(rune.display().to_string(), Span::unknown()))?,
             nuon_io::to_nuon_string(&context)?,
         );
@@ -128,7 +127,6 @@ fn build_context(
     // `prefix` is the final intended location the package should bake into configure-time
     // metadata. `package_dir` remains the staging root used as DESTDIR.
     ctx.push("prefix", path_value(final_prefix));
-    ctx.push("store_path", path_value(final_prefix));
     ctx.push("target", Value::string(target, span));
     // The build HOST's libc ("musl"|"glibc" on Linux, "none" elsewhere) — distinct from the target
     // ABI. Lets a rune branch its bootstrap on whether it is cross-building the musl toolchain from a

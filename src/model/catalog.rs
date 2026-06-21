@@ -1,51 +1,40 @@
 //! Catalog state and manifests for tomes and addenda, plus the [`Catalog`] abstraction
 //! `sync_common` drives them through.
 
-use serde::{Deserialize, Serialize};
-
 use anyhow::{Result, bail};
 use nu_protocol::{Record, Span, Value};
 
 use super::*;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TomeState {
     pub name: String,
     pub url: String,
-    #[serde(rename = "ref")]
     pub ref_name: String,
-    #[serde(default)]
     pub checked_ref: Option<String>,
-    #[serde(default)]
     pub checked_commit: Option<String>,
-    #[serde(default)]
     pub tome: Option<TomeManifest>,
     /// The minisign public keys this tome's packages are verified against, pinned on first sync
     /// (trust-on-first-use). Empty for an unsigned tome. Once set, every later sync must
     /// present the same set; packages without a valid signature from one of these keys are
     /// refused. See `src/signing.rs`.
-    #[serde(default)]
     pub signer_pubkeys: Vec<String>,
     /// The highest news item id (filename) already shown to the user; items sorting above it
     /// are printed on the next `grm tome update` / `grm tome news`.
-    #[serde(default)]
     pub last_seen_news: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TomeManifest {
     pub name: String,
-    #[serde(default)]
     pub description: Option<String>,
-    #[serde(default)]
     pub packages: Option<TomePackages>,
     /// Minisign public keys that may sign packages in this tome. When non-empty, every
     /// package (rune and archive) must carry a valid detached `.minisig` from one of these keys.
-    #[serde(default)]
     pub signers: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TomePackages {
     pub repo: String,
     pub format: String,

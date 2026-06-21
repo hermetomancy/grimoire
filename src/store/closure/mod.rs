@@ -11,9 +11,17 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use semver::{Version, VersionReq};
+use semver::VersionReq;
 
 use crate::{build, build::toolchain, store, util::paths};
+
+mod capability;
+mod stale;
+
+use capability::CapabilityContext;
+// Re-exported for callers that name the return type; not used inside this module.
+#[allow(unused_imports)]
+pub use stale::{StaleInstall, stale_installed};
 
 /// One member's hash inputs when addressing a split group: its metadata and the sha256 of
 /// its rune bytes. Assembled from disk runes or from a member archive's embedded group.
@@ -185,112 +193,6 @@ pub fn store_hash_for_rune_with_deps(
     ))
 }
 
-/// Installed packages whose recorded address has drifted from the catalog: the rune currently
-/// resolvable for the same name *and version* produces a different store hash — its content,
-/// declared sources, build flags, dependency closure, or the host build environment changed
-/// since the package was realized. Resolution must not reuse these by version; re-realizing
-/// them is how a rune edit propagates to installs at all.
-///
-/// Conservative on both sides: a package whose rune cannot be resolved or hashed (installed
-/// from a local archive, or whose deps only resolve as capabilities) is never reported — there
-/// is nothing to rebuild it from; and a rune that moved to a *different* version is `grm
-/// upgrade`'s business, not drift. One walker memoizes the closure walk across the whole set.
-/// One drifted install: the package, the address it would re-realize to, and — when the
-/// recorded build-environment identity differs from the current one — a human-readable
-/// rendering of exactly which identity components moved. `env_change: None` means the
-/// environment matches (the rune or a dependency changed instead) or the state predates
-/// identity recording.
-pub struct StaleInstall {
-    pub name: String,
-    pub expected: String,
-    pub env_change: Option<String>,
-}
-
-pub fn stale_installed(states: &[crate::model::PackageState]) -> Vec<StaleInstall> {
-    let Ok(mut walker) = Walker::new() else {
-        return Vec::new();
-    };
-    // Address split-member externals that are *held* against their pinned installed address,
-    // matching the builder: a held dep is pinned to its installed bits, not its current rune, so
-    // without this a split member depending on it would be flagged drifted forever (re-realizing it
-    // reproduces the same address). Non-held externals stay on the canonical `of_name` walk, so a
-    // genuine rune edit to a group's external dep is still detected and rebuilds the group.
-    walker.resolved = crate::install::installed_states()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|state| state.held)
-        .map(|state| (state.name, state.store_hash))
-        .collect();
-    let current_env = toolchain::build_env_id();
-    let mut stale = Vec::new();
-    for state in states {
-        // A hold pins the installed bits, not just the version: a held package is never
-        // re-realized for drift. `grm unhold` lets the pending drift apply.
-        if state.held {
-            continue;
-        }
-        let Ok(Some(rune)) = build::find_rune(&state.name) else {
-            continue;
-        };
-        let Ok(metadata) = walker.metadata(&rune) else {
-            continue;
-        };
-        if metadata.version != state.version {
-            continue;
-        }
-        let Ok(expected) = walker.of_rune(&state.name, &rune) else {
-            continue;
-        };
-        if expected != state.store_hash {
-            let env_change = match (&state.build_env, &current_env) {
-                (Some(recorded), Some(current)) if recorded != current => {
-                    Some(diff_build_env(recorded, current))
-                }
-                _ => None,
-            };
-            stale.push(StaleInstall {
-                name: state.name.clone(),
-                expected,
-                env_change,
-            });
-        }
-    }
-    stale
-}
-
-/// Renders the difference between two build-environment identities ("tool:banner" lists)
-/// as the changed components only: `ld: ld64-1167.5 → LLD 22.1.7`. Components present on
-/// one side only render against `(none)`.
-fn diff_build_env(recorded: &str, current: &str) -> String {
-    let parse = |id: &str| -> std::collections::BTreeMap<String, String> {
-        id.split(',')
-            .filter_map(|part| {
-                part.split_once(':')
-                    .map(|(tool, banner)| (tool.to_owned(), banner.to_owned()))
-            })
-            .collect()
-    };
-    let old_parts = parse(recorded);
-    let new_parts = parse(current);
-    // Dedup by exact tool name. A `starts_with` check would let one tool's change mask another
-    // whose name it is a prefix of (`ld` vs `ldd`, `as` vs `asm`), silently dropping a real
-    // change from the explanation; a sorted set visits each tool once.
-    let tools: BTreeMap<&String, ()> = old_parts
-        .keys()
-        .chain(new_parts.keys())
-        .map(|t| (t, ()))
-        .collect();
-    let mut changes = Vec::new();
-    for tool in tools.into_keys() {
-        let old = old_parts.get(tool).map(String::as_str).unwrap_or("(none)");
-        let new = new_parts.get(tool).map(String::as_str).unwrap_or("(none)");
-        if old != new {
-            changes.push(format!("{tool}: {old} → {new}"));
-        }
-    }
-    changes.join("; ")
-}
-
 struct Walker {
     target: String,
     build_env: String,
@@ -306,15 +208,6 @@ struct Walker {
     /// Capability-resolution context (provider index, preferences, installed names), built
     /// lazily the first time a dependency name has no literal rune. Most walks never need it.
     caps: Option<CapabilityContext>,
-}
-
-struct CapabilityContext {
-    index: crate::solve::CapabilityIndex,
-    preferences: std::collections::BTreeMap<String, String>,
-    /// Installed provider names mapped to their version, so capability resolution can apply the
-    /// dependency's `VersionReq` exactly as the resolver's `expand_capability` does (AGENTS §9.8).
-    /// A provider whose recorded version does not parse is omitted — it cannot req-match anyway.
-    installed: BTreeMap<String, Version>,
 }
 
 impl Walker {
@@ -370,43 +263,6 @@ impl Walker {
         let hash = self.of_name(&provider, &VersionReq::STAR)?;
         self.cache.insert(name.to_string(), hash.clone());
         Ok(hash)
-    }
-
-    /// Resolves a capability name to one provider package, in the solver's order and against the
-    /// same version requirement: the `grm prefer` choice when it still provides the capability,
-    /// else the first installed provider *that satisfies `req`*, else the first provider by name.
-    /// This mirrors `solve::resolver::expand_capability` step for step — including the req filter
-    /// on installed providers — so the provider folded into a dependent's content address is the
-    /// same one the resolver picked (AGENTS §9.8). Every step is deterministic (providers sorted
-    /// by name). Returns `None` when nothing provides the capability.
-    fn resolve_capability(&mut self, name: &str, req: &VersionReq) -> Result<Option<String>> {
-        if self.caps.is_none() {
-            let installed = crate::install::installed_states()
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|state| Some((state.name, Version::parse(&state.version).ok()?)))
-                .collect();
-            self.caps = Some(CapabilityContext {
-                index: crate::solve::CapabilityIndex::build()?,
-                preferences: crate::model::preferences::Preferences::load()
-                    .unwrap_or_default()
-                    .providers,
-                installed,
-            });
-        }
-        let caps = self.caps.as_ref().expect("capability context built above");
-        let mut providers = caps.index.providers(name);
-        if providers.is_empty() {
-            return Ok(None);
-        }
-        providers.sort();
-        Ok(crate::solve::select_provider(
-            &providers,
-            caps.preferences.get(name),
-            &caps.installed,
-            req,
-            |provider| crate::solve::provider_satisfies_req(provider, req, &caps.installed),
-        ))
     }
 
     fn of_rune(&mut self, name: &str, rune: &Path) -> Result<String> {
@@ -708,22 +564,5 @@ mod tests {
             hashes["extra"],
             store::split_member_hash(&group_hash, "extra")
         );
-    }
-
-    #[test]
-    fn diff_renders_only_changed_identity_components() {
-        let recorded = "as:llvm-as 22.1.7,cc:clang version 22.1.7,ld:ld64-1167.5,sdk:26.5";
-        let current = "as:llvm-as 22.1.7,cc:clang version 22.1.7,ld:LLD 22.1.7,sdk:26.5";
-        assert_eq!(
-            diff_build_env(recorded, current),
-            "ld: ld64-1167.5 → LLD 22.1.7"
-        );
-    }
-
-    #[test]
-    fn diff_renders_added_and_removed_components() {
-        let diff = diff_build_env("cc:clang 22,lipo:llvm-lipo", "cc:clang 22,sdk:26.5");
-        assert!(diff.contains("lipo: llvm-lipo → (none)"), "{diff}");
-        assert!(diff.contains("sdk: (none) → 26.5"), "{diff}");
     }
 }

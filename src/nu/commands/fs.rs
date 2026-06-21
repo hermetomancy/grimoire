@@ -40,7 +40,6 @@ impl Command for Mkdir {
         Signature::build(self.name())
             .input_output_types(vec![(Type::Nothing, Type::Nothing)])
             .rest("dirs", SyntaxShape::Filepath, "Directories to create.")
-            .switch("verbose", "ignored; accepted for compatibility", Some('v'))
             .category(Category::FileSystem)
     }
 

@@ -1,7 +1,6 @@
 //! Dependency requirements: `deps.build`/`deps.runtime` parsing, platform-conditional
 //! bracket syntax, and target-glob matching.
 
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
@@ -13,11 +12,10 @@ use super::*;
 /// A dependency on another package, optionally constrained to a semver range. A bare name in a
 /// rune (`"hello"`) parses to a [`VersionReq`] of `*` (any version); a record
 /// (`{ name: "libc", version: ">=2.0" }`) carries an explicit requirement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Dependency {
     pub name: String,
     pub req: VersionReq,
-    #[serde(default)]
     pub platform: Option<String>,
 }
 
@@ -42,13 +40,11 @@ impl Dependency {
 
 /// Build and runtime dependencies declared by a rune. Runtime deps are installed with the
 /// package; build deps are required only for a source build.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct Deps {
     /// Build dependencies keyed by target triple, plus an optional `default` set that
     /// applies to every target. Use [`Deps::build_for`] to resolve the set for a target.
-    #[serde(default)]
     pub build: BTreeMap<String, Vec<Dependency>>,
-    #[serde(default)]
     pub runtime: Vec<Dependency>,
 }
 
@@ -109,42 +105,12 @@ pub fn req_matches(req: &semver::VersionReq, version: &semver::Version) -> bool 
 /// * Otherwise the pattern is matched against the OS component (the first segment of the triple).
 pub fn dep_matches_platform(pattern: &str, target_triple: &str) -> bool {
     if pattern.contains('-') || pattern.contains('*') {
-        glob_match(pattern, target_triple)
+        nu_glob::Pattern::new(pattern)
+            .map(|glob| glob.matches(target_triple))
+            .unwrap_or(false)
     } else {
         target_triple.split('-').next() == Some(pattern)
     }
-}
-
-/// Simple glob matching: `*` matches any (possibly empty) sequence of characters.
-pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
-    let mut pat = pattern.chars().peekable();
-    let mut txt = text.chars().peekable();
-
-    while let Some(p) = pat.next() {
-        if p == '*' {
-            // Consecutive stars are semantically identical to a single star in glob patterns.
-            while pat.peek() == Some(&'*') {
-                pat.next();
-            }
-            let remaining_pat: String = pat.clone().collect();
-            if remaining_pat.is_empty() {
-                return true;
-            }
-            let remaining_txt: String = txt.clone().collect();
-            for skip in 0..=remaining_txt.len() {
-                if glob_match(&remaining_pat, &remaining_txt[skip..]) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        match txt.next() {
-            Some(t) if t == p => continue,
-            _ => return false,
-        }
-    }
-
-    txt.next().is_none()
 }
 
 pub(crate) fn parse_deps(value: &Value) -> Result<Deps> {

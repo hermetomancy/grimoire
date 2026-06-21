@@ -1,7 +1,6 @@
 //! Addendum catalog state, manifest, and the data-only metadata patches it carries.
 //! Addenda never execute — patches are merged into rune metadata before resolution.
 
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
@@ -9,55 +8,39 @@ use nu_protocol::{Record, Span, Value};
 
 use super::*;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AddendumState {
     pub name: String,
     pub url: String,
-    #[serde(rename = "ref")]
     pub ref_name: String,
-    #[serde(default)]
     pub checked_ref: Option<String>,
-    #[serde(default)]
     pub checked_commit: Option<String>,
-    #[serde(default)]
     pub addendum: Option<AddendumManifest>,
     /// The minisign public keys this addendum is verified against, pinned on first sync
     /// (trust-on-first-use). Empty for an unsigned addendum. Once set, every later sync must
     /// present the same set.
-    #[serde(default)]
     pub signer_pubkeys: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AddendumManifest {
     pub name: String,
-    #[serde(default)]
     pub description: Option<String>,
-    #[serde(default)]
     pub patches: Vec<AddendumPatch>,
     /// Minisign public keys (base64) that may sign this addendum's `addendum.nuon`.
-    #[serde(default)]
     pub signers: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct AddendumPatch {
-    #[serde(default)]
     pub tome: Option<String>,
     pub package: String,
-    #[serde(default)]
     pub version: Option<String>,
-    #[serde(default)]
     pub target: Option<String>,
-    #[serde(default)]
     pub summary: Option<String>,
-    #[serde(default)]
     pub bins: Option<BTreeMap<String, BTreeMap<String, String>>>,
-    #[serde(default)]
     pub sources: Option<BTreeMap<String, Source>>,
-    #[serde(default)]
     pub deps: Option<Deps>,
-    #[serde(default)]
     pub build_flags: Option<BTreeMap<String, String>>,
 }
 

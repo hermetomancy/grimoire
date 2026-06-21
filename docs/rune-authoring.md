@@ -221,7 +221,6 @@ directory) must also be a runtime dep so GC keeps it alive.
 |---|---|---|
 | `ctx.package_dir` | string | Staging root for this build. Install files here; Grimoire packs this directory into the archive. |
 | `ctx.prefix` | string | Final install prefix (e.g. `/grm/store/<hash>-example-1.0.0`). Bake this into configure-time metadata so the package knows where it will live. |
-| `ctx.store_path` | string | Alias for `ctx.prefix`. |
 | `ctx.work_dir` | string | Scratch directory for build artifacts. Use for out-of-tree builds. `HOME`, temp, and XDG dirs all point inside it. |
 | `ctx.target` | string | Target triple (e.g. `linux-x86_64-musl`). |
 | `ctx.nproc` | int | Host parallelism for `-j`/`--parallel` flags (falls back to 4 when undetectable). |

@@ -100,7 +100,7 @@ pub fn surface_after_sync(tome_name: &str, cache: &Path, first_sync: bool) -> Re
     }
     if !first_sync {
         for item in fresh {
-            print_item(tome_name, item, Some(NEWS_UPDATE_BODY_LINES));
+            print_item(tome_name, item, NEWS_UPDATE_BODY_LINES);
         }
         crate::util::progress::note(&format!(
             "run `grm tome news {tome_name}` to read items in full"
@@ -112,7 +112,7 @@ pub fn surface_after_sync(tome_name: &str, cache: &Path, first_sync: bool) -> Re
 /// Body lines shown per item in the update flow; `grm tome news` prints items in full.
 const NEWS_UPDATE_BODY_LINES: usize = 10;
 
-fn print_item(tome_name: &str, item: &NewsItem, body_line_cap: Option<usize>) {
+fn print_item(tome_name: &str, item: &NewsItem, cap: usize) {
     use crate::util::progress::{faint, note, strong};
     report(&format!(
         "{} {}",
@@ -123,7 +123,6 @@ fn print_item(tome_name: &str, item: &NewsItem, body_line_cap: Option<usize>) {
         return;
     }
     let lines: Vec<&str> = item.body.lines().collect();
-    let cap = body_line_cap.unwrap_or(lines.len());
     for line in lines.iter().take(cap) {
         note(&format!("  {line}"));
     }

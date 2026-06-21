@@ -11,11 +11,9 @@ use std::collections::BTreeMap;
 
 use crate::{
     cli::PreferArgs,
-    cmd::query,
     install,
     model::preferences::Preferences,
-    profile, solve,
-    util::paths,
+    profile,
     util::progress::{self, report},
     util::table::{self, Cell},
 };
@@ -152,39 +150,17 @@ fn unset(capability: &str, dry_run: bool) -> Result<()> {
 /// packages, configured tome runes, or published indexes. Refusing anything else keeps stale
 /// preferences from accumulating silently; the error lists the real providers.
 fn validate_provider(capability: &str, package: &str) -> Result<()> {
-    let target = paths::target_triple();
-    let mut providers: Vec<String> = Vec::new();
-
-    for state in install::installed_states()? {
-        if state.name == capability
-            || state.bins.contains_key(capability)
-            || state.provides.contains(&capability.to_owned())
-        {
-            providers.push(state.name.clone());
-        }
-    }
-    for tome_package in query::tome_packages()? {
-        let metadata = &tome_package.metadata;
-        if metadata.name == capability
-            || metadata.bins_for(&target).contains_key(capability)
-            || metadata.provides.contains(&capability.to_owned())
-        {
-            providers.push(metadata.name.clone());
-        }
-    }
-    providers.extend(solve::capability_providers(capability)?);
-    providers.sort();
-    providers.dedup();
-
-    if providers.iter().any(|p| p == package) {
+    let providers = crate::cmd::files::capability_providers_detailed(capability)?;
+    if providers.contains_key(package) {
         return Ok(());
     }
     if providers.is_empty() {
         bail!("nothing provides `{capability}` in installed packages or configured tomes");
     }
+    // `providers` is a BTreeMap, so its keys are already sorted.
     bail!(
         "`{package}` does not provide `{capability}`; providers are: {}",
-        providers.join(", ")
+        providers.keys().cloned().collect::<Vec<_>>().join(", ")
     );
 }
 

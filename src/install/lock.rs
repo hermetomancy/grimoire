@@ -61,12 +61,12 @@ pub fn rebuild() -> Result<()> {
         .into_iter()
         .filter(|state| linked.contains(&state.name))
         .collect();
-    let lock = LockFile::new(
-        paths::target_triple(),
-        tome::load_tomes()?,
-        sync_common::load_catalogs::<AddendumState>()?,
+    let lock = LockFile {
+        target: paths::target_triple(),
+        tomes: tome::load_tomes()?,
+        addendums: sync_common::load_catalogs::<AddendumState>()?,
         packages,
-    );
+    };
     let path = lock_path()?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

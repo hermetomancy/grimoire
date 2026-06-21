@@ -3,6 +3,31 @@
 The canonical remaining-work list (AGENTS.md §15.2). Completed work lives in git history,
 not here. When everything below is done and reflected in the design doc, delete this file.
 
+## In progress / next
+
+- **Verify the toolchain cleanup + build-scratch hardening on a musl host** (landed, awaiting a
+  reachable box). Pushed: tome-core `139d1f8` retired the per-rune musl linker wrappers
+  (grimoire.rn's deleted; rust.rn's slimmed to libc++ `-L` + the in-store `--dynamic-linker`) and
+  re-pinned grimoire to `5a712e2`, which builds under `<root>/buildtmp` (disk) instead of
+  `$TMPDIR`/tmpfs. A `grm upgrade` must rebuild rust + grimoire to confirm grm still links
+  static-PIE and atuin still builds clean; then confirm the new grm's scratch lands in
+  `~/.grimoire/buildtmp` with `$TMPDIR` unset. Blocked: glibc VM 192.168.65.2 is down; native-musl
+  host 10.211.55.5 needs the `claude` SSH key authorized.
+- **Bootstrap Chimera to verify everything** (implemented + pushed; blocked on host access). The
+  host-detected musl seeding is done — grimoire `76123b7` (`paths::host_libc()` probe, `Source.host_libc`
+  filter in `sources_for`, `ctx.host_libc`); tome-core `106fe94` (`rust-stage0.rn` two seeds gated by
+  `host_libc` — gnu for a glibc host, the official aarch64-musl release `630541a6…` for a musl host;
+  `rust.rn` `is_cross_musl` branch → native `build=host=target=musl`, no gnu stanza / no re-scoping).
+  Chimera (10.211.55.5, aarch64, no glibc, system rust+clang 1.96/22.1.7) is the pure-musl box. Test:
+  `cargo install` grm from grimoire@76123b7 → add tomes → `grm install grimoire build-env` → `grm upgrade`.
+  This single bootstrap verifies the pure-musl seeding AND the earlier wrapper/buildtmp cleanup at once.
+  **Blocked:** the `claude` SSH key is in `~/.ssh/authorized_hosts` (sshd wants `authorized_keys`) — a
+  one-line `mv` on the host unblocks it. Glibc VM 192.168.65.2 is also down.
+- **Generalize / harden** once Chimera is green: the x86_64-musl seed currently isn't host-gated (the
+  x86_64-musl rust release is static, runs anywhere) — revisit if a glibc x86_64 host ever needs it;
+  and consider a `host_libc` unit test via the `GRM_HOST_LIBC` override. Then FreeBSD (same §"cross
+  bootstrap" family).
+
 ## Remaining before a stable release
 
 ### Release engineering
@@ -38,7 +63,11 @@ Unblocked (native build + per-rune debugging):
 
 Blocked on the cross-bootstrap expansion (not stable-blocking):
 
-- ⛔ Linux aarch64 musl
+- ⏳ Linux aarch64 musl — **bootstrapped on the Debian aarch64 (glibc) test VM** (gen 7: musl-host
+  rust 1.96, grimoire self-host, and the first userland package — `atuin` — built from source to a
+  static musl binary). `rust-stage0.rn` cross-seeds stage0 from the `aarch64-unknown-linux-gnu`
+  tarball, which runs because the build host has glibc. Still blocked on a *pure*-musl build machine
+  (no glibc to run the stage0 seed) — that needs the cross story below.
 - ⛔ FreeBSD aarch64
 
 ### Bootstrap stage 2: full self-hosting
@@ -85,13 +114,6 @@ toybox-ambient, and package the failures. One deferred deliverable:
   install, profile, solve, store, tome), and `sweep_orphans` re-reads on every iteration (O(n²)).
   A maintainability/altitude smell, not a bug. Introduce an `InstalledWorld` repository that
   loads once and is threaded where needed, replacing the de-facto global accessors.
-- **Split `src/store/closure.rs` along its seams.** At ~730 lines (over the 500 soft limit, under
-  the 800 hard limit) it conflates four concerns under a "leaf" name it has outgrown — simple
-  addressing, split-group addressing, capability resolution, and stale/`diff_build_env`
-  reporting — and depends *up* on build/install/solve. The pure address primitive already lives
-  in `store/mod.rs`; this is the closure-walking service misfiled. Extract capability resolution
-  and the stale/diff reporting into their own modules before the next change crosses 800. Pure
-  reorganization, no behavior change.
 
 ## Expansion projects (spec before code)
 

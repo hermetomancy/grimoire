@@ -1,7 +1,6 @@
 //! Package metadata: the `package` record a rune exports, plus the build manifest a
 //! `build` function may return and target-conditional resolution for `bins`.
 
-use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path};
 
 use anyhow::{Result, bail};
@@ -9,87 +8,69 @@ use nu_protocol::{Record, Span, Value};
 
 use super::*;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PackageMetadata {
     pub name: String,
     pub version: String,
     pub target: Option<String>,
-    #[serde(default)]
     pub store_path: Option<String>,
     /// Supported target triples for source builds. When empty, the rune accepts any target.
-    #[serde(default)]
     pub targets: Vec<String>,
     /// `true` for a fixed-output (x-bin / fetch-only) package: its `build` only fetches and
     /// sha256-verifies prebuilt sources rather than compiling. Such a package is content-addressed
     /// by its sources alone, so its store hash excludes the host build environment and dependency
     /// closure (a Nix fixed-output derivation).
-    #[serde(default)]
     pub fixed_output: bool,
-    #[serde(default)]
     pub summary: Option<String>,
     /// Binaries this package provides, keyed by target pattern (`default`, OS name like `linux`,
     /// or full triple like `linux-x86_64-musl`). Merged at resolution time: `default` → OS → exact.
-    #[serde(default)]
     pub bins: BTreeMap<String, BTreeMap<String, String>>,
-    #[serde(default)]
     pub sources: BTreeMap<String, Source>,
-    #[serde(default)]
     pub deps: Deps,
-    #[serde(default)]
     pub build_flags: BTreeMap<String, String>,
     /// Command names this package provides, discovered at build time.
-    #[serde(default)]
     pub provides: Vec<String>,
     /// Library base names (e.g. "foo" for libfoo.so) discovered at build time.
-    #[serde(default)]
     pub libs: Vec<String>,
     /// User-facing post-install notes ("add yourself to the docker group"), declared
     /// statically in the rune's `package` const or returned dynamically by its `build`
     /// function. Printed once after install and replayable via `grm info`.
-    #[serde(default)]
     pub notes: Vec<String>,
     /// The real upstream version string when `version` had to be normalized to semver
     /// (e.g. upstream `2025a` recorded as `2025.1.0`). Display only — never ordered.
-    #[serde(default)]
     pub upstream_version: Option<String>,
     /// Installed packages this one cannot coexist with (bare names; checked symmetrically
     /// at install time for linked installs).
-    #[serde(default)]
     pub conflicts: Vec<String>,
     /// Package names this one supersedes. Installing this package removes them in the same
     /// transaction, migrating their requested/held intent onto this package.
-    #[serde(default)]
     pub replaces: Vec<String>,
     /// The parent package this rune splits from. A split member declares no sources and no
     /// `build` function: its files are carved out of the parent rune's build output by the
     /// `files` globs, and the whole group is built in one pass.
-    #[serde(default)]
     pub split_from: Option<String>,
     /// Glob patterns (relative to the package payload root; `*` stays within a path
     /// component, `**` crosses directories) claiming this member's files from the parent
     /// build's output. Present exactly when `split_from` is set; the parent package
     /// receives every unclaimed file.
-    #[serde(default)]
     pub files: Vec<String>,
 }
 
 /// A declared source artifact for a source build. Every source must carry a checksum so
 /// it can be verified before the build consumes it (AGENTS.md §10.1).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Source {
     pub url: String,
     pub sha256: String,
     /// Optional platform glob (same syntax as dependency brackets, e.g. `macos-*`,
     /// `linux-x86_64-musl`). The source is fetched and hashed only for matching targets —
     /// how a fixed-output package pins different prebuilt artifacts per platform.
-    #[serde(default)]
     pub platform: Option<String>,
     /// Optional build-HOST libc filter (`"musl"` | `"glibc"`). When set, the source is selected
     /// only where grm's own host libc (see [`crate::util::paths::host_libc`]) matches — how
     /// `rust-stage0` pins a different bootstrap seed per host: a glibc host cross-seeds from the gnu
     /// release, a pure-musl host seeds from the musl release that only its `ld-musl` loader can run.
     /// `None` matches any host, so this never perturbs ordinary single-seed packages.
-    #[serde(default)]
     pub host_libc: Option<String>,
 }
 

@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     env, fs,
-    io::{BufReader, Read},
+    io::Read,
     path::{Path, PathBuf},
     sync::OnceLock,
 };
@@ -327,19 +327,14 @@ fn find_first_tool(path: &std::ffi::OsStr, names: &[&str]) -> Result<Option<Path
 
 fn find_tool(path: &std::ffi::OsStr, name: &str) -> Result<Option<PathBuf>> {
     for dir in env::split_paths(path) {
-        for candidate in executable_candidates(&dir, name) {
-            if is_executable_file(&candidate)
-                .with_context(|| format!("inspect host tool candidate {}", candidate.display()))?
-            {
-                return Ok(Some(candidate));
-            }
+        let candidate = dir.join(name);
+        if is_executable_file(&candidate)
+            .with_context(|| format!("inspect host tool candidate {}", candidate.display()))?
+        {
+            return Ok(Some(candidate));
         }
     }
     Ok(None)
-}
-
-fn executable_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
-    vec![dir.join(name)]
 }
 
 fn is_executable_file(path: &Path) -> Result<bool> {
@@ -362,22 +357,9 @@ fn is_executable(metadata: &fs::Metadata) -> bool {
 fn hash_file_prefix(path: &Path, limit: usize) -> Result<String> {
     let file =
         fs::File::open(path).with_context(|| format!("open {} for hashing", path.display()))?;
-    let mut reader = BufReader::new(file);
     let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 8192];
-    let mut remaining = limit;
-
-    while remaining > 0 {
-        let to_read = buf.len().min(remaining);
-        let n = reader
-            .read(&mut buf[..to_read])
-            .with_context(|| format!("read {} while hashing prefix", path.display()))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-        remaining -= n;
-    }
+    std::io::copy(&mut file.take(limit as u64), &mut hasher)
+        .with_context(|| format!("read {} while hashing prefix", path.display()))?;
 
     Ok(format!("{:x}", hasher.finalize()))
 }

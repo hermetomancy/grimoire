@@ -1,7 +1,6 @@
 //! Installed-package state (`state/packages/<name>.nuon`) and the lockfile snapshot
 //! (`grimoire.lock.nuon`) built from it.
 
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use anyhow::Result;
@@ -9,7 +8,7 @@ use nu_protocol::{Record, Span, Value};
 
 use super::*;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct PackageState {
     pub name: String,
     pub version: String,
@@ -21,49 +20,36 @@ pub struct PackageState {
     /// The content-addressed store path this package was installed into, e.g.
     /// `/grm/store/<hash>-<name>-<version>`.
     pub store_path: String,
-    #[serde(default)]
     pub bins: BTreeMap<String, String>,
-    #[serde(default)]
     pub runtime_deps: Vec<String>,
-    #[serde(default)]
     pub build_deps: Vec<String>,
     /// Verified source artifacts that produced this package, keyed by the source name the rune
     /// declared, mapped to the `sha256` each was checked against (empty for binary installs).
-    #[serde(default)]
     pub source_hashes: BTreeMap<String, String>,
     /// `true` when the user has held this package back from upgrades via `grm hold`. The
     /// version in `state/packages/<name>.nuon` is what `grm upgrade` will skip; clear with
     /// `grm unhold`.
-    #[serde(default)]
     pub held: bool,
     /// `true` when the user asked for this package by name; `false` when the solver pulled it
     /// in as a dependency. Non-requested packages are swept out of the install the moment
     /// nothing references them.
-    #[serde(default)]
     pub requested: bool,
     /// Command names this package provides (discovered at build time). Used for capability
     /// resolution when the solver reads from indexes or installed state.
-    #[serde(default)]
     pub provides: Vec<String>,
     /// Library base names (e.g. "foo" for libfoo.so) discovered at build time.
-    #[serde(default)]
     pub libs: Vec<String>,
     /// Post-install notes carried over from the package metadata, replayed by `grm info`.
-    #[serde(default)]
     pub notes: Vec<String>,
     /// The real upstream version string when `version` was normalized to semver.
-    #[serde(default)]
     pub upstream_version: Option<String>,
     /// Installed packages this one cannot coexist with (from the package metadata).
-    #[serde(default)]
     pub conflicts: Vec<String>,
     /// Package names this one supersedes (from the package metadata).
-    #[serde(default)]
     pub replaces: Vec<String>,
     /// The build-environment identity (`build_env_id`) in effect when this package was
     /// realized. Lets drift detection say *which* identity component moved instead of
     /// just "address drifted". `None` for states written before recording started.
-    #[serde(default)]
     pub build_env: Option<String>,
 }
 
@@ -181,20 +167,6 @@ pub struct LockFile {
 }
 
 impl LockFile {
-    pub fn new(
-        target: String,
-        tomes: Vec<TomeState>,
-        addendums: Vec<AddendumState>,
-        packages: Vec<PackageState>,
-    ) -> Self {
-        Self {
-            target,
-            tomes,
-            addendums,
-            packages,
-        }
-    }
-
     pub fn to_value(&self) -> Value {
         let mut record = Record::new();
         record.push("version", Value::int(1, Span::unknown()));

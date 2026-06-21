@@ -60,6 +60,9 @@ heading when it is tagged.
 - Generations, the lockfile, `grm list`, and bare `grm upgrade` cover the linked set only;
   store-only packages (cached build deps, residue) never reach the profile.
 - Rune command-subset violations fail at `tome add`/`info` time instead of mid-build.
+- Split `src/store/closure.rs` into a directory module: `closure/mod.rs` holds the core closure
+  walker (simple and split-group addressing), `closure/capability.rs` holds capability resolution,
+  and `closure/stale.rs` holds drift detection / `diff_build_env`. No behavior or public API change.
 
 ### Fixed
 

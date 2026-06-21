@@ -284,16 +284,6 @@ pub(crate) fn build_path_string(path_entries: &[PathBuf]) -> Option<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
-pub(crate) fn path_env_assignment(path_entries: &[PathBuf]) -> Result<String> {
-    if path_entries.is_empty() {
-        return Ok(String::new());
-    }
-    Ok(format!(
-        "$env.PATH = {}\n",
-        nuon_io::to_nuon_string(&path_list_value(path_entries))?
-    ))
-}
-
 pub(crate) fn path_list_value(path_entries: &[PathBuf]) -> Value {
     Value::list(
         path_entries

@@ -83,37 +83,12 @@ fn canonical_or_self(path: &Path) -> PathBuf {
 /// Reports which packages provide `name` — as a literal package, a bin, or a declared
 /// capability — across installed state, configured tome runes, and published indexes.
 pub fn provides(args: ProvidesArgs) -> Result<()> {
-    let name = &args.name;
-    let target = paths::target_triple();
-    // package name -> (version, installed); installed entries win over available ones.
-    let mut providers: BTreeMap<String, (String, bool)> = BTreeMap::new();
-
-    for state in install::installed_states()? {
-        if state.name == *name || state.bins.contains_key(name) || state.provides.contains(name) {
-            providers.insert(state.name.clone(), (state.version.clone(), true));
-        }
-    }
-
-    for package in query::tome_packages()? {
-        let metadata = &package.metadata;
-        if metadata.name == *name
-            || metadata.bins_for(&target).contains_key(name)
-            || metadata.provides.contains(name)
-        {
-            providers
-                .entry(metadata.name.clone())
-                .or_insert((metadata.version.clone(), false));
-        }
-    }
-
-    // Index-published capabilities cover prebuilt-only packages whose runes are absent; the
-    // capability index carries no version, so those rows print one only when known elsewhere.
-    for provider in solve::capability_providers(name)? {
-        providers.entry(provider).or_insert((String::new(), false));
-    }
-
+    let providers = capability_providers_detailed(&args.name)?;
     if providers.is_empty() {
-        bail!("nothing provides `{name}` in installed packages or configured tomes");
+        bail!(
+            "nothing provides `{}` in installed packages or configured tomes",
+            args.name
+        );
     }
     for (package, (version, installed)) in providers {
         println!(
@@ -122,4 +97,43 @@ pub fn provides(args: ProvidesArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Every package providing `capability` — as a literal package, a bin, or a declared
+/// capability — across installed state, configured tome runes, and published indexes. Maps
+/// package name to `(version, installed)`; installed entries win over available ones. The
+/// capability index carries no version, so index-only rows have an empty version unless the
+/// package is also known elsewhere. Shared by `provides` and `prefer`'s validation.
+pub(crate) fn capability_providers_detailed(
+    capability: &str,
+) -> Result<BTreeMap<String, (String, bool)>> {
+    let target = paths::target_triple();
+    let mut providers: BTreeMap<String, (String, bool)> = BTreeMap::new();
+
+    for state in install::installed_states()? {
+        if state.name == *capability
+            || state.bins.contains_key(capability)
+            || state.provides.contains(&capability.to_owned())
+        {
+            providers.insert(state.name.clone(), (state.version.clone(), true));
+        }
+    }
+
+    for package in query::tome_packages()? {
+        let metadata = &package.metadata;
+        if metadata.name == *capability
+            || metadata.bins_for(&target).contains_key(capability)
+            || metadata.provides.contains(&capability.to_owned())
+        {
+            providers
+                .entry(metadata.name.clone())
+                .or_insert((metadata.version.clone(), false));
+        }
+    }
+
+    for provider in solve::capability_providers(capability)? {
+        providers.entry(provider).or_insert((String::new(), false));
+    }
+
+    Ok(providers)
 }

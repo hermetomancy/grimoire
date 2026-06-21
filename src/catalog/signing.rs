@@ -33,17 +33,6 @@ pub fn verify(data: &[u8], signature: &str, public_key_b64: &str) -> Result<()> 
         .map_err(|err| anyhow::anyhow!("signature does not verify: {err}"))
 }
 
-/// Confirms two public keys are the same minisign key. Used to detect a tome presenting a
-/// different signer than the one pinned on first use (key rotation or host compromise), which is
-/// refused rather than silently trusted. Both must decode as valid keys; the comparison is over
-/// the canonical (trimmed) base64, which is deterministic for a given key.
-#[cfg(test)]
-pub fn keys_match(pinned_b64: &str, presented_b64: &str) -> Result<bool> {
-    PublicKey::from_base64(pinned_b64.trim()).context("decode pinned signer public key")?;
-    PublicKey::from_base64(presented_b64.trim()).context("decode presented signer public key")?;
-    Ok(pinned_b64.trim() == presented_b64.trim())
-}
-
 /// Verifies `data` against `signature` using any of `pubkeys`. Returns `Ok` if at least one key
 /// verifies the signature.
 pub fn verify_any(data: &[u8], signature: &str, pubkeys: &[String]) -> Result<()> {
@@ -116,14 +105,6 @@ mod tests {
         let (_pubkey, signature) = sign(data);
         let (other_pubkey, _other_signature) = sign(data);
         assert!(verify(data, &signature, &other_pubkey).is_err());
-    }
-
-    #[test]
-    fn keys_match_is_reflexive_and_distinguishes_keys() {
-        let (a, _) = sign(b"x");
-        let (b, _) = sign(b"x");
-        assert!(keys_match(&a, &a).expect("same key"));
-        assert!(!keys_match(&a, &b).expect("different keys"));
     }
 
     #[test]

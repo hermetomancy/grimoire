@@ -60,20 +60,15 @@ struct Installer {
 }
 
 impl Installer {
-    fn new(installed: BTreeMap<String, Version>, pins: Option<solve::Pins>) -> Self {
+    fn new(installed: BTreeMap<String, Version>, pins: Option<solve::Pins>, dry_run: bool) -> Self {
         Self {
             installed,
             pins,
             building: HashSet::new(),
             installed_now: Vec::new(),
             notes: Vec::new(),
-            dry_run: false,
+            dry_run,
         }
-    }
-
-    fn with_dry_run(mut self, dry_run: bool) -> Self {
-        self.dry_run = dry_run;
-        self
     }
 
     /// Builds a new generation from the current installed state and atomically activates it.
@@ -131,7 +126,7 @@ pub fn install(args: InstallArgs) -> Result<()> {
         installed.retain(|name, version| pins.get(name).is_some_and(|pin| &pin.version == version));
     }
 
-    let mut installer = Installer::new(installed, pins).with_dry_run(args.dry_run);
+    let mut installer = Installer::new(installed, pins, args.dry_run);
 
     // Announce implied work before the first fetch: a one-line install can pull a long
     // tail of missing or drifted build deps, and the user deserves the count (and the
@@ -284,7 +279,7 @@ pub fn restore(args: crate::cli::RestoreArgs) -> Result<()> {
     // Reuse an installed package only when it already matches its pin, like `--locked`.
     let mut installed = installed_versions_current()?;
     installed.retain(|name, version| pins.get(name).is_some_and(|pin| &pin.version == version));
-    let mut installer = Installer::new(installed, Some(pins)).with_dry_run(args.dry_run);
+    let mut installer = Installer::new(installed, Some(pins), args.dry_run);
     for name in &requested {
         installer
             .install_named(name)
@@ -399,7 +394,7 @@ pub fn upgrade_packages(names: &[String]) -> Result<()> {
     for name in names {
         installed.remove(name);
     }
-    let mut installer = Installer::new(installed, None);
+    let mut installer = Installer::new(installed, None, false);
     for name in names {
         installer
             .install_named(name)
