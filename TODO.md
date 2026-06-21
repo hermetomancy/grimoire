@@ -23,10 +23,12 @@ not here. When everything below is done and reflected in the design doc, delete 
   This single bootstrap verifies the pure-musl seeding AND the earlier wrapper/buildtmp cleanup at once.
   **Blocked:** the `claude` SSH key is in `~/.ssh/authorized_hosts` (sshd wants `authorized_keys`) — a
   one-line `mv` on the host unblocks it. Glibc VM 192.168.65.2 is also down.
-- **Generalize / harden** once Chimera is green: the x86_64-musl seed currently isn't host-gated (the
-  x86_64-musl rust release is static, runs anywhere) — revisit if a glibc x86_64 host ever needs it;
-  and consider a `host_libc` unit test via the `GRM_HOST_LIBC` override. Then FreeBSD (same §"cross
-  bootstrap" family).
+- **Generalize / harden** once Chimera is green: extend `rust-stage0.rn` to host-gate and fetch
+  the correct Tier 2 host-tools tarball for every supported target (aarch64-musl, x86_64-musl,
+  freebsd-x86_64, freebsd-aarch64), not just gnu vs. musl on Linux aarch64; the x86_64-musl seed
+  currently isn't host-gated because the static release runs anywhere, but the others must select
+  the right upstream tarball. Then consider a `host_libc` unit test via the `GRM_HOST_LIBC`
+  override.
 
 ## Remaining before a stable release
 
@@ -46,29 +48,23 @@ not here. When everything below is done and reflected in the design doc, delete 
 Build the core runes (`linux-headers`, `musl`, `llvm` (+`clang` split member with
 compiler-rt runtimes inside), `gmake`, `toybox` (+`gsed`),
 `toolchain-wrappers`) from source on every supported target. macOS aarch64 closed the
-dogfood loop 2026-06-12 (full chain through rust 1.96 and grimoire itself). The remaining
-targets are not equivalent work. Four are *unblocked* — a complete dogfood path exists, so
-each needs only a native `grm tome build --all` run plus per-rune platform debugging. Two
-are *blocked* on the cross-bootstrap expansion below: no official Rust stage0 host tools
-(`rust-stage0.rn`/`rust.rn` publish none), so the loop cannot close natively. The blocked
-pair is not on the stable bar.
+dogfood loop 2026-06-12 (full chain through rust 1.96 and grimoire itself). All six remaining
+targets are supported by official Rust host tools (Tier 2 with host tools via rustup), so the
+stage-1 loop can close natively once `rust-stage0.rn`/`rust.rn` fetch the correct per-host
+tarball. The remaining work is native build + per-rune debugging.
 
 Unblocked (native build + per-rune debugging):
 
 - ⏳ Linux x86_64 glibc
 - ⏳ Linux aarch64 glibc
 - ⏳ Linux x86_64 musl
+- ⏳ Linux aarch64 musl — needs `rust-stage0.rn` updated to fetch the official
+  `aarch64-unknown-linux-musl` host tools (currently cross-seeds from the gnu tarball on a glibc
+  host). Already proven on a glibc-hosted musl cross build.
 - ⏳ FreeBSD x86_64 — riskiest: no GitHub-hosted runner, and a multi-hour llvm+rust build
   inside a nested VM (no `/grm`, tight disk/time) is unproven; may need a self-hosted builder.
-
-Blocked on the cross-bootstrap expansion (not stable-blocking):
-
-- ⏳ Linux aarch64 musl — **bootstrapped on the Debian aarch64 (glibc) test VM** (gen 7: musl-host
-  rust 1.96, grimoire self-host, and the first userland package — `atuin` — built from source to a
-  static musl binary). `rust-stage0.rn` cross-seeds stage0 from the `aarch64-unknown-linux-gnu`
-  tarball, which runs because the build host has glibc. Still blocked on a *pure*-musl build machine
-  (no glibc to run the stage0 seed) — that needs the cross story below.
-- ⛔ FreeBSD aarch64
+- ⏳ FreeBSD aarch64 — needs `rust-stage0.rn` updated to fetch the official
+  `aarch64-unknown-freebsd` host tools.
 
 ### Bootstrap stage 2: full self-hosting
 
@@ -117,12 +113,13 @@ toybox-ambient, and package the failures. One deferred deliverable:
 
 ## Expansion projects (spec before code)
 
-- **Cross bootstrap (linux-aarch64-musl, freebsd-aarch64).** Both lack official Rust
-  stage0 host tools, so neither closes the dogfood loop natively (the two blocked stage-1
-  targets above). Needs a real cross story: build deps resolved for the *host* triple while
-  runtime deps and outputs target the *target* triple (the model currently conflates them —
-  single `target_triple` in `util/paths.rs`), cross toolchain-wrappers, rust cross-std.
-  Project-sized; write the design doc first.
+- **Cross bootstrap (linux-aarch64-musl, freebsd-aarch64).** Independent of host-tool
+  availability — these targets now close natively via rustup's Tier 2 host tools once
+  `rust-stage0.rn` fetches the correct tarball. Cross bootstrap is the separate story of
+  building *for* one triple *from* a different host triple: build deps resolved for the host
+  while runtime deps and outputs target the target (the model currently conflates them — single
+  `target_triple` in `util/paths.rs`), cross toolchain-wrappers, rust cross-std. Project-sized;
+  write the design doc first.
 - **Scoped profiles and dev shells (`grm profile` / `grm shell`).** Named, imperative
   profiles for development against managed libraries — e.g. a `rust-devel` profile where
   `cargo install`'s `openssl-sys` finds the managed OpenSSL instead of host Homebrew.
