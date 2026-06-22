@@ -217,8 +217,10 @@ depends on a POSIX userland at `/usr/bin` and `/bin`. Default target triples:
      always shown) for diagnostics like `doctor` findings; dimmed unprefixed context lines
      (`note`) framing the headlines, with `strong` (bold) subjects embedded.
    - **Data** (stdout, always shown — it is what the user asked for): `field(key, value)` detail,
-     `heading(title)` section titles, `print_rows` aligned tables (tab-separated when piped), and
-     `line` for raw/preformatted output (a store hash, a dry-run plan row).
+     `heading(title)` section titles, `print_rows` aligned tables (tab-separated when piped),
+     `list_item` dimmed-bullet single-column lists, and `line` for raw/preformatted output (a store
+     hash, a dry-run plan row). Bare data must be styled — reach for `print_rows`/`list_item`/`field`
+     before `line`; `line` is only for machine-readable or already-laid-out text.
    - **Progress** (stderr): `status`/`success` steps folded into a transient spinner, plus the
      live build-log pane (`build_log_line`).
 
