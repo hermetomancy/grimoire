@@ -15,7 +15,7 @@ use super::*;
 /// Collects unreferenced store paths and old generations, returning
 /// `(freed_store_paths, freed_generations, bytes_freed)`.
 ///
-/// Keeps the `keep` most recent generations (including the current one and the rollback
+/// Keeps the `keep` most recent generations (including the current one and the switch-back
 /// target), deletes older generations, then deletes any store path not referenced by a
 /// retained generation. With no generations at all nothing is touched: store reachability is
 /// derived from generation metadata, so an empty registry must not condemn the whole store.
@@ -28,7 +28,7 @@ struct RetainPlan {
 }
 
 /// Sorts generations newest-first and computes the set of generation IDs to keep: the `keep`
-/// most recent, plus the current generation and the rollback target. Returns `None` when there
+/// most recent, plus the current generation and the switch-back target. Returns `None` when there
 /// are no generations at all, so the store is left untouched.
 fn retain_plan(keep: usize) -> Result<Option<RetainPlan>> {
     let mut generations = list_generations()?;
@@ -41,8 +41,8 @@ fn retain_plan(keep: usize) -> Result<Option<RetainPlan>> {
     let mut to_retain: BTreeSet<u64> = generations.iter().take(keep).map(|g| g.id).collect();
     if let Some(current_id) = current {
         to_retain.insert(current_id);
-        // Always keep the rollback target too: with `--keep 1` the previous generation would
-        // otherwise be collected and the next `grm rollback` would have nowhere to go.
+        // Always keep the switch-back target too: with `--keep 1` the previous generation would
+        // otherwise be collected and the next `grm switch` would have nowhere to go.
         if let Some(previous) = generations
             .iter()
             .map(|g| g.id)

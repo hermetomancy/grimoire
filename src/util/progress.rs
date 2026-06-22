@@ -286,7 +286,7 @@ pub fn strong(text: &str) -> String {
 }
 
 /// Accents the subject of a `✦` headline result (the package and version that was installed,
-/// the outcome of a rollback) in bold green on a terminal. Plain text when stdout is piped or
+/// the outcome of a switch) in bold green on a terminal. Plain text when stdout is piped or
 /// `NO_COLOR` is set. `strong` is for subjects embedded in [`note`] context lines; `accent`
 /// is for the headline outcomes themselves.
 pub fn accent(text: &str) -> String {

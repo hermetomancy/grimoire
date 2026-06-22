@@ -161,7 +161,7 @@ Grimoire has no database. Durability is explicit transaction directories plus at
    *linked* package state it was built from — the environment, not the cache. Store-only
    packages (cached build deps, residue) appear in neither the snapshot nor the
    generation's GC roots, so `grm clean` can reclaim them; activation preserves their live
-   records untouched. `grm rollback` restores `state/packages/` and the lockfile from the
+   records untouched. `grm switch` restores `state/packages/` and the lockfile from the
    snapshot *before* flipping the `current` symlink, so the active generation and the
    recorded state always describe the same world — rolling back really rolls back, and the
    next mutating command builds on the activated set instead of resurrecting the abandoned
@@ -208,7 +208,7 @@ depends on a POSIX userland at `/usr/bin` and `/bin`. Default target triples:
    semantically reasonable; multi-package mutations are one all-or-nothing transaction (§9.3).
 4. **Result lines share one vocabulary** (`util/progress`), in three tiers:
    - `✦` headline results (`report`): the outcomes the user asked for. Their subject (package
-     and version, the rollback outcome) is emphasized with `accent` (bold green); trailing
+     and version, the switch outcome) is emphasized with `accent` (bold green); trailing
      detail is de-emphasized with `faint` after an em dash (`ripgrep 14.1.0 — prebuilt,
      checksum verified`).
    - dimmed, unprefixed context lines (`note`): secondary confirmations and transitions that

@@ -122,7 +122,7 @@ fn check_current_symlink() -> Result<usize> {
     let link = profile::current_profile_link()?;
     if fs::symlink_metadata(&link).is_ok() && fs::metadata(&link).is_err() {
         problem(&format!(
-            "`{}` points at a generation that no longer exists; run `grm rollback <id>`",
+            "`{}` points at a generation that no longer exists; run `grm switch <id>`",
             link.display()
         ));
         return Ok(1);
@@ -181,7 +181,7 @@ fn check_state_generation_divergence() -> Result<usize> {
     if !diverged.is_empty() {
         problem(&format!(
             "state/packages diverges from active generation {id} ({}); interrupted \
-             activation? run `grm rollback <id>` to converge",
+             activation? run `grm switch <id>` to converge",
             diverged.join(", ")
         ));
         return Ok(1);
@@ -226,10 +226,10 @@ fn check_duplicate_bins() -> Result<usize> {
 
 /// `.grimoire-old` directories are move-aside backups dropped on commit; one left behind
 /// means an interrupted transaction, and it silently holds disk space.
-/// A retained generation whose snapshot references missing store paths is a rollback trap:
+/// A retained generation whose snapshot references missing store paths is a switch trap:
 /// activation would restore state records for packages whose bits are gone. `grm clean`
 /// always protects retained generations' store paths, so this only happens after manual
-/// store surgery or an interrupted clean — flag it *before* a rollback discovers it.
+/// store surgery or an interrupted clean — flag it *before* a switch discovers it.
 fn check_generation_snapshots() -> Result<usize> {
     let mut problems = 0;
     for generation in profile::list_generations()? {

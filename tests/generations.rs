@@ -1,5 +1,5 @@
-//! Semantic activation: rollback restores package state and the lockfile from the
-//! generation's snapshot, clean preserves the rollback target and reclaims unreferenced
+//! Semantic activation: switch restores package state and the lockfile from the
+//! generation's snapshot, clean preserves the switch-back target and reclaims unreferenced
 //! store paths, and doctor flags divergence.
 
 mod support;
@@ -10,7 +10,7 @@ use support::*;
 use tempfile::TempDir;
 
 /// Two single-package generations: installing `alpha` then `beta` so gen-1 = {alpha} and
-/// gen-2 = {alpha, beta}, ready for rollback scenarios.
+/// gen-2 = {alpha, beta}, ready for switch scenarios.
 fn setup_two_generations(root: &std::path::Path) {
     let triple = target_triple();
     let tome = TempDir::new().unwrap();
@@ -58,7 +58,7 @@ fn setup_two_generations(root: &std::path::Path) {
 }
 
 #[test]
-fn rollback_restores_package_state_and_lockfile() {
+fn switch_restores_package_state_and_lockfile() {
     let root = TempDir::new().unwrap();
     let root = root.path();
     setup_two_generations(root);
@@ -66,17 +66,17 @@ fn rollback_restores_package_state_and_lockfile() {
     let beta_state = root.join("state").join("packages").join("beta.nuon");
     assert!(beta_state.exists(), "beta installed in gen 2");
 
-    assert_success(&run(root, &["rollback"]), "rollback to gen 1");
+    assert_success(&run(root, &["switch"]), "switch to gen 1");
 
-    // State now describes the rolled-back generation, not the abandoned one.
+    // State now describes the switched-to generation, not the abandoned one.
     assert!(
         !beta_state.exists(),
-        "rollback must drop beta from state/packages"
+        "switch must drop beta from state/packages"
     );
     let list = stdout(&run(root, &["list"]));
     assert!(
         list.contains("alpha") && !list.contains("beta"),
-        "grm list must report the rolled-back set: {list}"
+        "grm list must report the switched-to set: {list}"
     );
     let lock = fs::read_to_string(root.join("state").join("grimoire.lock.nuon")).unwrap();
     assert!(
@@ -95,18 +95,18 @@ fn rollback_restores_package_state_and_lockfile() {
 }
 
 #[test]
-fn mutation_after_rollback_does_not_resurrect_rolled_back_packages() {
+fn mutation_after_switch_does_not_resurrect_dropped_packages() {
     let root = TempDir::new().unwrap();
     let root = root.path();
     setup_two_generations(root);
 
-    assert_success(&run(root, &["rollback"]), "rollback to gen 1");
+    assert_success(&run(root, &["switch"]), "switch to gen 1");
     assert_success(&run(root, &["install", "gamma"]), "install gamma (gen 3)");
 
     let list = stdout(&run(root, &["list"]));
     assert!(
         list.contains("alpha") && list.contains("gamma") && !list.contains("beta"),
-        "the new generation must build on the rolled-back set: {list}"
+        "the new generation must build on the switched-to set: {list}"
     );
     assert!(
         !root
@@ -125,8 +125,8 @@ fn switch_forward_restores_the_newer_set() {
     let root = root.path();
     setup_two_generations(root);
 
-    assert_success(&run(root, &["rollback"]), "rollback to gen 1");
-    assert_success(&run(root, &["rollback", "2"]), "switch forward to gen 2");
+    assert_success(&run(root, &["switch"]), "switch to gen 1");
+    assert_success(&run(root, &["switch", "2"]), "switch forward to gen 2");
 
     let list = stdout(&run(root, &["list"]));
     assert!(
@@ -143,19 +143,19 @@ fn switch_forward_restores_the_newer_set() {
 }
 
 #[test]
-fn clean_preserves_the_rollback_target() {
+fn clean_preserves_the_switch_back_target() {
     let root = TempDir::new().unwrap();
     let root = root.path();
     setup_two_generations(root);
     assert_success(&run(root, &["install", "gamma"]), "install gamma (gen 3)");
 
     assert_success(&run(root, &["clean", "--keep", "1"]), "clean --keep 1");
-    let rollback = run(root, &["rollback"]);
-    assert_success(&rollback, "rollback after aggressive clean");
+    let switched = run(root, &["switch"]);
+    assert_success(&switched, "switch after aggressive clean");
     let list = stdout(&run(root, &["list"]));
     assert!(
         list.contains("beta") && !list.contains("gamma"),
-        "rollback target (gen 2) must have survived clean: {list}"
+        "switch-back target (gen 2) must have survived clean: {list}"
     );
 }
 
@@ -173,7 +173,7 @@ fn clean_reclaims_store_dirs_left_by_removal() {
     );
 
     // ... and a couple more generations push every beta-referencing generation past the
-    // retention window (`--keep 1` retains gen 5 plus its rollback target, gen 4).
+    // retention window (`--keep 1` retains gen 5 plus its switch-back target, gen 4).
     assert_success(&run(root, &["install", "gamma"]), "install gamma (gen 4)");
     assert_success(&run(root, &["remove", "gamma"]), "remove gamma (gen 5)");
     assert_success(&run(root, &["clean", "--keep", "1"]), "clean --keep 1");
@@ -208,7 +208,7 @@ fn doctor_flags_state_generation_divergence() {
     // Re-activating the current generation is the documented repair path.
     let current = stdout(&run(root, &["generations"]));
     assert!(current.contains("* gen-2"), "gen 2 active: {current}");
-    assert_success(&run(root, &["rollback", "2"]), "re-activate to converge");
+    assert_success(&run(root, &["switch", "2"]), "re-activate to converge");
     assert!(
         root.join("state")
             .join("packages")

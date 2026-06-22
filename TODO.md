@@ -81,7 +81,7 @@ toybox-ambient, and package the failures. One deferred deliverable:
   `cargo install`'s `openssl-sys` finds the managed OpenSSL instead of host Homebrew.
   Converged design:
   - *Model.* A named profile is the existing profile generalized: its own state (installed
-    set, lockfile), generation chain, and rollback; the unnamed default is the reserved
+    set, lockfile), generation chain, and switching; the unnamed default is the reserved
     case. The store stays shared (cross-profile sharing is free); GC roots become the union
     over all profiles' retained generations.
   - *Activation = spawn a subshell* (not in-place eval — sidesteps the PATH
@@ -105,7 +105,7 @@ toybox-ambient, and package the failures. One deferred deliverable:
     reproducible artifact.
   - *Surface.* `grm profile create|list|rm <name>`; `grm profile <name> [--pure] [-- cmd]`;
     `grm shell <pkgs> [--pure] [-- cmd]`; `grm install <pkg> [--profile <name>]`.
-  - *Work.* Per-profile state/generation plumbing across install/remove/upgrade/rollback/
+  - *Work.* Per-profile state/generation plumbing across install/remove/upgrade/switch/
     gc/doctor; the stable per-profile-prefix builder + forest collision handling; reuse the
     build env's discovery-var computation (`src/nu/runtime/`) for the forest contents.
 

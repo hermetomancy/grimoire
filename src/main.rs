@@ -80,7 +80,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Owns(args) => cmd::files::owns(args),
         Command::Provides(args) => cmd::files::provides(args),
         Command::Prefer(args) => cmd::prefer::prefer(args),
-        Command::Rollback(args) => {
+        Command::Switch(args) => {
             if args.dry_run {
                 return profile::dry_run_activation(args.generation);
             }
@@ -99,11 +99,11 @@ fn run(cli: Cli) -> Result<()> {
                     }
                 }
                 None => {
-                    let id = profile::rollback()?;
+                    let id = profile::switch_to_previous()?;
                     progress::report(&format!(
                         "{} {}",
                         progress::accent(&format!(
-                            "rolled back to generation {id} in {:.2}s",
+                            "switched to generation {id} in {:.2}s",
                             started.elapsed().as_secs_f64(),
                         )),
                         progress::faint("— nothing was rebuilt, nothing was lost"),
@@ -151,7 +151,7 @@ fn mutates_install_root(command: &Command) -> bool {
         Command::Remove(args) | Command::Hold(args) | Command::Unhold(args) => !args.dry_run,
         Command::Clean(args) => !args.dry_run,
         Command::Restore(args) => !args.dry_run,
-        Command::Rollback(args) => !args.dry_run,
+        Command::Switch(args) => !args.dry_run,
         Command::Tome { command } => match command {
             TomeCommand::Add(args) => !args.dry_run,
             TomeCommand::Update(args) => !args.dry_run,

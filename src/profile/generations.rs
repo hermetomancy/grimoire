@@ -283,7 +283,7 @@ pub(super) fn restore_state_snapshot(gen_dir: &Path) -> Result<bool> {
     // build deps) are cache, orthogonal to the semantic state, and survive activation —
     // dropping them would orphan their store dirs (unrecorded dirs are never re-trusted).
     // Only genuine cache carries over: anything in the abandoned environment's linked
-    // closure is exactly what a semantic rollback must drop, and a record whose store
+    // closure is exactly what a semantic switch must drop, and a record whose store
     // path is gone is not worth keeping either.
     let snapshot_names: std::collections::HashSet<&str> =
         states.iter().map(|s| s.name.as_str()).collect();

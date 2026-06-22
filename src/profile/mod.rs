@@ -194,8 +194,8 @@ pub fn create_generation(world: &InstalledWorld) -> Result<u64> {
         packages: linked.iter().map(|s| s.name.clone()).collect(),
         store_paths: linked.iter().map(|s| s.store_path.clone()).collect(),
     };
-    // The linked state snapshot is what makes activation *semantic*: rollback/switch restore
-    // `state/packages/` from it, so the rolled-back-to generation really is the system state.
+    // The linked state snapshot is what makes activation *semantic*: switching restores
+    // `state/packages/` from it, so the switched-to generation really is the system state.
     // Write it before `gen.nuon` (the adoption marker), then promote the whole tree atomically.
     let linked_states: Vec<PackageState> = linked.iter().map(|s| (*s).clone()).collect();
     write_state_snapshot(&staging, &linked_states)?;
@@ -225,7 +225,7 @@ pub fn create_generation(world: &InstalledWorld) -> Result<u64> {
 ///
 /// The state restore lands before the symlink flip: the flip is the user-visible commit
 /// point, and a crash between the two leaves state describing the target generation — which
-/// the next mutating command or `grm rollback <id>` converges, and `grm doctor` flags.
+/// the next mutating command or `grm switch <id>` converges, and `grm doctor` flags.
 ///
 /// Returns `true` when the profile actually switched, `false` when `id` was already active
 /// (the repair path), so callers can word their result line accordingly.
@@ -285,22 +285,21 @@ fn switch_symlink(id: u64) -> Result<()> {
     Ok(())
 }
 
-/// Rolls back to the previous generation (the newest generation older than the current one).
-/// Returns the ID of the generation rolled back to.
-/// `rollback --dry-run`: names the generation activation would switch to and diffs its
-/// snapshot against current state, without touching the profile.
+/// `grm switch --dry-run`: names the generation activation would switch to (a specific ID, or
+/// the previous generation when none is given) and diffs its snapshot against current state,
+/// without touching the profile.
 pub fn dry_run_activation(generation: Option<u64>) -> Result<()> {
     let target = match generation {
         Some(id) => id,
         None => {
             let current =
-                current_generation_id()?.context("no active generation to roll back from")?;
+                current_generation_id()?.context("no active generation to switch from")?;
             let mut generations = list_generations()?;
             generations.sort_by_key(|b| std::cmp::Reverse(b.id));
             generations
                 .into_iter()
                 .find(|g| g.id < current)
-                .context("no previous generation to roll back to")?
+                .context("no previous generation to switch to")?
                 .id
         }
     };
@@ -338,15 +337,17 @@ pub fn dry_run_activation(generation: Option<u64>) -> Result<()> {
     Ok(())
 }
 
-pub fn rollback() -> Result<u64> {
-    let current = current_generation_id()?.context("no active generation to roll back from")?;
+/// Switches to the previous generation (the newest generation older than the current one).
+/// Returns the ID of the generation switched to.
+pub fn switch_to_previous() -> Result<u64> {
+    let current = current_generation_id()?.context("no active generation to switch from")?;
     let mut generations = list_generations()?;
     generations.sort_by_key(|b| std::cmp::Reverse(b.id));
 
     let previous = generations
         .into_iter()
         .find(|g| g.id < current)
-        .context("no previous generation to roll back to")?;
+        .context("no previous generation to switch to")?;
 
     activate_generation(previous.id)?;
     Ok(previous.id)

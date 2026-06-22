@@ -3,7 +3,7 @@
 //! Everything reproducible leaves; everything the user asked for stays. Three phases:
 //! orphaned dependency state nothing references (cached build dependencies, residue from a
 //! failed multi-package install) is swept out of the install; generations older than `--keep`
-//! (the current generation and the rollback target always survive) and every store path no
+//! (the current generation and the switch-back target always survive) and every store path no
 //! retained generation references — including the directories store-preserving removal left
 //! behind — are deleted; and the source/archive/build caches plus leftover transaction
 //! staging directories are emptied. Installed packages, retained generations, tomes, addenda,

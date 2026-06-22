@@ -48,12 +48,12 @@ heading when it is tagged.
   a package's content address; discovery vars are merged after declared-dep paths (segment-deduped)
   so an explicitly declared library keeps priority. While the floor is itself bootstrapping (musl/
   linux-headers not yet installed) the build falls back to the prior static flags.
-- CLI consolidated: `autoremove`, `orphans`, `unrequest`, `switch`, `delete-generation`, and
+- CLI consolidated: `autoremove`, `orphans`, `unrequest`, `delete-generation`, and
   `collect-garbage` removed; removal sweeps orphans in the same transaction and demotes
-  still-required packages; `rollback [GEN]` absorbs switch; `clean [--keep N]` is the one
-  reclamation command.
+  still-required packages; `switch [GEN]` activates any generation (or the previous one with
+  no argument); `clean [--keep N]` is the one reclamation command.
 - Removal is store-preserving: store directories survive until `grm clean` collects them, so
-  rollback after remove works and reinstalls are cheap.
+  switching back after remove works and reinstalls are cheap.
 - Dependency reuse is content-addressed: a package whose rune drifted (same version, new
   store hash) is re-realized instead of being reused by version. Holds pin the installed
   bits, not just the version.
@@ -66,8 +66,8 @@ heading when it is tagged.
 - Rebuild `grimoire.lock.nuon` exactly once per mutating command, at the same finalize boundary
   that activates the generation. Previously the lockfile was regenerated per package install,
   per orphan removal, and on every `held`/`requested` flag change, so a failed multi-package
-  command could leave the lock describing a half-applied state. Rollback also rebuilds the lock
-  from the restored generation snapshot before switching the profile symlink.
+  command could leave the lock describing a half-applied state. Switching also rebuilds the lock
+  from the restored generation snapshot before flipping the profile symlink.
 - Introduce `InstalledWorld` as the single in-memory authority for installed-package state. Every
   command now loads `state/packages/*.nuon` once, mutates the world in memory, and commits at one
   explicit transaction boundary. The scattered `installed_states()` / `linked_set()` disk scans and
@@ -166,6 +166,6 @@ heading when it is tagged.
 
 ## 0.1.0 — unreleased baseline
 
-Initial development line: content-addressed store, generations and semantic rollback,
+Initial development line: content-addressed store, generations and semantic switching,
 tome/addendum catalogs with minisign trust, source builds via embedded Nushell runes,
 binhost substitution keyed by store hash.

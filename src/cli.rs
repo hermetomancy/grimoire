@@ -43,7 +43,7 @@ pub enum Command {
     /// that no other installed package still requires — leave in the same transaction. A
     /// package something still requires is kept and demoted to dependency status instead, so
     /// it is removed automatically once nothing needs it. Store contents are untouched (so
-    /// rollback still works); `grm clean` reclaims the disk space.
+    /// switching back still works); `grm clean` reclaims the disk space.
     #[command(visible_aliases = ["rm", "uninstall"])]
     Remove(MutatePackagesArgs),
     /// Upgrade installed packages to the latest available version. Packages held with
@@ -89,9 +89,11 @@ pub enum Command {
     // -----------------------------------------------------------------------
     // Profiles
     // -----------------------------------------------------------------------
-    /// Roll back to the previous generation, or activate a specific generation by ID.
-    #[command(visible_alias = "rb")]
-    Rollback(RollbackArgs),
+    /// Switch to a generation by ID (forward or back), or to the previous generation when no ID
+    /// is given. Switching only re-points the profile and restores that generation's recorded
+    /// state — nothing is rebuilt.
+    #[command(visible_alias = "sw")]
+    Switch(SwitchArgs),
     /// List generations.
     #[command(visible_alias = "gens")]
     Generations,
@@ -104,7 +106,7 @@ pub enum Command {
     Doctor,
     /// Reclaim disk under the install root: sweep unused dependencies nothing references
     /// (cached build deps, residue from failed installs), delete old generations (keeping the
-    /// most recent ones plus the rollback target), delete store paths no retained generation
+    /// most recent ones plus the switch-back target), delete store paths no retained generation
     /// references, and empty the source/archive/build caches and leftover transaction staging
     /// directories. Installed packages, recent generations, tomes, addenda, and the lockfile
     /// are untouched; the next install or build re-fetches what it needs.
@@ -297,8 +299,8 @@ pub struct UpgradeArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct RollbackArgs {
-    /// Generation ID to activate. Omit to roll back to the previous generation.
+pub struct SwitchArgs {
+    /// Generation ID to activate. Omit to switch to the previous generation.
     pub generation: Option<u64>,
     /// Show the target generation and the package diff without switching.
     #[arg(long, visible_alias = "explain")]
@@ -307,7 +309,7 @@ pub struct RollbackArgs {
 
 #[derive(Debug, Args)]
 pub struct CleanArgs {
-    /// Number of recent generations to keep (including the current one). The rollback target
+    /// Number of recent generations to keep (including the current one). The switch-back target
     /// is always kept.
     #[arg(short, long, default_value = "5")]
     pub keep: usize,

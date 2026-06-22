@@ -5,7 +5,7 @@
 <h1 align="center">Grimoire</h1>
 
 <p align="center">
-  An imperative package manager with a fixed content-addressed store, generations, and rollback.
+  An imperative package manager with a fixed content-addressed store, generations, and instant switching.
 </p>
 
 ---
@@ -37,8 +37,8 @@ on any install root, and `--locked` operations refuse to resolve against a tome 
 off its pinned commit.
 - **Trustable binaries.** Tome indexes can be minisign-signed and TOFU-pinned, so an index
 signature authenticates every archive hash it publishes.
-- **Generations and rollback.** Every install/remove/upgrade creates a new generation;
-`grm rollback` switches back instantly without rebuilding.
+- **Generations and switching.** Every install/remove/upgrade creates a new generation;
+`grm switch` moves between them (back or forward) instantly without rebuilding.
 - **Distro-citizen tooling.** Install-reason tracking — removing a package takes its
 now-unneeded dependencies with it in the same transaction — file-ownership queries
 (`grm files`, `grm owns`, `grm provides`), preferred providers for contested commands
@@ -48,7 +48,7 @@ now-unneeded dependencies with it in the same transaction — file-ownership que
 
 | Axis | Grimoire | Like |
 |---|---|---|
-| Store / install / upgrade | immutable fixed-path content-addressed store, generations, rollback | **Nix / Guix** |
+| Store / install / upgrade | immutable fixed-path content-addressed store, generations, switching | **Nix / Guix** |
 | Recipe authoring | imperative Nushell `build` function | **Portage / Pacman** (PKGBUILD/ebuild) |
 | Build-time customization | `build_flags` | **Portage USE flags** |
 | Catalogs / overlays | tomes + addenda | **AUR / overlays** |
@@ -79,11 +79,11 @@ grm install hello --dry-run   # the full plan: steps, build deps, migrations
 grm install hello
 grm ls                        # the linked environment; --all adds cached build deps, --explicit only your roots
 
-# Upgrade, hold, roll back
+# Upgrade, hold, switch generations
 grm upgrade
 grm hold hello
 grm unhold hello
-grm rollback
+grm switch
 
 # Ask questions
 grm files hello                       # what did this package install?
