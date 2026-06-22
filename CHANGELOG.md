@@ -63,6 +63,18 @@ heading when it is tagged.
 - Split `src/store/closure.rs` into a directory module: `closure/mod.rs` holds the core closure
   walker (simple and split-group addressing), `closure/capability.rs` holds capability resolution,
   and `closure/stale.rs` holds drift detection / `diff_build_env`. No behavior or public API change.
+- Rebuild `grimoire.lock.nuon` exactly once per mutating command, at the same finalize boundary
+  that activates the generation. Previously the lockfile was regenerated per package install,
+  per orphan removal, and on every `held`/`requested` flag change, so a failed multi-package
+  command could leave the lock describing a half-applied state. Rollback also rebuilds the lock
+  from the restored generation snapshot before switching the profile symlink.
+- Introduce `InstalledWorld` as the single in-memory authority for installed-package state. Every
+  command now loads `state/packages/*.nuon` once, mutates the world in memory, and commits at one
+  explicit transaction boundary. The scattered `installed_states()` / `linked_set()` disk scans and
+  the `O(n²)` `sweep_orphans` re-reads are removed.
+- The resolver backtracks over `conflicts` metadata during version/provider selection, choosing
+  compatible alternatives instead of producing plans that are refused later. `replaces` exempts the
+  superseded package symmetrically; the plan-time and realize-time gates remain as safety nets.
 
 ### Fixed
 

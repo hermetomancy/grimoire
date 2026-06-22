@@ -1,29 +1,23 @@
 //! Reading and flagging installed-package state: listing, hold/unhold, requested marking.
 
 use anyhow::{Result, bail};
-use semver::Version;
-use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
-    fs,
-};
 
 use crate::{
-    model::{PackageState, parse_version_relaxed},
-    nu::nuon_io,
-    util::paths,
-    util::progress::{self, report, status},
+    util::progress::{self, report},
     util::table::{self, Cell},
 };
 
+use super::world::InstalledWorld;
 use super::*;
 
 pub fn list(args: crate::cli::ListArgs) -> Result<()> {
-    let states = installed_states()?;
+    let world = InstalledWorld::load_default()?;
+    let states = world.to_states();
     if states.is_empty() {
         println!("no packages installed");
         return Ok(());
     }
-    let linked = linked_set(&states);
+    let linked = world.linked_immut();
     // The environment is what `list` answers for; store-only packages are cache and only
     // appear under `--all`. `--explicit` narrows the other way — to just the requested
     // roots, the answer to "what did I actually ask for" (the set `grm install` rebuilds).
@@ -102,12 +96,20 @@ pub fn hold(args: crate::cli::MutatePackagesArgs) -> Result<()> {
     if args.packages.is_empty() {
         bail!("specify at least one package to hold");
     }
+    let mut world = InstalledWorld::load_default()?;
+    let mut changed = false;
     for package in &args.packages {
         if args.dry_run {
             dry_run_hold(package, true)?;
         } else {
-            set_hold(package, true, true)?;
+            changed |= set_hold(&mut world, package, true, true)?;
         }
+    }
+    if changed {
+        let mut tx = Transaction::new();
+        world.commit(&mut tx)?;
+        finalize_state(&mut tx, &world)?;
+        tx.commit();
     }
     Ok(())
 }
@@ -116,20 +118,28 @@ pub fn unhold(args: crate::cli::MutatePackagesArgs) -> Result<()> {
     if args.packages.is_empty() {
         bail!("specify at least one package to unhold");
     }
+    let mut world = InstalledWorld::load_default()?;
+    let mut changed = false;
     for package in &args.packages {
         if args.dry_run {
             dry_run_hold(package, false)?;
         } else {
-            set_hold(package, false, true)?;
+            changed |= set_hold(&mut world, package, false, true)?;
         }
+    }
+    if changed {
+        let mut tx = Transaction::new();
+        world.commit(&mut tx)?;
+        finalize_state(&mut tx, &world)?;
+        tx.commit();
     }
     Ok(())
 }
 
 /// Validates the target like a real hold/release would, then says what would change.
 fn dry_run_hold(name: &str, held: bool) -> Result<()> {
-    let states = installed_states()?;
-    let Some(state) = states.iter().find(|state| state.name == name) else {
+    let world = InstalledWorld::load_default()?;
+    let Some(state) = world.get(name) else {
         bail!("package `{name}` is not installed");
     };
     if state.held == held {
@@ -147,16 +157,15 @@ fn dry_run_hold(name: &str, held: bool) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn set_hold(name: &str, held: bool, announce: bool) -> Result<()> {
-    let root = paths::install_root()?;
-    let state_path = root
-        .join("state")
-        .join("packages")
-        .join(format!("{name}.nuon"));
-    if !state_path.exists() {
+pub(crate) fn set_hold(
+    world: &mut InstalledWorld,
+    name: &str,
+    held: bool,
+    announce: bool,
+) -> Result<bool> {
+    let Some(state) = world.get(name) else {
         bail!("package `{name}` is not installed");
-    }
-    let mut state = PackageState::from_value(nuon_io::read_nuon(&state_path)?)?;
+    };
     if state.held == held {
         if announce {
             report(&format!(
@@ -164,12 +173,9 @@ pub(crate) fn set_hold(name: &str, held: bool, announce: bool) -> Result<()> {
                 if held { "held" } else { "not held" }
             ));
         }
-        return Ok(());
+        return Ok(false);
     }
-    state.held = held;
-    nuon_io::write_nuon(&state_path, &state.to_value())?;
-    // The lock records holds, so a flag change must refresh it like any other state change.
-    lock::rebuild()?;
+    world.update(name, |state| state.held = held);
     if announce {
         report(&format!(
             "{} {}",
@@ -177,7 +183,7 @@ pub(crate) fn set_hold(name: &str, held: bool, announce: bool) -> Result<()> {
             if held { "held" } else { "released" }
         ));
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Marks `name` as explicitly requested (or demotes it back to a dependency). `name` is
@@ -185,22 +191,21 @@ pub(crate) fn set_hold(name: &str, held: bool, announce: bool) -> Result<()> {
 /// `grm install awk` marks whichever package actually satisfied `awk`. Returns whether the
 /// flag actually changed: a promotion can pull a store-only package into the linked set, so
 /// the caller may need to rebuild the generation even when nothing was installed.
-pub(crate) fn set_requested(name: &str, requested: bool, announce: bool) -> Result<bool> {
-    let states = installed_states()?;
-    let Some(found) = find_dep_state(&states, name) else {
+pub(crate) fn set_requested(
+    world: &mut InstalledWorld,
+    name: &str,
+    requested: bool,
+    announce: bool,
+) -> Result<bool> {
+    let Some(state) = world.resolve_dep(name).cloned() else {
         bail!("package `{name}` is not installed");
     };
-    let mut state = found.clone();
     // Promoting a store-only package pulls it (and its closure) into the linked set without
     // re-realizing it, so the linked-conflict gate must run here just like it does for a
     // fresh linked install. An already-linked package was checked when it landed.
-    if requested && !state.requested && !linked_set(&states).contains(&state.name) {
-        refuse_linked_conflicts(&states, &state.name, &state.conflicts, &state.replaces)?;
+    if requested && !state.requested && !world.linked_immut().contains(&state.name) {
+        refuse_linked_conflicts(world, &state.name, &state.conflicts, &state.replaces)?;
     }
-    let state_path = paths::install_root()?
-        .join("state")
-        .join("packages")
-        .join(format!("{}.nuon", state.name));
     if state.requested == requested {
         if announce {
             report(&format!(
@@ -215,10 +220,7 @@ pub(crate) fn set_requested(name: &str, requested: bool, announce: bool) -> Resu
         }
         return Ok(false);
     }
-    state.requested = requested;
-    nuon_io::write_nuon(&state_path, &state.to_value())?;
-    // The lock records install reasons, so a flag change must refresh it.
-    lock::rebuild()?;
+    world.update(&state.name, |s| s.requested = requested);
     if announce {
         report(&format!(
             "{} marked as {}",
@@ -231,95 +233,4 @@ pub(crate) fn set_requested(name: &str, requested: bool, announce: bool) -> Resu
         ));
     }
     Ok(true)
-}
-
-/// The packages a generation actually surfaces: every requested or held package plus its
-/// transitive runtime dependency closure (edges resolved by name, bin, or capability, like the
-/// solver and the orphan sweep). Everything else in state — cached build dependencies, residue
-/// from a failed multi-package install — is *store-only*: kept for reuse, never linked into
-/// the profile, absent from the lockfile, and ignored by a bare `grm upgrade`.
-pub(crate) fn linked_set(states: &[PackageState]) -> HashSet<String> {
-    let mut linked: HashSet<String> = HashSet::new();
-    let mut queue: VecDeque<&PackageState> = states
-        .iter()
-        .filter(|state| state.requested || state.held)
-        .collect();
-    while let Some(state) = queue.pop_front() {
-        if !linked.insert(state.name.clone()) {
-            continue;
-        }
-        for dep in &state.runtime_deps {
-            if let Some(dep_state) = find_dep_state(states, dep)
-                && !linked.contains(&dep_state.name)
-            {
-                queue.push_back(dep_state);
-            }
-        }
-    }
-    linked
-}
-
-pub fn installed_states() -> Result<Vec<PackageState>> {
-    let state_dir = paths::install_root()?.join("state").join("packages");
-    if !state_dir.exists() {
-        return Ok(Vec::new());
-    }
-
-    let mut states = Vec::new();
-    for entry in fs::read_dir(&state_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("nuon") {
-            continue;
-        }
-        let state = PackageState::from_value(nuon_io::read_nuon(&path)?)
-            .with_context(|| format!("read package state {}", path.display()))?;
-        states.push(state);
-    }
-    states.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(states)
-}
-
-/// Installed package names mapped to their concrete versions, for the solver. Recorded state
-/// versions were validated as semver when written, so an unparsable one is skipped defensively.
-pub(crate) fn installed_versions() -> Result<BTreeMap<String, Version>> {
-    let mut versions = BTreeMap::new();
-    for state in installed_states()? {
-        if let Ok(version) = parse_version_relaxed(&state.version) {
-            versions.insert(state.name, version);
-        }
-    }
-    Ok(versions)
-}
-
-/// Like [`installed_versions`], but omitting packages whose installed bits have drifted from
-/// their current rune — same version, different store hash (see
-/// [`crate::store::closure::stale_installed`]). Handed to the solver, the omission makes it
-/// re-realize a drifted package at its current address instead of reusing it by version, so a
-/// rune edit propagates to the next install instead of being shadowed by version equality
-/// forever.
-pub(crate) fn installed_versions_current() -> Result<BTreeMap<String, Version>> {
-    let states = installed_states()?;
-    let stale: HashSet<String> = crate::store::closure::stale_installed(&states)
-        .into_iter()
-        .map(|stale| stale.name)
-        .collect();
-    let mut versions = BTreeMap::new();
-    for state in states {
-        if stale.contains(&state.name) {
-            // A transient/verbose line, not a result line: a stale package is only
-            // re-realized if this command's graph actually needs it (and a dry run realizes
-            // nothing) — promising "reinstalling" here would often be false. The build-dep
-            // path reports loudly at the point it really does reinstall.
-            status(&format!(
-                "{} {} drifted from its rune; not reusable",
-                state.name, state.version
-            ));
-            continue;
-        }
-        if let Ok(version) = parse_version_relaxed(&state.version) {
-            versions.insert(state.name, version);
-        }
-    }
-    Ok(versions)
 }

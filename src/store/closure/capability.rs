@@ -37,11 +37,9 @@ impl super::Walker {
         req: &VersionReq,
     ) -> Result<Option<String>> {
         if self.caps.is_none() {
-            let installed = install::installed_states()
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|state| Some((state.name, Version::parse(&state.version).ok()?)))
-                .collect();
+            let installed = install::InstalledWorld::load_default()
+                .map(|world| world.installed_versions())
+                .unwrap_or_default();
             self.caps = Some(CapabilityContext {
                 index: CapabilityIndex::build()?,
                 preferences: Preferences::load().unwrap_or_default().providers,

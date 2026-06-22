@@ -5,19 +5,15 @@
 //! generations symlink into it and `grm clean` reclaims it once nothing references it.
 
 use anyhow::{Context, Result, bail};
-use std::{
-    collections::{HashSet, VecDeque},
-    fs,
-};
+use std::collections::{HashSet, VecDeque};
 
 use crate::{
     model::PackageState,
-    nu::nuon_io,
-    profile,
     util::paths,
     util::progress::{accent, note, report, strong, warn},
 };
 
+use super::world::InstalledWorld;
 use super::*;
 
 pub fn remove(args: crate::cli::MutatePackagesArgs) -> Result<()> {
@@ -38,20 +34,21 @@ pub fn remove(args: crate::cli::MutatePackagesArgs) -> Result<()> {
     // and cannot pin a package into it; its dangling dep is re-resolved if it is ever needed
     // again. The whole named set leaves together, so removing a package alongside its last
     // dependent removes both.
-    let states = installed_states()?;
-    let linked = linked_set(&states);
+    let mut world = InstalledWorld::load_default()?;
+    let linked = world.linked_immut();
     let removal_set: HashSet<&str> = args.packages.iter().map(String::as_str).collect();
     let mut to_remove = Vec::new();
     let mut demoted = 0usize;
+    let states = world.to_states();
     for package in &args.packages {
-        let Some(target) = states.iter().find(|state| state.name == *package) else {
+        let Some(target) = world.get(package).cloned() else {
             bail!("package `{package}` is not installed");
         };
-        let dependents = dependents_outside(&states, target, &removal_set, &linked);
+        let dependents = dependents_outside(&states, &target, &removal_set, &linked);
         if dependents.is_empty() {
             to_remove.push(target.name.clone());
         } else {
-            set_requested(&target.name, false, false)?;
+            set_requested(&mut world, &target.name, false, false)?;
             warn(&format!(
                 "kept {package} — still required by {}; now a dependency, removed once nothing needs it",
                 dependents.join(", ")
@@ -62,16 +59,18 @@ pub fn remove(args: crate::cli::MutatePackagesArgs) -> Result<()> {
 
     let mut all_runtime_deps = Vec::new();
     for package in &to_remove {
-        let removed = remove_one(package)?;
+        let removed = remove_one(&mut world, package)?;
         report(&format!("removed {}", accent(package)));
         all_runtime_deps.extend(removed.runtime_deps);
     }
-    let swept = sweep_orphans(all_runtime_deps)?;
-    if !to_remove.is_empty() || !swept.is_empty() {
-        let states = installed_states()?;
-        profile::rebuild_and_activate(&states)?;
-    } else if demoted > 0 {
-        // Demotion only flips intent flags; the generation's contents are unchanged.
+    let swept = sweep_orphans(&mut world, all_runtime_deps)?;
+    if !to_remove.is_empty() || !swept.is_empty() || demoted > 0 {
+        let mut tx = Transaction::new();
+        world.commit(&mut tx)?;
+        finalize_state(&mut tx, &world)?;
+        tx.commit();
+    }
+    if to_remove.is_empty() && demoted > 0 {
         report("nothing removed");
     }
     Ok(())
@@ -80,8 +79,9 @@ pub fn remove(args: crate::cli::MutatePackagesArgs) -> Result<()> {
 /// `remove --dry-run`: the same target/demotion decisions a real removal makes, plus a pure
 /// simulation of the orphan cascade, printed as a plan with nothing touched.
 fn dry_run_remove(packages: &[String]) -> Result<()> {
-    let states = installed_states()?;
-    let linked = linked_set(&states);
+    let world = InstalledWorld::load_default()?;
+    let states = world.to_states();
+    let linked = world.linked_immut();
     let removal_set: HashSet<&str> = packages.iter().map(String::as_str).collect();
     let mut to_remove = Vec::new();
     println!("plan:");
@@ -179,41 +179,16 @@ fn dependents_outside<'a>(
 }
 
 /// Removes one installed package's state record and returns it. Each call is a complete
-/// transaction (state file plus lockfile) — callers chaining multiple removes do not need to
-/// coordinate rollback across them. The store directory is deliberately left in place: it is
-/// content-addressed and unreferenced state-less directories are never re-trusted, so it acts
-/// as a cache until `grm clean` collects it.
-pub(crate) fn remove_one(name: &str) -> Result<PackageState> {
-    let root = paths::install_root()?;
-    let state_path = root
-        .join("state")
-        .join("packages")
-        .join(format!("{name}.nuon"));
-
-    if !state_path.exists() {
-        bail!("package `{name}` is not installed");
-    }
-
-    let state = PackageState::from_value(nuon_io::read_nuon(&state_path)?)?;
-
-    // Removal mutates the same shared install state as an install, so stage every step against
-    // a transaction: a failure partway through restores the state record rather than leaving
-    // the package half-removed.
-    let mut tx = Transaction::new();
-
-    let state_bytes = fs::read(&state_path)?;
-    {
-        let state_path = state_path.clone();
-        tx.on_rollback(move || {
-            let _ = fs::write(&state_path, &state_bytes);
-        });
-    }
-    fs::remove_file(&state_path)?;
-
-    rebuild_lock(&mut tx)?;
-
-    tx.commit();
-    Ok(state)
+/// transaction for the state file — callers chaining multiple removes do not need to coordinate
+/// rollback across them. The lockfile is rebuilt once at the command boundary. The store directory
+/// is deliberately left in place: it is content-addressed and unreferenced state-less directories
+/// are never re-trusted, so it acts as a cache until `grm clean` collects it.
+/// Removes one installed package's state record from the in-memory world. The caller is
+/// responsible for committing the world; this only mutates the authoritative in-memory state.
+pub(crate) fn remove_one(world: &mut InstalledWorld, name: &str) -> Result<PackageState> {
+    world
+        .remove(name)
+        .with_context(|| format!("package `{name}` is not installed"))
 }
 
 /// Whether any *other* package in `others` lists `state` in its `runtime_deps` — by package
@@ -239,32 +214,37 @@ pub(crate) fn referenced_by_other<'a>(
 /// becomes orphaned mid-pass is itself a candidate. Explicitly requested and held packages are
 /// never swept. Build dependencies are not considered; once a package is installed they are no
 /// longer load-bearing for it. Returns the names removed.
-pub(crate) fn sweep_orphans(initial: Vec<String>) -> Result<Vec<String>> {
+/// Removes runtime dependencies left orphaned by a removal or upgrade — packages no other
+/// installed package still lists in its `runtime_deps`. Cascades transitively: a dep that
+/// becomes orphaned mid-pass is itself a candidate. Explicitly requested and held packages are
+/// never swept. Build dependencies are not considered; once a package is installed they are no
+/// longer load-bearing for it. Returns the names removed.
+pub(crate) fn sweep_orphans(
+    world: &mut InstalledWorld,
+    initial: Vec<String>,
+) -> Result<Vec<String>> {
     let mut queue: VecDeque<String> = initial.into();
     let mut seen: HashSet<String> = HashSet::new();
     let mut removed_names = Vec::new();
-    let mut states = installed_states()?;
     while let Some(name) = queue.pop_front() {
         if !seen.insert(name.clone()) {
             continue;
         }
-        let Some(name_state) = states.iter().find(|s| s.name == name) else {
+        let Some(state) = world.get(&name).cloned() else {
             continue;
         };
-        if name_state.requested || name_state.held {
+        if state.requested || state.held {
             continue;
         }
-        if referenced_by_other(states.iter(), name_state) {
+        if referenced_by_other(world.iter(), &state) {
             continue;
         }
-        let removed =
-            remove_one(&name).with_context(|| format!("remove unused dependency `{name}`"))?;
+        world.remove(&name);
         note(&format!("removed unused dependency {}", strong(&name)));
         removed_names.push(name);
-        for dep in removed.runtime_deps {
+        for dep in state.runtime_deps {
             queue.push_back(dep);
         }
-        states = installed_states()?;
     }
     Ok(removed_names)
 }
@@ -324,6 +304,30 @@ mod tests {
         assert!(referenced_by_other(states.iter(), &provider));
     }
 
+    fn linked_names(states: &[PackageState]) -> HashSet<String> {
+        let mut linked: HashSet<String> = HashSet::new();
+        let mut queue: std::collections::VecDeque<&PackageState> = states
+            .iter()
+            .filter(|state| state.requested || state.held)
+            .collect();
+        while let Some(state) = queue.pop_front() {
+            if !linked.insert(state.name.clone()) {
+                continue;
+            }
+            for dep in &state.runtime_deps {
+                if let Some(dep_state) = states.iter().find(|s| {
+                    s.name == *dep
+                        || s.bins.contains_key(dep)
+                        || s.provides.iter().any(|p| p == dep)
+                }) && !linked.contains(&dep_state.name)
+                {
+                    queue.push_back(dep_state);
+                }
+            }
+        }
+        linked
+    }
+
     #[test]
     fn dependents_outside_ignores_the_removal_set() {
         let states = vec![
@@ -331,7 +335,7 @@ mod tests {
             state("other", &["lib"], true, false),
             state("lib", &[], false, false),
         ];
-        let linked = linked_set(&states);
+        let linked = linked_names(&states);
         let everyone: HashSet<&str> = HashSet::new();
         assert_eq!(
             dependents_outside(&states, &states[2], &everyone, &linked),
@@ -354,7 +358,7 @@ mod tests {
             state("tool", &[], true, false),
             state("residue", &["tool"], false, false),
         ];
-        let linked = linked_set(&states);
+        let linked = linked_names(&states);
         assert!(!linked.contains("residue"), "residue must be store-only");
         let nobody: HashSet<&str> = HashSet::new();
         assert!(

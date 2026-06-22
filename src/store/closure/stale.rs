@@ -4,9 +4,7 @@
 //! runes would produce, so packages whose inputs changed are re-realized instead of silently
 //! reused.
 
-use crate::build;
-use crate::build::toolchain;
-use crate::install;
+use crate::{build, build::toolchain, install::InstalledWorld};
 
 /// Installed packages whose recorded address has drifted from the catalog: the rune currently
 /// resolvable for the same name *and version* produces a different store hash — its content,
@@ -29,7 +27,7 @@ pub struct StaleInstall {
     pub env_change: Option<String>,
 }
 
-pub fn stale_installed(states: &[crate::model::PackageState]) -> Vec<StaleInstall> {
+pub fn stale_installed(world: &InstalledWorld) -> Vec<StaleInstall> {
     let Ok(mut walker) = super::Walker::new() else {
         return Vec::new();
     };
@@ -38,15 +36,14 @@ pub fn stale_installed(states: &[crate::model::PackageState]) -> Vec<StaleInstal
     // without this a split member depending on it would be flagged drifted forever (re-realizing it
     // reproduces the same address). Non-held externals stay on the canonical `of_name` walk, so a
     // genuine rune edit to a group's external dep is still detected and rebuilds the group.
-    walker.resolved = install::installed_states()
-        .unwrap_or_default()
-        .into_iter()
+    walker.resolved = world
+        .iter()
         .filter(|state| state.held)
-        .map(|state| (state.name, state.store_hash))
+        .map(|state| (state.name.clone(), state.store_hash.clone()))
         .collect();
     let current_env = toolchain::build_env_id();
     let mut stale = Vec::new();
-    for state in states {
+    for state in world.iter() {
         // A hold pins the installed bits, not just the version: a held package is never
         // re-realized for drift. `grm unhold` lets the pending drift apply.
         if state.held {

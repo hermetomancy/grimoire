@@ -161,7 +161,9 @@ pub(crate) fn build_runes(
                 ))
             ));
             if all {
+                let mut world = install::InstalledWorld::load_default()?;
                 install::install_store_only(
+                    &mut world,
                     &archive,
                     None,
                     None,

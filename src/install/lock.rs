@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use crate::{
     catalog::sync_common,
-    install,
+    install::InstalledWorld,
     model::{AddendumState, LockFile, parse_version_relaxed},
     nu::nuon_io,
     tome,
@@ -49,17 +49,16 @@ pub fn lock_path() -> Result<PathBuf> {
         .join("grimoire.lock.nuon"))
 }
 
-/// Regenerates `grimoire.lock.nuon` from the current installed-package and tome state. Called
-/// after every install and removal so the lock always reflects committed state. Only the
-/// linked set is recorded: the lock is the blueprint of the user's environment, and
-/// store-only packages (cached build deps, residue) are reproducible scaffolding that
-/// `restore` would only sweep again.
-pub fn rebuild() -> Result<()> {
-    let states = install::installed_states()?;
-    let linked = install::linked_set(&states);
-    let packages = states
-        .into_iter()
+/// Regenerates `grimoire.lock.nuon` from the given installed-package and tome state. Call once
+/// at the end of a mutating command so the lock reflects committed state. Only the linked set is
+/// recorded: the lock is the blueprint of the user's environment, and store-only packages
+/// (cached build deps, residue) are reproducible scaffolding that `restore` would only sweep again.
+pub fn rebuild(world: &InstalledWorld) -> Result<()> {
+    let linked = world.linked_immut();
+    let packages = world
+        .iter()
         .filter(|state| linked.contains(&state.name))
+        .cloned()
         .collect();
     let lock = LockFile {
         target: paths::target_triple(),

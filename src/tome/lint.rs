@@ -171,11 +171,8 @@ pub(super) fn archive_linkage(archive: &Path, entry: &IndexEntry, strict: bool) 
     // The managed library universe: every lib an installed package provides, plus this package's
     // own libs (a binary may link a sibling lib in the same package). Anything a binary links that
     // is outside this set and the libc floor is resolved from the host.
-    let mut managed: HashSet<String> = crate::install::installed_states()
-        .unwrap_or_default()
-        .into_iter()
-        .flat_map(|state| state.libs)
-        .collect();
+    let world = crate::install::InstalledWorld::load_default().unwrap_or_default();
+    let mut managed: HashSet<String> = world.iter().flat_map(|state| state.libs.clone()).collect();
     managed.extend(entry.libs.iter().cloned());
 
     let file = std::fs::File::open(archive)?;

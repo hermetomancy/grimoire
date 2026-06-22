@@ -11,17 +11,20 @@ use crate::{
     util::paths,
 };
 
+use super::world::InstalledWorld;
 use super::*;
 
 /// Ensures every build dependency in `deps` is installed store-only (no lockfile, no generation).
 /// Missing deps are resolved through the solver and installed from substitutes or built from source.
 /// Already-installed packages are reused.
 pub(crate) fn ensure_build_deps_installed(deps: &[Dependency]) -> Result<()> {
+    let mut world = InstalledWorld::load_default()?;
     let mut building = HashSet::new();
-    ensure_build_deps_installed_inner(deps, &mut building)
+    ensure_build_deps_installed_inner(&mut world, deps, &mut building)
 }
 
 pub(crate) fn ensure_build_deps_installed_inner(
+    world: &mut InstalledWorld,
     deps: &[Dependency],
     building: &mut HashSet<String>,
 ) -> Result<()> {
@@ -29,8 +32,7 @@ pub(crate) fn ensure_build_deps_installed_inner(
         return Ok(());
     }
 
-    let mut installed = installed_versions()?;
-    let states = installed_states().unwrap_or_default();
+    let mut installed = world.installed_versions();
 
     // A build dep is *missing* when nothing installed satisfies it, and *stale* when the
     // satisfying install no longer matches its rune — same version, different store hash
@@ -40,15 +42,15 @@ pub(crate) fn ensure_build_deps_installed_inner(
     let mut missing: Vec<Dependency> = Vec::new();
     let mut satisfied: Vec<PackageState> = Vec::new();
     for dep in deps {
-        match find_dep_state(&states, &dep.name) {
+        match world.resolve_dep(&dep.name) {
             None => missing.push(dep.clone()),
             Some(state) => satisfied.push(state.clone()),
         }
     }
-    let stale_info = crate::store::closure::stale_installed(&satisfied);
+    let stale_info = crate::store::closure::stale_installed(world);
     let stale: HashSet<String> = stale_info.iter().map(|s| s.name.clone()).collect();
     for dep in deps {
-        if let Some(state) = find_dep_state(&states, &dep.name)
+        if let Some(state) = world.resolve_dep(&dep.name)
             && stale.contains(&state.name)
         {
             let cause = stale_info
@@ -74,7 +76,7 @@ pub(crate) fn ensure_build_deps_installed_inner(
         return Ok(());
     }
 
-    let mut plan = solve::resolve(&missing, &installed, None)?;
+    let mut plan = solve::resolve(&missing, &installed, &HashSet::new(), None)?;
     plan.compute_store_hashes()
         .with_context(|| "compute store hashes for build dependencies")?;
 
@@ -85,7 +87,7 @@ pub(crate) fn ensure_build_deps_installed_inner(
         // The recursion below installs the build deps of anything built from source, so a
         // later step in this plan may have landed since the plan was resolved; reuse it
         // instead of realizing it twice (same staleness as `Installer::reuse_realized_step`).
-        if step_already_realized(&step)? {
+        if step_already_realized(world, &step)? {
             installed.insert(step.name.clone(), step.version.clone());
             continue;
         }
@@ -102,32 +104,34 @@ pub(crate) fn ensure_build_deps_installed_inner(
                 &format!("archive `{}` {}", sub.entry.name, sub.entry.version),
             )?;
             install_store_only(
+                world,
                 &archive,
                 Some(sub.entry.archive_hash.clone()),
                 Some(&sub.store_hash),
                 InstallOrigin::BuildDep,
             )
         } else if let Some(rune) = &step.rune {
-            let store_hash = crate::store::closure::store_hash_for_rune(
-                rune,
-                &crate::store::closure::installed_resolved(),
-            )
-            .with_context(|| format!("cannot compute store hash for `{}`", step.name))?;
+            let store_hash =
+                crate::store::closure::store_hash_for_rune(rune, &world.store_hashes())
+                    .with_context(|| format!("cannot compute store hash for `{}`", step.name))?;
             let metadata =
                 build::read_rune_metadata(rune, build::tome_name_for_rune(rune)?.as_deref())?;
             // Reuse a verified cached build of these exact inputs instead of rebuilding.
             if let Some(archive) = cached_build_archive(&metadata, &store_hash) {
-                let installed_archive =
-                    install_store_only(&archive, None, Some(&store_hash), InstallOrigin::BuildDep)
-                        .with_context(|| {
-                            format!("store-only install `{}` {}", step.name, step.version)
-                        })?;
+                let installed_archive = install_store_only(
+                    world,
+                    &archive,
+                    None,
+                    Some(&store_hash),
+                    InstallOrigin::BuildDep,
+                )
+                .with_context(|| format!("store-only install `{}` {}", step.name, step.version))?;
                 installed.insert(installed_archive.name, installed_archive.version);
                 building.remove(&step.name);
                 continue;
             }
             let build_deps = build::effective_build_deps(rune, &metadata, &paths::target_triple())?;
-            ensure_build_deps_installed_inner(&build_deps, building)
+            ensure_build_deps_installed_inner(world, &build_deps, building)
                 .with_context(|| format!("install build dependencies for `{}`", step.name))?;
             let env = build::build_env_for_target(
                 build_dep_bin_dirs(&build_deps)?,
@@ -140,9 +144,10 @@ pub(crate) fn ensure_build_deps_installed_inner(
                 &paths::build_output_dir()?,
                 &env,
                 &store_hash,
-                &crate::store::closure::installed_resolved(),
+                &world.store_hashes(),
             )?;
             install_store_only(
+                world,
                 &result.primary.archive,
                 None,
                 Some(&result.primary.store_hash),
@@ -165,42 +170,6 @@ pub(crate) fn ensure_build_deps_installed_inner(
     Ok(())
 }
 
-/// Finds an installed package that satisfies the dependency `name`.
-/// First tries an exact package name match, then falls back to capability resolution: an
-/// installed package whose `bins` map contains `name` as a key, or that lists it in
-/// `provides`. With several installed providers the `grm prefer` choice wins, else the first
-/// by name (states are sorted) — the same order the solver and the closure walker use, so
-/// the linked set and `<DEP>_PREFIX` env vars agree with resolution.
-pub(crate) fn find_dep_state<'a>(
-    states: &'a [PackageState],
-    name: &str,
-) -> Option<&'a PackageState> {
-    if let Some(state) = states.iter().find(|state| state.name == name) {
-        return Some(state);
-    }
-    let providers: Vec<&PackageState> = states
-        .iter()
-        .filter(|state| state.bins.contains_key(name) || state.provides.iter().any(|p| p == name))
-        .collect();
-    match providers.len() {
-        0 => None,
-        1 => Some(providers[0]),
-        _ => {
-            let preferences = crate::model::preferences::Preferences::load().unwrap_or_default();
-            preferences
-                .providers
-                .get(name)
-                .and_then(|preferred| {
-                    providers
-                        .iter()
-                        .find(|state| &state.name == preferred)
-                        .copied()
-                })
-                .or(Some(providers[0]))
-        }
-    }
-}
-
 pub(crate) fn push_bin_dirs(dirs: &mut Vec<PathBuf>, state: &PackageState) {
     for path in state.bins.values() {
         let bin = PathBuf::from(&state.store_path).join(path);
@@ -215,10 +184,10 @@ pub(crate) fn push_bin_dirs(dirs: &mut Vec<PathBuf>, state: &PackageState) {
 }
 
 pub(crate) fn build_dep_bin_dirs(deps: &[Dependency]) -> Result<Vec<PathBuf>> {
-    let states = installed_states()?;
+    let world = InstalledWorld::load_default()?;
     let mut dirs = Vec::new();
     for dep in deps {
-        let Some(state) = find_dep_state(&states, &dep.name) else {
+        let Some(state) = world.resolve_dep(&dep.name) else {
             continue;
         };
         push_bin_dirs(&mut dirs, state);
@@ -230,7 +199,7 @@ pub(crate) fn build_dep_bin_dirs(deps: &[Dependency]) -> Result<Vec<PathBuf>> {
 /// can discover only declared dependency prefixes. The runtime sandbox clears host discovery
 /// variables first; these values are the managed search roots layered back in.
 pub(crate) fn build_dep_env_vars(deps: &[Dependency]) -> Result<Vec<(String, String)>> {
-    let states = installed_states()?;
+    let world = InstalledWorld::load_default()?;
     let mut prefixes = Vec::new();
     let mut pkg_config_paths = Vec::new();
     let mut cpaths = Vec::new();
@@ -239,7 +208,7 @@ pub(crate) fn build_dep_env_vars(deps: &[Dependency]) -> Result<Vec<(String, Str
     let mut prefix_vars = Vec::new();
 
     for dep in deps {
-        let Some(state) = find_dep_state(&states, &dep.name) else {
+        let Some(state) = world.resolve_dep(&dep.name) else {
             continue;
         };
         let store = PathBuf::from(&state.store_path);

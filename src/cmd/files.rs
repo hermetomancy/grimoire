@@ -24,9 +24,9 @@ pub fn files(args: PackageArg) -> Result<()> {
     if args.packages.is_empty() {
         bail!("specify at least one package to list files for");
     }
-    let states = install::installed_states()?;
+    let world = install::InstalledWorld::load_default()?;
     for package in &args.packages {
-        let Some(state) = states.iter().find(|state| state.name == *package) else {
+        let Some(state) = world.get(package) else {
             bail!("package `{package}` is not installed");
         };
         let store = PathBuf::from(&state.store_path);
@@ -52,11 +52,11 @@ pub fn files(args: PackageArg) -> Result<()> {
 pub fn owns(args: OwnsArgs) -> Result<()> {
     let path = fs::canonicalize(&args.path)
         .with_context(|| format!("path `{}` does not exist", args.path.display()))?;
-    let states = install::installed_states()?;
+    let world = install::InstalledWorld::load_default()?;
     let store_root = canonical_or_self(&paths::store_root()?);
 
     let owners: Vec<&PackageState> = if path.starts_with(&store_root) {
-        states
+        world
             .iter()
             .filter(|state| path.starts_with(canonical_or_self(Path::new(&state.store_path))))
             .collect()
@@ -110,7 +110,7 @@ pub(crate) fn capability_providers_detailed(
     let target = paths::target_triple();
     let mut providers: BTreeMap<String, (String, bool)> = BTreeMap::new();
 
-    for state in install::installed_states()? {
+    for state in install::InstalledWorld::load_default()?.iter() {
         if state.name == *capability
             || state.bins.contains_key(capability)
             || state.provides.contains(&capability.to_owned())

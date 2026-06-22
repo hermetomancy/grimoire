@@ -21,6 +21,7 @@ use crate::{
     util::progress::{accent, faint, report, status, success},
 };
 
+use super::world::InstalledWorld;
 use super::*;
 
 /// How a package reached the store, named in its result line so the user can tell a verified
@@ -60,13 +61,13 @@ impl InstallOrigin {
 /// realization and by requested-promotion, which links an already-present store-only
 /// package without re-realizing it.
 pub(crate) fn refuse_linked_conflicts(
-    states: &[PackageState],
+    world: &InstalledWorld,
     name: &str,
     conflicts: &[String],
     replaces: &[String],
 ) -> Result<()> {
-    let linked_names = linked_set(states);
-    if let Some(conflict) = states.iter().find(|state| {
+    let linked_names = world.linked_immut();
+    if let Some(conflict) = world.iter().find(|state| {
         state.name != name
             && linked_names.contains(&state.name)
             && !replaces.contains(&state.name)
@@ -100,9 +101,11 @@ pub(crate) struct InstalledArchive {
 /// A store directory *without* a matching state record is deliberately not reused: state is
 /// written only after hash verification inside a committed transaction, so an unrecorded
 /// directory cannot be re-trusted (AGENTS.md §10.1) and the step realizes normally.
-pub(crate) fn step_already_realized(step: &crate::solve::PlanStep) -> Result<bool> {
-    let states = installed_states()?;
-    let Some(state) = states.iter().find(|state| state.name == step.name) else {
+pub(crate) fn step_already_realized(
+    world: &InstalledWorld,
+    step: &crate::solve::PlanStep,
+) -> Result<bool> {
+    let Some(state) = world.get(&step.name) else {
         return Ok(false);
     };
     if state.version != step.version.to_string() {
@@ -116,27 +119,31 @@ pub(crate) fn step_already_realized(step: &crate::solve::PlanStep) -> Result<boo
     Ok(Path::new(&state.store_path).exists())
 }
 
-/// Verifies, extracts, and promotes the resolved archive into the install root, then rebuilds
-/// the lockfile. `expected_hash` is the hash the archive must match before it is read (from
-/// `--sha256` or a tome index entry); `None` skips the check, which only happens for a local
-/// archive installed without `--sha256`.
+/// Verifies, extracts, and promotes the resolved archive into the install root. The lockfile is
+/// rebuilt once at the command boundary by the caller. `expected_hash` is the hash the archive
+/// must match before it is read (from `--sha256` or a tome index entry); `None` skips the check,
+/// which only happens for a local archive installed without `--sha256`.
 pub(crate) fn install_archive(
+    world: &mut InstalledWorld,
     archive_path: &Path,
     expected_hash: Option<String>,
     expected_store_hash: Option<&str>,
     origin: InstallOrigin,
 ) -> Result<InstalledArchive> {
-    let installed = install_store_only(archive_path, expected_hash, expected_store_hash, origin)?;
-    let mut tx = Transaction::new();
-    rebuild_lock(&mut tx)?;
-    tx.commit();
-    Ok(installed)
+    install_store_only(
+        world,
+        archive_path,
+        expected_hash,
+        expected_store_hash,
+        origin,
+    )
 }
 
 /// Like [`install_archive`], but does **not** rebuild the lockfile or activate a generation.
 /// Used by `grm tome build` to make built packages available as build dependencies for subsequent
 /// builds without polluting the user's active profile.
 pub(crate) fn install_store_only(
+    world: &mut InstalledWorld,
     archive_path: &Path,
     expected_hash: Option<String>,
     expected_store_hash: Option<&str>,
@@ -208,14 +215,13 @@ pub(crate) fn install_store_only(
     );
     if linked {
         refuse_linked_conflicts(
-            &installed_states()?,
+            world,
             &metadata.name,
             &metadata.conflicts,
             &metadata.replaces,
         )?;
     }
 
-    let root = paths::install_root()?;
     let (package_dir, store_hash) = resolve_store_dir(&metadata, expected_store_hash)?;
 
     let staging_dir = transaction.path().join("package");
@@ -238,33 +244,27 @@ pub(crate) fn install_store_only(
     let replaced = promote_package(&mut tx, &staging_dir, &package_dir)?;
 
     status("writing package state");
-    write_state(
-        &mut tx,
-        &root,
+    let state = build_package_state(
         &metadata,
         &paths::target_triple(),
         &archive_hash,
         &store_hash,
         &package_dir.to_string_lossy(),
-    )?;
-
-    tx.commit();
-    if let Some(replaced) = replaced {
-        let _ = fs::remove_dir_all(replaced);
-    }
+        world.get(&metadata.name),
+    );
+    world.insert(state);
 
     // Supersession: remove every installed package this one replaces, in the same command,
     // carrying its requested/held intent onto the replacement so a rename never silently
-    // demotes or unpins anything. Each removal is its own committed transaction; orphaned
-    // deps of the replaced package are swept immediately. Store-only installs skip this —
-    // a cached build dep must not mutate the user's environment.
+    // demotes or unpins anything. State mutations accumulate on the world and commit with the
+    // package promotion in the transaction below. Store-only installs skip this — a cached
+    // build dep must not mutate the user's environment.
     if linked {
         for old in &metadata.replaces {
             if old == &metadata.name {
                 continue;
             }
-            let installed_old = installed_states()?.into_iter().find(|s| &s.name == old);
-            let Some(old_state) = installed_old else {
+            let Some(old_state) = world.get(old).cloned() else {
                 continue;
             };
             report(&format!(
@@ -272,15 +272,21 @@ pub(crate) fn install_store_only(
                 accent(&metadata.name),
                 faint(&format!("replaces {old}; removing {old}"))
             ));
-            let removed = remove_one(old)?;
+            let removed = remove_one(world, old)?;
             if old_state.requested || removed.requested {
-                set_requested(&metadata.name, true, false)?;
+                set_requested(world, &metadata.name, true, false)?;
             }
             if old_state.held || removed.held {
-                set_hold(&metadata.name, true, false)?;
+                set_hold(world, &metadata.name, true, false)?;
             }
-            sweep_orphans(removed.runtime_deps)?;
+            sweep_orphans(world, removed.runtime_deps)?;
         }
+    }
+
+    world.commit(&mut tx)?;
+    tx.commit();
+    if let Some(replaced) = replaced {
+        let _ = fs::remove_dir_all(replaced);
     }
 
     report(&format!(
@@ -463,33 +469,23 @@ pub(crate) fn backup_path(package_dir: &Path) -> Result<PathBuf> {
     Ok(package_dir.with_file_name(format!("{name}.grimoire-old")))
 }
 
-pub(crate) fn write_state(
-    tx: &mut Transaction,
-    root: &Path,
+/// Builds the [`PackageState`] that records a newly promoted package. Holds and install reasons
+/// are user intent that survives reinstalls and upgrades — preserve them from `prior` when one
+/// exists. A brand-new package starts as a dependency (`requested: false`); the install entry
+/// point promotes the roots the user actually named.
+pub(crate) fn build_package_state(
     metadata: &PackageMetadata,
     target: &str,
     archive_hash: &str,
     store_hash: &str,
     store_path: &str,
-) -> Result<()> {
-    let state_dir = root.join("state").join("packages");
-    fs::create_dir_all(&state_dir)?;
-    let state_path = state_dir.join(format!("{}.nuon", metadata.name));
+    prior: Option<&PackageState>,
+) -> PackageState {
+    let (previous_held, previous_requested) = prior
+        .map(|prior| (prior.held, prior.requested))
+        .unwrap_or((false, false));
 
-    // Holds and install reasons are user intent that survives reinstalls and upgrades —
-    // preserve them when we rewrite the state file. A brand-new package starts as a
-    // dependency (`requested: false`); the install entry point promotes the roots the user
-    // actually named. (Nothing else in the prior state is worth carrying forward; the
-    // install we just performed is the authoritative source for everything else.)
-    let (previous_held, previous_requested) = if state_path.exists() {
-        PackageState::from_value(nuon_io::read_nuon(&state_path)?)
-            .map(|prior| (prior.held, prior.requested))
-            .unwrap_or((false, false))
-    } else {
-        (false, false)
-    };
-
-    let state = PackageState {
+    PackageState {
         name: metadata.name.clone(),
         version: metadata.version.clone(),
         target: metadata.target.clone(),
@@ -524,30 +520,10 @@ pub(crate) fn write_state(
         conflicts: metadata.conflicts.clone(),
         replaces: metadata.replaces.clone(),
         build_env: crate::build::toolchain::build_env_id(),
-    };
-
-    // Capture the prior state so a later failure can restore it.
-    let previous = if state_path.exists() {
-        Some(fs::read(&state_path)?)
-    } else {
-        None
-    };
-    {
-        let state_path = state_path.clone();
-        tx.on_rollback(move || match &previous {
-            Some(bytes) => {
-                let _ = fs::write(&state_path, bytes);
-            }
-            None => {
-                let _ = fs::remove_file(&state_path);
-            }
-        });
     }
-
-    nuon_io::write_nuon(&state_path, &state.to_value())
 }
 
-pub(crate) fn rebuild_lock(tx: &mut Transaction) -> Result<()> {
+pub(crate) fn rebuild_lock(tx: &mut Transaction, world: &InstalledWorld) -> Result<()> {
     let lock_path = lock::lock_path()?;
     let previous = if lock_path.exists() {
         Some(fs::read(&lock_path)?)
@@ -565,7 +541,7 @@ pub(crate) fn rebuild_lock(tx: &mut Transaction) -> Result<()> {
             }
         });
     }
-    lock::rebuild()
+    lock::rebuild(world)
 }
 
 pub(crate) fn normalize_archive_path(path: &Path) -> String {

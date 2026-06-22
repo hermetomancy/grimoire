@@ -15,6 +15,7 @@ use anyhow::{Context, Result, bail};
 use std::{collections::BTreeSet, fs, path::PathBuf};
 
 use crate::{
+    install::InstalledWorld,
     model::PackageState,
     util::paths,
     util::progress::{note, status, strong, success, warn},
@@ -92,9 +93,9 @@ pub fn current_generation_id() -> Result<Option<u64>> {
 /// failure in between (a contested bin refusing the link) leaves state saying "installed"
 /// while the environment disagrees. The no-op install path checks this instead of trusting
 /// state alone, so re-running the command converges rather than reporting success.
-pub fn current_generation_is_stale(states: &[PackageState]) -> Result<bool> {
-    let linked_names = crate::install::linked_set(states);
-    let mut want: Vec<(&str, &str)> = states
+pub fn current_generation_is_stale(world: &InstalledWorld) -> Result<bool> {
+    let linked_names = world.linked_immut();
+    let mut want: Vec<(&str, &str)> = world
         .iter()
         .filter(|state| linked_names.contains(&state.name))
         .map(|state| (state.name.as_str(), state.store_path.as_str()))
@@ -124,8 +125,8 @@ pub fn current_generation_is_stale(states: &[PackageState]) -> Result<bool> {
 /// This is the install/remove/upgrade path: `state/packages/` is already the authoritative
 /// source the generation was built from, so activation only flips the symlink — no snapshot
 /// restore is needed (or wanted; it would pointlessly rewrite every state file).
-pub fn rebuild_and_activate(states: &[PackageState]) -> Result<u64> {
-    let id = create_generation(states)?;
+pub fn rebuild_and_activate(world: &InstalledWorld) -> Result<u64> {
+    let id = create_generation(world)?;
     switch_symlink(id)?;
     note(&format!(
         "generation {} is now current",
@@ -138,7 +139,7 @@ pub fn rebuild_and_activate(states: &[PackageState]) -> Result<u64> {
 ///
 /// The generation is built by symlinking profile-relevant files (`bin/`, `share/man/`, etc.)
 /// from each package's store path into the generation directory.
-pub fn create_generation(states: &[PackageState]) -> Result<u64> {
+pub fn create_generation(world: &InstalledWorld) -> Result<u64> {
     let profiles = profiles_dir()?;
     fs::create_dir_all(&profiles)?;
 
@@ -163,8 +164,8 @@ pub fn create_generation(states: &[PackageState]) -> Result<u64> {
     // state snapshot — so `grm clean` can reclaim their dirs once their state is swept,
     // instead of every retained generation pinning the cache forever. Activation preserves
     // live cache records untouched (see `restore_state_snapshot`).
-    let linked_names = crate::install::linked_set(states);
-    let linked: Vec<&PackageState> = states
+    let linked_names = world.linked_immut();
+    let linked: Vec<&PackageState> = world
         .iter()
         .filter(|state| linked_names.contains(&state.name))
         .collect();
@@ -246,6 +247,10 @@ pub fn activate_generation(id: u64) -> Result<bool> {
              switching the profile view only"
         ));
     }
+    let world = InstalledWorld::load_default()?;
+    let mut tx = crate::install::Transaction::new();
+    crate::install::rebuild_lock(&mut tx, &world)?;
+    tx.commit();
     if already_active {
         // Re-activating the current generation is the repair path for an interrupted
         // activation: the state restore above converges state with the symlink.
@@ -312,9 +317,9 @@ pub fn dry_run_activation(generation: Option<u64>) -> Result<()> {
         println!("  (no state snapshot — profile view would switch, state would be untouched)");
         return Ok(());
     };
-    let current: std::collections::BTreeMap<String, String> = crate::install::installed_states()?
-        .into_iter()
-        .map(|s| (s.name, s.version))
+    let current: std::collections::BTreeMap<String, String> = InstalledWorld::load_default()?
+        .iter()
+        .map(|s| (s.name.clone(), s.version.clone()))
         .collect();
     let target_set: std::collections::BTreeMap<String, String> =
         snapshot.into_iter().map(|s| (s.name, s.version)).collect();

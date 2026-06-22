@@ -19,9 +19,11 @@ impl Installer {
     /// Installs `name` and its transitive runtime dependencies. The solver picks a concrete
     /// version for every package in the graph and orders the plan so dependencies install first.
     pub(super) fn install_named(&mut self, name: &str) -> Result<String> {
+        let linked = self.world.linked_immut();
         let mut plan = solve::resolve(
             &[Dependency::any(name)],
             &self.installed,
+            &linked,
             self.pins.as_ref(),
         )?;
         plan.compute_store_hashes()
@@ -49,11 +51,9 @@ impl Installer {
             self.dry_run_source_root(&rune)?;
             return Ok(package.to_owned());
         }
-        let store_hash = crate::store::closure::store_hash_for_rune(
-            &rune,
-            &crate::store::closure::installed_resolved(),
-        )
-        .with_context(|| format!("compute store hash for source root `{package}`"))?;
+        let store_hash =
+            crate::store::closure::store_hash_for_rune(&rune, &self.world.store_hashes())
+                .with_context(|| format!("compute store hash for source root `{package}`"))?;
         let installed = self.build_and_install(&rune, &store_hash)?;
         let name = installed.name.clone();
         let runtime = installed.runtime_deps.clone();
@@ -74,6 +74,7 @@ impl Installer {
             return Ok(package.to_owned());
         }
         let installed = install_archive(
+            &mut self.world,
             &PathBuf::from(package),
             sha256,
             None,
@@ -110,7 +111,8 @@ impl Installer {
         if combined.is_empty() {
             return Ok(());
         }
-        let plan = solve::resolve(&combined, &self.installed, self.pins.as_ref())?;
+        let linked = self.world.linked_immut();
+        let plan = solve::resolve(&combined, &self.installed, &linked, self.pins.as_ref())?;
         print_plan_body(&plan);
         print_plan_consequences(&plan, &self.installed)?;
         Ok(())
@@ -138,7 +140,8 @@ impl Installer {
         if runtime.is_empty() {
             return Ok(());
         }
-        let plan = solve::resolve(&runtime, &self.installed, self.pins.as_ref())?;
+        let linked = self.world.linked_immut();
+        let plan = solve::resolve(&runtime, &self.installed, &linked, self.pins.as_ref())?;
         print_plan_body(&plan);
         print_plan_consequences(&plan, &self.installed)?;
         Ok(())
@@ -150,7 +153,8 @@ impl Installer {
         if deps.is_empty() {
             return Ok(());
         }
-        let mut plan = solve::resolve(deps, &self.installed, self.pins.as_ref())?;
+        let linked = self.world.linked_immut();
+        let mut plan = solve::resolve(deps, &self.installed, &linked, self.pins.as_ref())?;
         plan.compute_store_hashes()
             .with_context(|| "compute store hashes for build dependencies")?;
         self.execute_plan(plan)
@@ -197,7 +201,7 @@ impl Installer {
     /// overlapping build-dep graph (two packages sharing a dependency) realizes the shared
     /// package once per plan that listed it, rebuilding it from source each time.
     fn reuse_realized_step(&mut self, step: &PlanStep) -> Result<bool> {
-        if !step_already_realized(step)? {
+        if !step_already_realized(&self.world, step)? {
             return Ok(false);
         }
         status(&format!(
@@ -293,7 +297,7 @@ impl Installer {
     }
 
     /// Fetches, verifies, and installs a prebuilt substitute.
-    fn install_substitute(&self, sub: &Substitute) -> Result<InstalledArchive> {
+    fn install_substitute(&mut self, sub: &Substitute) -> Result<InstalledArchive> {
         // Fetch and checksum-verify the archive first: its detached signature is verified against
         // the fetched bytes, and for a remote binhost the `.minisig` is fetched over the same
         // transport (it has no local path to read).
@@ -318,6 +322,7 @@ impl Installer {
             )?;
         }
         install_archive(
+            &mut self.world,
             &archive,
             Some(sub.entry.archive_hash.clone()),
             Some(&sub.store_hash),
@@ -345,7 +350,7 @@ impl Installer {
         // A source root that conflicts with the linked environment must refuse *before*
         // the (potentially hour-long) build, not when the finished archive installs.
         refuse_linked_conflicts(
-            &installed_states()?,
+            &self.world,
             &metadata.name,
             &metadata.conflicts,
             &metadata.replaces,
@@ -373,6 +378,7 @@ impl Installer {
             // like any substitute's, so reusing it skips the whole rebuild safely.
             if let Some(archive) = cached_build_archive(&metadata, store_hash) {
                 return install_archive(
+                    &mut self.world,
                     &archive,
                     expected_hash,
                     Some(store_hash),
@@ -393,11 +399,12 @@ impl Installer {
                 &paths::build_output_dir()?,
                 &env,
                 store_hash,
-                &crate::store::closure::installed_resolved(),
+                &self.world.store_hashes(),
             )?;
             // Group siblings already landed in the build output dir; their own install
             // steps reuse them via `cached_build_archive` instead of rebuilding the group.
             install_archive(
+                &mut self.world,
                 &result.primary.archive,
                 expected_hash,
                 Some(&result.primary.store_hash),

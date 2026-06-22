@@ -53,10 +53,10 @@ fn list() -> Result<()> {
     }
 
     let mut contested: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let states = install::installed_states()?;
+    let world = install::InstalledWorld::load_default()?;
     // Only the linked set can contest: store-only packages never reach a generation.
-    let linked = install::linked_set(&states);
-    for state in states.iter().filter(|state| linked.contains(&state.name)) {
+    let linked = world.linked_immut();
+    for state in world.iter().filter(|state| linked.contains(&state.name)) {
         for bin_name in state.bins.keys() {
             contested
                 .entry(bin_name.clone())
@@ -127,8 +127,8 @@ fn unset(capability: &str, dry_run: bool) -> Result<()> {
     }
     // Refuse to clear a preference the active generation still depends on: without it the
     // next relink would fail on the contested bin, after the state change already landed.
-    let states = install::installed_states()?;
-    let claimants: Vec<&str> = states
+    let world = install::InstalledWorld::load_default()?;
+    let claimants: Vec<&str> = world
         .iter()
         .filter(|state| state.bins.contains_key(capability))
         .map(|state| state.name.as_str())
@@ -167,7 +167,7 @@ fn validate_provider(capability: &str, package: &str) -> Result<()> {
 /// How many installed packages claim `capability` as a bin — two or more means a
 /// preference change relinks the active generation.
 fn installed_claimants(capability: &str) -> Result<usize> {
-    Ok(install::installed_states()?
+    Ok(install::InstalledWorld::load_default()?
         .iter()
         .filter(|state| state.bins.contains_key(capability))
         .count())
@@ -177,14 +177,14 @@ fn installed_claimants(capability: &str) -> Result<usize> {
 /// installed packages — i.e. at least two installed packages claim the capability as a bin.
 /// A preference for not-yet-installed providers only steers future resolution; no relink.
 fn relink_if_contested(capability: &str) -> Result<()> {
-    let states = install::installed_states()?;
-    let claimants = states
+    let world = install::InstalledWorld::load_default()?;
+    let claimants = world
         .iter()
         .filter(|state| state.bins.contains_key(capability))
         .count();
     if claimants < 2 {
         return Ok(());
     }
-    profile::rebuild_and_activate(&states)?;
+    profile::rebuild_and_activate(&world)?;
     Ok(())
 }

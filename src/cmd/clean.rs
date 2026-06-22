@@ -30,15 +30,18 @@ pub fn clean(args: CleanArgs) -> Result<()> {
     // Orphaned dependency state first, so the generation built from the swept set is the one
     // garbage collection measures reachability against.
     status("sweeping unused dependencies");
-    let seeds: Vec<String> = install::installed_states()?
+    let mut world = install::InstalledWorld::load_default()?;
+    let seeds: Vec<String> = world
         .iter()
         .filter(|state| !state.requested && !state.held)
         .map(|state| state.name.clone())
         .collect();
-    let swept = install::sweep_orphans(seeds)?;
+    let swept = install::sweep_orphans(&mut world, seeds)?;
     if !swept.is_empty() {
-        let states = install::installed_states()?;
-        profile::rebuild_and_activate(&states)?;
+        let mut tx = install::Transaction::new();
+        world.commit(&mut tx)?;
+        install::finalize_state(&mut tx, &world)?;
+        tx.commit();
     }
 
     status("collecting old generations and unreferenced store paths");
@@ -92,7 +95,8 @@ pub fn clean(args: CleanArgs) -> Result<()> {
 /// in-memory copy of state, garbage collection through [`profile::plan_garbage`], and the
 /// caches by a size-only walk.
 fn dry_run_clean(args: &CleanArgs) -> Result<()> {
-    let states = install::installed_states()?;
+    let world = install::InstalledWorld::load_default()?;
+    let states = world.to_states();
     let seeds: Vec<String> = states
         .iter()
         .filter(|state| !state.requested && !state.held)

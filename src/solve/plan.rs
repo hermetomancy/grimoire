@@ -69,8 +69,8 @@ impl Plan {
 
         // Pre-populate with already-installed packages so reused dependencies
         // do not cause "missing computed hash" errors.
-        if let Ok(states) = crate::install::installed_states() {
-            for state in states {
+        if let Ok(world) = crate::install::InstalledWorld::load_default() {
+            for state in world.iter() {
                 computed.insert(state.name.clone(), state.store_hash.clone());
             }
         }

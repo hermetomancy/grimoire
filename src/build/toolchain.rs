@@ -152,8 +152,8 @@ fn compute_build_env_id() -> Option<String> {
 /// and deliberately do not define the boundary. Returns `None` when the wrappers are not
 /// installed or their store dir is gone — the host PATH probe is the boundary then.
 fn managed_boundary_id() -> Option<String> {
-    let states = crate::install::installed_states().ok()?;
-    let wrappers = states.iter().find(|s| s.name == "toolchain-wrappers")?;
+    let world = crate::install::InstalledWorld::load_default().ok()?;
+    let wrappers = world.get("toolchain-wrappers")?;
     let bin = Path::new(&wrappers.store_path).join("bin");
     managed_boundary_id_from(&bin)
 }

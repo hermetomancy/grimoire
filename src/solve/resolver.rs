@@ -20,26 +20,38 @@ const RESOLVE_STEP_BUDGET: usize = 500_000;
 
 /// Resolves `roots` (and their transitive runtime dependencies) into an ordered install plan.
 /// `installed` maps already-installed package names to their versions; an installed package that
-/// still satisfies a requirement is reused and produces no step.
+/// still satisfies a requirement is reused and produces no step. `linked` names the installed
+/// packages that are currently linked into the active profile — only linked packages block a new
+/// selection through `conflicts`; store-only installs do not.
 pub fn resolve(
     roots: &[Dependency],
     installed: &BTreeMap<String, Version>,
+    linked: &HashSet<String>,
     pins: Option<&Pins>,
 ) -> Result<Plan> {
     let source = TomeCandidates {
         target: paths::target_triple(),
     };
     let preferences = Preferences::load().unwrap_or_default();
-    resolve_with(roots, installed, pins, &source, &preferences.providers)
+    resolve_with(
+        roots,
+        installed,
+        linked,
+        pins,
+        &source,
+        &preferences.providers,
+    )
 }
 
 /// Resolution core, parameterized over where candidate versions come from so it can be exercised
 /// in isolation. Production resolution reads candidates from configured tomes; see [`resolve`].
 /// When `pins` is `Some`, candidate sets are filtered to the recorded version/hash, reproducing a
-/// locked install (and a package missing from the map is an error).
+/// locked install (and a package missing from the map is an error). `linked` names the installed
+/// packages currently linked into the active profile.
 pub(crate) fn resolve_with(
     roots: &[Dependency],
     installed: &BTreeMap<String, Version>,
+    linked: &HashSet<String>,
     pins: Option<&Pins>,
     source: &dyn CandidateSource,
     preferences: &BTreeMap<String, String>,
@@ -51,6 +63,7 @@ pub(crate) fn resolve_with(
     let capabilities = CapabilityIndex::build().context("build capability index")?;
     let mut resolver = Resolver {
         installed,
+        linked,
         pins,
         source,
         candidates: HashMap::new(),
@@ -86,10 +99,17 @@ pub(crate) struct ChosenNode {
     deps: Vec<String>,
     /// `None` when the package is already installed and reused (no install step emitted).
     route: Option<Route>,
+    /// Names this package must not coexist with, unless the relationship is superseded.
+    conflicts: Vec<String>,
+    /// Names exempted from the package's conflicts (this package supersedes them).
+    replaces: Vec<String>,
 }
 
 pub(crate) struct Resolver<'a> {
     installed: &'a BTreeMap<String, Version>,
+    /// Installed packages currently linked into the active profile. Only these participate in
+    /// conflict detection; store-only packages may coexist with anything.
+    linked: &'a HashSet<String>,
     pins: Option<&'a Pins>,
     source: &'a dyn CandidateSource,
     candidates: HashMap<String, Vec<Candidate>>,
@@ -189,18 +209,26 @@ impl Resolver<'_> {
         if let Some(version) = self.installed.get(name)
             && crate::model::req_matches(req, version)
         {
-            let mut trial = chosen.clone();
-            trial.insert(
-                name.clone(),
-                ChosenNode {
-                    version: version.clone(),
-                    deps: Vec::new(),
-                    route: None,
-                },
-            );
-            if self.resolve_list(rest, &mut trial).is_ok() {
-                *chosen = trial;
-                return Ok(());
+            let (conflicts, replaces) = self.installed_metadata(name, version);
+            if self
+                .conflicts_with_selection(name, &conflicts, &replaces, chosen)
+                .is_none()
+            {
+                let mut trial = chosen.clone();
+                trial.insert(
+                    name.clone(),
+                    ChosenNode {
+                        version: version.clone(),
+                        deps: Vec::new(),
+                        route: None,
+                        conflicts,
+                        replaces,
+                    },
+                );
+                if self.resolve_list(rest, &mut trial).is_ok() {
+                    *chosen = trial;
+                    return Ok(());
+                }
             }
         }
 
@@ -209,6 +237,19 @@ impl Resolver<'_> {
         let mut last_err = None;
         for candidate in candidates {
             if !crate::model::req_matches(req, &candidate.version) {
+                continue;
+            }
+            if let Some(other) = self.conflicts_with_selection(
+                name,
+                &candidate.conflicts,
+                &candidate.replaces,
+                chosen,
+            ) {
+                last_err = Some(
+                    anyhow::anyhow!("`{name}` conflicts with chosen `{other}`").context(format!(
+                        "no version of `{name}` satisfies `{req}` with its dependencies"
+                    )),
+                );
                 continue;
             }
             // Expand capability names to concrete providers *here*, so the chosen node's dep
@@ -235,6 +276,8 @@ impl Resolver<'_> {
                         conflicts: candidate.conflicts.clone(),
                         replaces: candidate.replaces.clone(),
                     }),
+                    conflicts: candidate.conflicts.clone(),
+                    replaces: candidate.replaces.clone(),
                 },
             );
             let mut next: Vec<Dependency> = rest.to_vec();
@@ -254,6 +297,73 @@ impl Resolver<'_> {
             }),
             None => bail!("no version of `{name}` satisfies `{req}`"),
         }
+    }
+
+    /// Returns the conflicts/replaces metadata for an installed package by matching it against the
+    /// candidate list. If the installed version has no candidate (local archive, orphaned metadata),
+    /// the empty lists are returned and the plan-time conflict gate remains the safety net.
+    fn installed_metadata(&mut self, name: &str, version: &Version) -> (Vec<String>, Vec<String>) {
+        if let Ok(candidates) = self.candidates_for(name)
+            && let Some(candidate) = candidates.iter().find(|c| &c.version == version)
+        {
+            return (candidate.conflicts.clone(), candidate.replaces.clone());
+        }
+        (Vec::new(), Vec::new())
+    }
+
+    /// Returns the name of an already-chosen or installed package that `name` conflicts with, or
+    /// `None` if the candidate can coexist with the current selection. A `replaces` declaration in
+    /// either direction exempts the pair from conflict, matching the install-time gates.
+    fn conflicts_with_selection(
+        &mut self,
+        name: &str,
+        conflicts: &[String],
+        replaces: &[String],
+        chosen: &BTreeMap<String, ChosenNode>,
+    ) -> Option<String> {
+        let replaces_set: HashSet<&str> = replaces.iter().map(String::as_str).collect();
+        // Candidate declares a conflict with a chosen package (unless candidate replaces it).
+        for other in conflicts {
+            if chosen.contains_key(other) && !replaces_set.contains(other.as_str()) {
+                return Some(other.clone());
+            }
+        }
+        // A chosen package declares a conflict with the candidate (unless it replaces candidate).
+        for (other_name, other) in chosen {
+            if other_name == name {
+                continue;
+            }
+            if other.conflicts.iter().any(|c| c == name)
+                && !other.replaces.iter().any(|r| r == name)
+            {
+                return Some(other_name.clone());
+            }
+        }
+        // Linked installed packages that are not part of this resolution still block a
+        // conflicting candidate; store-only installs never enter the environment, so they do not.
+        // The plan-time gate would refuse an unresolvable conflict anyway, so catching it here
+        // lets the resolver backtrack to a compatible alternative when one exists.
+        for other_name in self.linked {
+            if other_name == name {
+                continue;
+            }
+            if conflicts.iter().any(|c| c == other_name)
+                && !replaces_set.contains(other_name.as_str())
+            {
+                return Some(other_name.clone());
+            }
+            let Some(other_version) = self.installed.get(other_name) else {
+                continue;
+            };
+            let (other_conflicts, other_replaces) =
+                self.installed_metadata(other_name, other_version);
+            if other_conflicts.iter().any(|c| c == name)
+                && !other_replaces.iter().any(|r| r == name)
+            {
+                return Some(other_name.clone());
+            }
+        }
+        None
     }
 
     fn candidates_for(&mut self, name: &str) -> Result<Vec<Candidate>> {

@@ -13,7 +13,7 @@ use crate::{
     build,
     cli::{PackageArg, QueryArg, UpgradeArgs},
     install,
-    model::{PackageMetadata, PackageState, parse_version_relaxed},
+    model::{PackageMetadata, PackageState},
     nu::runtime::EmbeddedNuRuntime,
     solve, tome,
     util::paths,
@@ -69,12 +69,12 @@ pub fn info(args: PackageArg) -> Result<()> {
         bail!("specify at least one package to query");
     }
 
-    let installed_states = install::installed_states()?;
+    let world = install::InstalledWorld::load_default()?;
     let available_packages = tome_packages()?;
     let mut first = true;
 
     for package in &args.packages {
-        let installed = installed_states.iter().find(|state| state.name == *package);
+        let installed = world.get(package);
         let available: Vec<_> = available_packages
             .iter()
             .filter(|p| p.metadata.name == *package)
@@ -109,23 +109,16 @@ pub fn upgrade(args: UpgradeArgs) -> Result<()> {
         tome::update_all_configured().context("update configured tomes before upgrade")?;
     }
 
-    let states = install::installed_states()?;
-    let held: BTreeMap<String, bool> = states
+    let world = install::InstalledWorld::load_default()?;
+    let held: BTreeMap<String, bool> = world
         .iter()
         .map(|state| (state.name.clone(), state.held))
         .collect();
     // A bare `grm upgrade` covers the user's environment — the linked set — not the
     // store-only cache: nobody asked for a cached build dep, so nobody asked for a newer
     // one. Naming a store-only package explicitly still upgrades it.
-    let linked = install::linked_set(&states);
-    let installed: BTreeMap<String, Version> = states
-        .into_iter()
-        .filter_map(|state| {
-            parse_version_relaxed(&state.version)
-                .ok()
-                .map(|v| (state.name, v))
-        })
-        .collect();
+    let linked = world.linked_immut();
+    let installed: BTreeMap<String, Version> = world.installed_versions();
 
     let explicit = !args.packages.is_empty();
     let targets = if explicit {
@@ -266,12 +259,8 @@ fn collect_upgrades(
     // content address drifted (rune edited, dependency re-addressed, build environment
     // changed). Upgrade is the convergence command, so drifted packages are selected for
     // re-realization at the same version — and never reported "up to date" while stale.
-    let states = crate::install::installed_states()?;
-    let targeted: Vec<crate::model::PackageState> = states
-        .into_iter()
-        .filter(|state| targets.contains(&state.name))
-        .collect();
-    let stale_info = crate::store::closure::stale_installed(&targeted);
+    let world = crate::install::InstalledWorld::load_default()?;
+    let stale_info = crate::store::closure::stale_installed(&world);
     let drifted: std::collections::HashSet<String> =
         stale_info.iter().map(|stale| stale.name.clone()).collect();
     // When the drift comes from the build environment, every affected package shares the

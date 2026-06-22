@@ -37,7 +37,7 @@ pub use orphans::*;
 pub(crate) use realize::*;
 pub use state::*;
 pub(crate) use transaction::*;
-pub use world::*;
+pub use world::InstalledWorld;
 
 /// Drives one top-level install and its dependency tree. `installed` maps already-installed
 /// package names to their versions; it is read from disk once up front, handed to the solver so
@@ -59,10 +59,18 @@ struct Installer {
     /// When true, every install path stops after planning and prints the plan to stdout —
     /// no fetches, no builds, no state writes. Wired from `--dry-run` / `--explain`.
     dry_run: bool,
+    /// Authoritative in-memory installed state for this command. Mutations accumulate here and
+    /// commit at the single transaction boundary in [`finalize`].
+    world: InstalledWorld,
 }
 
 impl Installer {
-    fn new(installed: BTreeMap<String, Version>, pins: Option<solve::Pins>, dry_run: bool) -> Self {
+    fn new(
+        installed: BTreeMap<String, Version>,
+        pins: Option<solve::Pins>,
+        dry_run: bool,
+        world: InstalledWorld,
+    ) -> Self {
         Self {
             installed,
             pins,
@@ -70,19 +78,31 @@ impl Installer {
             installed_now: Vec::new(),
             notes: Vec::new(),
             dry_run,
+            world,
         }
     }
 
     /// Builds a new generation from the current installed state and atomically activates it.
     /// Called once after all install/remove/upgrade operations complete.
-    fn finalize(&self) -> Result<()> {
+    fn finalize(&mut self) -> Result<()> {
         if self.dry_run {
             return Ok(());
         }
-        let states = installed_states()?;
-        profile::rebuild_and_activate(&states)?;
+        let mut tx = Transaction::new();
+        self.world.commit(&mut tx)?;
+        finalize_state(&mut tx, &self.world)?;
+        tx.commit();
         Ok(())
     }
+}
+
+/// Single commit point for the user-visible environment. Rebuilds the lockfile and activates
+/// a generation from the authoritative installed state. Call exactly once at the end of every
+/// mutating command, after all `state/packages/*.nuon` changes have landed.
+pub fn finalize_state(tx: &mut Transaction, world: &InstalledWorld) -> Result<()> {
+    realize::rebuild_lock(tx, world)?;
+    profile::rebuild_and_activate(world)?;
+    Ok(())
 }
 
 /// Whether an install argument denotes a local archive *file* rather than a package name to
@@ -115,6 +135,7 @@ pub fn install(args: InstallArgs) -> Result<()> {
         bail!("--sha256 is only valid when installing a single local archive");
     }
 
+    let world = InstalledWorld::load_default()?;
     let pins = if args.locked {
         enforce_locked_tome_commits(&lock::lock_path()?)?;
         Some(load_pins()?)
@@ -123,12 +144,12 @@ pub fn install(args: InstallArgs) -> Result<()> {
     };
     // Under `--locked`, only reuse an installed package when it matches its pin; an installed
     // version that drifted from the lock must be re-resolved to the pinned one.
-    let mut installed = installed_versions_current()?;
+    let mut installed = world.installed_versions_current()?;
     if let Some(pins) = &pins {
         installed.retain(|name, version| pins.get(name).is_some_and(|pin| &pin.version == version));
     }
 
-    let mut installer = Installer::new(installed, pins, args.dry_run);
+    let mut installer = Installer::new(installed, pins, args.dry_run, world);
 
     // Announce implied work before the first fetch: a one-line install can pull a long
     // tail of missing or drifted build deps, and the user deserves the count (and the
@@ -185,7 +206,7 @@ pub fn install(args: InstallArgs) -> Result<()> {
     // fixed by re-running the install.
     let mut promoted = false;
     for name in &root_names {
-        promoted |= set_requested(name, true, false)?;
+        promoted |= set_requested(&mut installer.world, name, true, false)?;
     }
 
     // A resolve that reuses an already-satisfying install produces no steps, so nothing above
@@ -200,7 +221,7 @@ pub fn install(args: InstallArgs) -> Result<()> {
             // its package transactions and then fail to build the generation (e.g. a contested
             // bin refusing the link). Relink in that case so the re-run converges — or repeats
             // the link error — instead of reporting success over a stale environment.
-            if !profile::current_generation_is_stale(&installed_states()?)? {
+            if !profile::current_generation_is_stale(&installer.world)? {
                 report(&format!("{names} already installed and up to date"));
                 return Ok(());
             }
@@ -244,6 +265,7 @@ pub fn restore(args: crate::cli::RestoreArgs) -> Result<()> {
     if let Some(msg) = paths::fixed_store_setup_instructions() {
         bail!("{msg}");
     }
+    let world = InstalledWorld::load_default()?;
     let lock_file = match &args.lockfile {
         Some(path) => path.clone(),
         None => lock::lock_path()?,
@@ -279,9 +301,9 @@ pub fn restore(args: crate::cli::RestoreArgs) -> Result<()> {
     }
 
     // Reuse an installed package only when it already matches its pin, like `--locked`.
-    let mut installed = installed_versions_current()?;
+    let mut installed = world.installed_versions_current()?;
     installed.retain(|name, version| pins.get(name).is_some_and(|pin| &pin.version == version));
-    let mut installer = Installer::new(installed, Some(pins), args.dry_run);
+    let mut installer = Installer::new(installed, Some(pins), args.dry_run, world);
     for name in &requested {
         installer
             .install_named(name)
@@ -291,7 +313,7 @@ pub fn restore(args: crate::cli::RestoreArgs) -> Result<()> {
         // The lock is the blueprint: after the per-package plans, say what falls outside it.
         let recorded: std::collections::HashSet<&str> =
             packages.iter().map(|pkg| pkg.name.as_str()).collect();
-        let states = installed_states()?;
+        let states = installer.world.to_states();
         let strays: Vec<String> = states
             .iter()
             .filter(|state| !recorded.contains(state.name.as_str()))
@@ -307,19 +329,19 @@ pub fn restore(args: crate::cli::RestoreArgs) -> Result<()> {
 
     // Restore the recorded intent for every locked package that is now installed, then sweep
     // whatever the lock does not account for as a dependency.
-    let states = installed_states()?;
     for pkg in &packages {
-        if states.iter().any(|state| state.name == pkg.name) {
-            set_requested(&pkg.name, pkg.requested, false)?;
-            set_hold(&pkg.name, pkg.held, false)?;
+        if installer.world.contains(&pkg.name) {
+            set_requested(&mut installer.world, &pkg.name, pkg.requested, false)?;
+            set_hold(&mut installer.world, &pkg.name, pkg.held, false)?;
         }
     }
-    let seeds: Vec<String> = installed_states()?
+    let seeds: Vec<String> = installer
+        .world
         .iter()
         .filter(|state| !state.requested && !state.held)
         .map(|state| state.name.clone())
         .collect();
-    sweep_orphans(seeds)?;
+    sweep_orphans(&mut installer.world, seeds)?;
 
     installer.finalize()?;
     installer.report_notes();
@@ -385,25 +407,26 @@ pub fn upgrade_packages(names: &[String]) -> Result<()> {
     if let Some(msg) = paths::fixed_store_setup_instructions() {
         bail!("{msg}");
     }
+    let world = InstalledWorld::load_default()?;
     // An upgrade can drop dependency edges (the new version no longer needs a lib); capture
     // the pre-upgrade edges so the stale ones can be swept once the upgrades land.
-    let pre_upgrade_deps: Vec<String> = installed_states()?
+    let pre_upgrade_deps: Vec<String> = world
         .iter()
         .filter(|state| names.contains(&state.name))
         .flat_map(|state| state.runtime_deps.iter().cloned())
         .collect();
-    let mut installed = installed_versions_current()?;
+    let mut installed = world.installed_versions_current()?;
     for name in names {
         installed.remove(name);
     }
-    let mut installer = Installer::new(installed, None, false);
+    let mut installer = Installer::new(installed, None, false, world);
     for name in names {
         installer
             .install_named(name)
             .with_context(|| format!("upgrade `{name}`"))?;
     }
     if installer.installed_now.is_empty() {
-        if !profile::current_generation_is_stale(&installed_states()?)? {
+        if !profile::current_generation_is_stale(&installer.world)? {
             report("all requested packages are already up to date");
             return Ok(());
         }
@@ -415,7 +438,7 @@ pub fn upgrade_packages(names: &[String]) -> Result<()> {
     // the removals. Each swept dependency is its own committed transaction; a failure
     // mid-sweep leaves the upgrades committed and the sweep partial, same containment as
     // `remove`.
-    sweep_orphans(pre_upgrade_deps)?;
+    sweep_orphans(&mut installer.world, pre_upgrade_deps)?;
     installer.finalize()?;
     installer.report_notes();
     Ok(())
@@ -496,13 +519,17 @@ fn settle_capability_intent(name: &str, dry_run: bool, locked: bool) -> Result<(
     Ok(())
 }
 
-/// Plan-time mirror of the realize-time conflict gate: refuses the plan while a *linked*
-/// installed package (or another planned step) conflicts with a step, before anything is
-/// fetched or built. Packages a step replaces are exempt — the migration removes them in
-/// the same transaction. Store-only packages never conflict (cache, not environment).
+/// Plan-time safety net for the realize-time conflict gate. The resolver now avoids most
+/// conflicting selections by backtracking, but this gate remains for cases the resolver's
+/// metadata is incomplete (e.g. an installed package whose rune is no longer available).
+/// It refuses the plan while a *linked* installed package (or another planned step) conflicts
+/// with a step, before anything is fetched or built. Packages a step replaces are exempt —
+/// the migration removes them in the same transaction. Store-only packages never conflict
+/// (cache, not environment).
 fn refuse_plan_conflicts(plan: &Plan) -> Result<()> {
-    let states = installed_states()?;
-    let mut linked = linked_set(&states);
+    let world = InstalledWorld::load_default()?;
+    let states = world.to_states();
+    let mut linked = world.linked_immut();
     let replaced: std::collections::HashSet<&str> = plan
         .steps
         .iter()
@@ -564,8 +591,8 @@ fn print_plan_body(plan: &Plan) {
 /// packages a step replaces, and the transitive build-dependency closure of every step that
 /// may build from source (installed store-only, never linked).
 fn print_plan_consequences(plan: &Plan, installed: &BTreeMap<String, Version>) -> Result<()> {
-    let states = installed_states()?;
-    let linked = linked_set(&states);
+    let world = InstalledWorld::load_default()?;
+    let linked = world.linked_immut();
     for step in &plan.steps {
         for old in &step.replaces {
             if old != &step.name && linked.contains(old) {
@@ -609,7 +636,7 @@ fn build_dep_closure(
         if build_deps.is_empty() {
             continue;
         }
-        let dep_plan = solve::resolve(&build_deps, installed, None)
+        let dep_plan = solve::resolve(&build_deps, installed, &HashSet::new(), None)
             .with_context(|| format!("plan build dependencies for `{for_name}`"))?;
         for dep_step in dep_plan.steps {
             if !seen.insert(dep_step.name.clone()) {
@@ -631,7 +658,8 @@ fn build_dep_closure(
 /// user 40 minutes in. Best-effort by design — callers drop the preview on any error
 /// rather than failing the operation over an announcement.
 pub fn estimate_extra_realizations(names: &[String]) -> Result<Vec<String>> {
-    let mut installed = installed_versions_current()?;
+    let world = InstalledWorld::load_default()?;
+    let mut installed = world.installed_versions_current()?;
     for name in names {
         installed.remove(name); // upgrades re-resolve the roots themselves
     }
@@ -639,7 +667,8 @@ pub fn estimate_extra_realizations(names: &[String]) -> Result<Vec<String>> {
         .iter()
         .map(|name| crate::model::Dependency::any(name.clone()))
         .collect();
-    let plan = solve::resolve(&deps, &installed, None)?;
+    let linked = world.linked_immut();
+    let plan = solve::resolve(&deps, &installed, &linked, None)?;
     Ok(build_dep_closure(&plan.steps, &installed)?
         .into_iter()
         .map(|(_, step)| step.name)

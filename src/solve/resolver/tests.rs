@@ -24,13 +24,22 @@ fn dep(name: &str, req: &str) -> Dependency {
 
 /// A source candidate at `version` requiring `deps`; sorting still keeps highest first.
 fn cand(version: &str, deps: &[Dependency]) -> Candidate {
+    cand_with_meta(version, deps, &[], &[])
+}
+
+fn cand_with_meta(
+    version: &str,
+    deps: &[Dependency],
+    conflicts: &[&str],
+    replaces: &[&str],
+) -> Candidate {
     Candidate {
         version: parse_version_relaxed(version).expect("version"),
         runtime: deps.to_vec(),
         rune: Some(PathBuf::from(format!("{version}.rn"))),
         substitutes: Vec::new(),
-        conflicts: Vec::new(),
-        replaces: Vec::new(),
+        conflicts: conflicts.iter().map(|s| s.to_string()).collect(),
+        replaces: replaces.iter().map(|s| s.to_string()).collect(),
     }
 }
 
@@ -45,7 +54,8 @@ fn source(entries: &[(&str, Vec<Candidate>)]) -> FakeCandidates {
 
 fn plan(roots: &[Dependency], src: &FakeCandidates) -> Result<Vec<(String, String)>> {
     let installed = BTreeMap::new();
-    let plan = resolve_with(roots, &installed, None, src, &BTreeMap::new())?;
+    let linked = HashSet::new();
+    let plan = resolve_with(roots, &installed, &linked, None, src, &BTreeMap::new())?;
     Ok(plan
         .steps
         .into_iter()
@@ -68,8 +78,10 @@ fn expand(
             providers.iter().map(|p| p.to_string()).collect(),
         )]),
     };
+    let linked = HashSet::new();
     let mut resolver = Resolver {
         installed,
+        linked: &linked,
         pins: None,
         source: &src,
         candidates: HashMap::new(),
@@ -103,8 +115,10 @@ fn pathological_backtracking_aborts_within_budget() {
     ]);
     let installed = BTreeMap::new();
     let preferences = BTreeMap::new();
+    let linked = HashSet::new();
     let mut resolver = Resolver {
         installed: &installed,
+        linked: &linked,
         pins: None,
         source: &src,
         candidates: HashMap::new(),
@@ -261,9 +275,11 @@ fn reuses_installed_version_without_emitting_step() {
     let src = source(&[("lib", vec![cand("1.0.0", &[]), cand("1.1.0", &[])])]);
     let mut installed = BTreeMap::new();
     installed.insert("lib".to_owned(), parse_version_relaxed("1.0.0").unwrap());
+    let linked = HashSet::new();
     let resolved = resolve_with(
         &[dep("lib", ">=1.0")],
         &installed,
+        &linked,
         None,
         &src,
         &BTreeMap::new(),
@@ -299,9 +315,11 @@ fn pins_constrain_resolution_to_locked_version() {
             archive_hash: String::new(),
         },
     );
+    let linked = HashSet::new();
     let resolved = resolve_with(
         &[dep("app", ">=1.0")],
         &installed,
+        &linked,
         Some(&pins),
         &src,
         &BTreeMap::new(),
@@ -322,9 +340,11 @@ fn locked_install_rejects_unpinned_package() {
     let src = source(&[("app", vec![cand("1.0.0", &[])])]);
     let installed = BTreeMap::new();
     let pins = Pins::new();
+    let linked = HashSet::new();
     let err = match resolve_with(
         &[dep("app", ">=1.0")],
         &installed,
+        &linked,
         Some(&pins),
         &src,
         &BTreeMap::new(),
@@ -451,5 +471,147 @@ fn bare_requirement_resolves_a_prerelease_only_package() {
     assert_eq!(
         resolved,
         vec![("grimoire".to_owned(), "0.1.0-dev.20260612".to_owned())]
+    );
+}
+
+#[test]
+fn backtracks_on_conflicting_newest_version() {
+    // `app` 2.0 conflicts with `lib`, but `app` 1.0 does not. Resolution must backtrack from
+    // the higher version to the compatible one instead of producing a conflicting plan.
+    let src = source(&[
+        (
+            "app",
+            vec![
+                cand_with_meta("2.0.0", &[dep("base", ">=1.0")], &["lib"], &[]),
+                cand("1.0.0", &[dep("base", ">=1.0")]),
+            ],
+        ),
+        ("lib", vec![cand("1.0.0", &[])]),
+        ("base", vec![cand("1.0.0", &[])]),
+    ]);
+    let steps = plan(&[dep("app", ">=1.0"), dep("lib", ">=1.0")], &src).expect("plan");
+    assert!(
+        steps.contains(&("app".to_owned(), "1.0.0".to_owned())),
+        "resolver should backtrack to the non-conflicting app 1.0.0: {steps:?}"
+    );
+    assert!(
+        steps.contains(&("lib".to_owned(), "1.0.0".to_owned())),
+        "lib should still be selected: {steps:?}"
+    );
+}
+
+#[test]
+fn backtracks_when_dependency_conflicts_with_chosen_package() {
+    // `app` 2.0 depends on `helper` >=2.0, but `helper` 2.0 conflicts with `stable` which is
+    // already required by another root. `helper` 1.0 is compatible, so app must downgrade.
+    let src = source(&[
+        (
+            "app",
+            vec![
+                cand("2.0.0", &[dep("helper", ">=2.0")]),
+                cand("1.0.0", &[dep("helper", ">=1.0, <2.0")]),
+            ],
+        ),
+        (
+            "helper",
+            vec![
+                cand_with_meta("2.0.0", &[], &["stable"], &[]),
+                cand("1.5.0", &[]),
+            ],
+        ),
+        ("stable", vec![cand("1.0.0", &[])]),
+    ]);
+    let steps = plan(&[dep("app", ">=1.0"), dep("stable", ">=1.0")], &src).expect("plan");
+    assert!(
+        steps.contains(&("app".to_owned(), "1.0.0".to_owned())),
+        "app should backtrack to 1.0.0: {steps:?}"
+    );
+    assert!(
+        steps.contains(&("helper".to_owned(), "1.5.0".to_owned())),
+        "helper 1.5.0 should be selected: {steps:?}"
+    );
+    assert!(
+        steps.contains(&("stable".to_owned(), "1.0.0".to_owned())),
+        "stable should remain selected: {steps:?}"
+    );
+}
+
+#[test]
+fn replaces_exempts_conflicting_pair() {
+    // `app` 2.0 both conflicts with and replaces `legacy`, so they may coexist.
+    let src = source(&[
+        (
+            "app",
+            vec![
+                cand_with_meta("2.0.0", &[], &["legacy"], &["legacy"]),
+                cand("1.0.0", &[]),
+            ],
+        ),
+        ("legacy", vec![cand("1.0.0", &[])]),
+    ]);
+    let steps = plan(&[dep("app", ">=2.0"), dep("legacy", ">=1.0")], &src).expect("plan");
+    assert!(
+        steps.contains(&("app".to_owned(), "2.0.0".to_owned())),
+        "app 2.0.0 should be selected because it replaces legacy: {steps:?}"
+    );
+}
+
+#[test]
+fn installed_reuse_falls_back_when_conflicts_with_resolution() {
+    // `legacy` is installed at 1.0.0 and conflicts with the newest `app` 2.0. A non-conflicting
+    // version of `app` exists, so the resolver should pick it instead of reusing the installed
+    // `legacy` (which would be refused by the plan-time gate).
+    let src = source(&[
+        (
+            "app",
+            vec![
+                cand_with_meta("2.0.0", &[], &["legacy"], &[]),
+                cand("1.0.0", &[]),
+            ],
+        ),
+        ("legacy", vec![cand("1.0.0", &[])]),
+    ]);
+    let mut installed = BTreeMap::new();
+    installed.insert("legacy".to_owned(), Version::new(1, 0, 0));
+    let linked: HashSet<String> = HashSet::from(["legacy".to_owned()]);
+    let resolved = resolve_with(
+        &[dep("app", ">=1.0"), dep("legacy", ">=1.0")],
+        &installed,
+        &linked,
+        None,
+        &src,
+        &BTreeMap::new(),
+    )
+    .expect("plan");
+    let steps: Vec<_> = resolved
+        .steps
+        .into_iter()
+        .map(|s| (s.name, s.version.to_string()))
+        .collect();
+    assert!(
+        steps.contains(&("app".to_owned(), "1.0.0".to_owned())),
+        "app should backtrack to the version that does not conflict with installed legacy: {steps:?}"
+    );
+}
+
+#[test]
+fn unresolved_conflict_reports_conflict_message() {
+    // Every version of `app` conflicts with `stable`, and both are required. The error should
+    // mention the conflict rather than a generic "no version satisfies".
+    let src = source(&[
+        (
+            "app",
+            vec![
+                cand_with_meta("2.0.0", &[], &["stable"], &[]),
+                cand_with_meta("1.0.0", &[], &["stable"], &[]),
+            ],
+        ),
+        ("stable", vec![cand("1.0.0", &[])]),
+    ]);
+    let err = plan(&[dep("app", ">=1.0"), dep("stable", ">=1.0")], &src).expect_err("should fail");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("conflicts with chosen"),
+        "expected a conflict-specific error, got: {msg}"
     );
 }

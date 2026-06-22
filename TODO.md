@@ -5,25 +5,8 @@ not here. When everything below is done and reflected in the design doc, delete 
 
 ## In progress / next
 
-- **Verify the toolchain cleanup + build-scratch hardening on a musl host** (landed, awaiting a
-  reachable box). Pushed: tome-core `139d1f8` retired the per-rune musl linker wrappers
-  (grimoire.rn's deleted; rust.rn's slimmed to libc++ `-L` + the in-store `--dynamic-linker`) and
-  re-pinned grimoire to `5a712e2`, which builds under `<root>/buildtmp` (disk) instead of
-  `$TMPDIR`/tmpfs. A `grm upgrade` must rebuild rust + grimoire to confirm grm still links
-  static-PIE and atuin still builds clean; then confirm the new grm's scratch lands in
-  `~/.grimoire/buildtmp` with `$TMPDIR` unset. Blocked: glibc VM 192.168.65.2 is down; native-musl
-  host 10.211.55.5 needs the `claude` SSH key authorized.
-- **Bootstrap Chimera to verify everything** (implemented + pushed; blocked on host access). The
-  host-detected musl seeding is done — grimoire `76123b7` (`paths::host_libc()` probe, `Source.host_libc`
-  filter in `sources_for`, `ctx.host_libc`); tome-core `106fe94` (`rust-stage0.rn` two seeds gated by
-  `host_libc` — gnu for a glibc host, the official aarch64-musl release `630541a6…` for a musl host;
-  `rust.rn` `is_cross_musl` branch → native `build=host=target=musl`, no gnu stanza / no re-scoping).
-  Chimera (10.211.55.5, aarch64, no glibc, system rust+clang 1.96/22.1.7) is the pure-musl box. Test:
-  `cargo install` grm from grimoire@76123b7 → add tomes → `grm install grimoire build-env` → `grm upgrade`.
-  This single bootstrap verifies the pure-musl seeding AND the earlier wrapper/buildtmp cleanup at once.
-  **Blocked:** the `claude` SSH key is in `~/.ssh/authorized_hosts` (sshd wants `authorized_keys`) — a
-  one-line `mv` on the host unblocks it. Glibc VM 192.168.65.2 is also down.
-- **Generalize / harden** once Chimera is green: extend `rust-stage0.rn` to host-gate and fetch
+- **Verify the toolchain cleanup + build-scratch hardening on a musl host**
+- **Generalize / harden**: extend `rust-stage0.rn` to host-gate and fetch
   the correct Tier 2 host-tools tarball for every supported target (aarch64-musl, x86_64-musl,
   freebsd-x86_64, freebsd-aarch64), not just gnu vs. musl on Linux aarch64; the x86_64-musl seed
   currently isn't host-gated because the static release runs anywhere, but the others must select
@@ -61,8 +44,7 @@ Unblocked (native build + per-rune debugging):
 - ⏳ Linux aarch64 musl — needs `rust-stage0.rn` updated to fetch the official
   `aarch64-unknown-linux-musl` host tools (currently cross-seeds from the gnu tarball on a glibc
   host). Already proven on a glibc-hosted musl cross build.
-- ⏳ FreeBSD x86_64 — riskiest: no GitHub-hosted runner, and a multi-hour llvm+rust build
-  inside a nested VM (no `/grm`, tight disk/time) is unproven; may need a self-hosted builder.
+- ⏳ FreeBSD x86_64
 - ⏳ FreeBSD aarch64 — needs `rust-stage0.rn` updated to fetch the official
   `aarch64-unknown-freebsd` host tools.
 
@@ -76,7 +58,7 @@ ambient userland.
 The host *userland* link is shadowed, never severed: `/usr/bin` + `/bin` are
 unconditionally appended to managed build PATH (`posix_ambient_dirs`), so anything toybox
 does not ship (perl, m4, bash-isms) falls through to the host silently — an unhashed
-build input, same class as the Homebrew-zstd leak. Path to severance is empirical: a
+build input. Path to severance is empirical: a
 hermetic build mode that drops the ambient tail, run per rune to enumerate what actually
 leaks; passing runes are certified toybox-ambient, failures name what stage 2 must package.
 The `grm tome build --hermetic` diagnostic has shipped: it drops the ambient tail so a build
@@ -92,34 +74,8 @@ toybox-ambient, and package the failures. One deferred deliverable:
   identically or §9.8 breaks. Decide between a host-property marker and plumbing per-build
   env identity end-to-end before writing it.
 
-## Known debts (not release-blocking)
-
-- **The resolver does not backtrack over conflicts.** `conflicts` metadata refuses a plan
-  early and precisely, but pubgrub never steers version selection *around* a conflict.
-  Correct for mutual-exclusion semantics; spec before changing.
-- **Lockfile rebuild is per-step, not per-command.** The lockfile is regenerated inside
-  `install_archive` (per package) and at several other sites (`install/orphans.rs`,
-  `install/state.rs`, `profile/generations.rs`), so a multi-package command that fails partway
-  leaves the on-disk lock describing the half-applied residue rather than the pre-command world.
-  Not release-blocking: the lock is derived from `state/packages/` (the authoritative source),
-  the active generation is the real environment, and the lock self-heals on the next mutation.
-  Fix is cross-cutting: rebuild the lock once at the `Installer::finalize()` commit point and
-  drop the scattered per-step rebuilds, after confirming every mutating path funnels through it.
-- **No installed-state repository type.** `installed_states()` / `linked_set()` are uncached,
-  unlocked fresh disk scans of `state/packages/*.nuon` reached from ~7 modules (build, cmd,
-  install, profile, solve, store, tome), and `sweep_orphans` re-reads on every iteration (O(n²)).
-  A maintainability/altitude smell, not a bug. Introduce an `InstalledWorld` repository that
-  loads once and is threaded where needed, replacing the de-facto global accessors.
-
 ## Expansion projects (spec before code)
 
-- **Cross bootstrap (linux-aarch64-musl, freebsd-aarch64).** Independent of host-tool
-  availability — these targets now close natively via rustup's Tier 2 host tools once
-  `rust-stage0.rn` fetches the correct tarball. Cross bootstrap is the separate story of
-  building *for* one triple *from* a different host triple: build deps resolved for the host
-  while runtime deps and outputs target the target (the model currently conflates them — single
-  `target_triple` in `util/paths.rs`), cross toolchain-wrappers, rust cross-std. Project-sized;
-  write the design doc first.
 - **Scoped profiles and dev shells (`grm profile` / `grm shell`).** Named, imperative
   profiles for development against managed libraries — e.g. a `rust-devel` profile where
   `cargo install`'s `openssl-sys` finds the managed OpenSSL instead of host Homebrew.
@@ -208,8 +164,3 @@ correct for secondary PM use.
 - Add `grm setup --system` or similar that creates
   `/usr/bin -> /grm/profiles/current/bin`.
 - Require root for this step only; day-to-day use stays unprivileged.
-
-## Deletion criteria
-
-When everything above is complete and reflected in the design doc, delete this file.
-Until then, this is the canonical remaining-work list.

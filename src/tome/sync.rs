@@ -144,12 +144,13 @@ fn installed_from_tome(name: &str) -> Result<Vec<String>> {
     let cache = sync_common::cache_path(TomeState::SUBDIR, name)?;
     // find_rune canonicalizes its result; match like-for-like (e.g. /var vs /private/var).
     let cache = cache.canonicalize().unwrap_or(cache);
+    let world = crate::install::InstalledWorld::load_default()?;
     let mut names = Vec::new();
-    for state in crate::install::installed_states()? {
+    for state in world.iter() {
         if let Ok(Some(rune)) = crate::build::find_rune(&state.name)
             && rune.starts_with(&cache)
         {
-            names.push(state.name);
+            names.push(state.name.clone());
         }
     }
     Ok(names)

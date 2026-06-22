@@ -49,6 +49,45 @@ fn lockfile_tracks_installs_and_removals() {
 }
 
 #[test]
+fn hold_and_unhold_refresh_lockfile_once() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let out = TempDir::new().unwrap();
+    let out = out.path();
+
+    let build = run(
+        root,
+        &[
+            "build",
+            "./tome-example/runes/hello.rn",
+            "--output",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert_success(&build, "build hello");
+    let archive = out.join(format!("hello-0.1.0-{}.tar.zst", target_triple()));
+
+    assert_success(
+        &run(root, &["install", archive.to_str().unwrap()]),
+        "install hello",
+    );
+
+    assert_success(&run(root, &["hold", "hello"]), "hold hello");
+    let list = stdout(&run(root, &["list", "--explicit"]));
+    assert!(
+        list.contains("held"),
+        "list shows held package after hold: {list}"
+    );
+
+    assert_success(&run(root, &["unhold", "hello"]), "unhold hello");
+    let list = stdout(&run(root, &["list", "--explicit"]));
+    assert!(
+        !list.contains("held"),
+        "list shows no held package after unhold: {list}"
+    );
+}
+
+#[test]
 fn install_dry_run_prints_plan_without_touching_state() {
     let root = TempDir::new().unwrap();
     let root = root.path();

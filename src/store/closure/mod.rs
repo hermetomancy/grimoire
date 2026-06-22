@@ -113,20 +113,6 @@ pub fn split_member_hashes_with_target(
     walker.group_hashes(&group_parts(group))
 }
 
-/// The recorded store hashes of installed packages, keyed by name — the actual resolved
-/// dependency closure to address a build against. Handed to split-member addressing so a member's
-/// hash folds the external versions it is genuinely built against rather than an independent
-/// re-pick (AGENTS §9.8). A dependency is always installed at its resolver-computed address before
-/// a dependent builds, so this agrees with the resolver's `computed` map for the relevant deps.
-/// Empty when nothing is installed or state is unreadable.
-pub fn installed_resolved() -> BTreeMap<String, String> {
-    crate::install::installed_states()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|state| (state.name, state.store_hash))
-        .collect()
-}
-
 fn group_parts(group: &[(crate::model::PackageMetadata, Vec<u8>)]) -> Vec<GroupPart> {
     group
         .iter()

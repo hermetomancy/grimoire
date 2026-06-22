@@ -174,7 +174,7 @@ fn bootstrap_core() -> Result<()> {
         }
     }
 
-    let grimoire_installed = crate::install::installed_states()?
+    let grimoire_installed = crate::install::InstalledWorld::load_default()?
         .iter()
         .any(|state| state.name == "grimoire");
     if grimoire_installed {

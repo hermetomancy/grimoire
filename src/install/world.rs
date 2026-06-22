@@ -7,7 +7,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{model::PackageState, nu::nuon_io};
+use crate::{
+    model::{PackageState, parse_version_relaxed},
+    nu::nuon_io,
+    util::{paths, progress::status},
+};
 
 /// The installed package world: loaded once per command, mutated in memory, and committed to disk
 /// at a single transaction boundary. Replaces the scattered `installed_states()` / `linked_set()`
@@ -20,9 +24,26 @@ pub struct InstalledWorld {
     linked_cache: Option<HashSet<String>>,
 }
 
+impl Default for InstalledWorld {
+    fn default() -> Self {
+        Self {
+            root: PathBuf::new(),
+            states: BTreeMap::new(),
+            dirty: HashSet::new(),
+            deleted: HashSet::new(),
+            linked_cache: None,
+        }
+    }
+}
+
 impl InstalledWorld {
     /// Load from `{root}/state/packages/*.nuon`. Returns an empty world if the directory does not
     /// exist. Replaces the old `installed_states()`.
+    /// Load from the current installation root (`paths::install_root()`).
+    pub fn load_default() -> Result<Self> {
+        Self::load(paths::install_root()?)
+    }
+
     pub fn load(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         let state_dir = root.join("state").join("packages");
@@ -48,48 +69,6 @@ impl InstalledWorld {
             deleted: HashSet::new(),
             linked_cache: None,
         })
-    }
-
-    /// Load while tolerating corrupt individual state files. Returns the world built from valid
-    /// files plus a list of per-file error messages. Used only by `grm doctor`.
-    pub fn load_tolerant(root: impl AsRef<Path>) -> (Self, Vec<String>) {
-        let root = root.as_ref().to_path_buf();
-        let state_dir = root.join("state").join("packages");
-        let mut states = BTreeMap::new();
-        let mut errors = Vec::new();
-        if state_dir.exists() {
-            if let Ok(entries) = fs::read_dir(&state_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|ext| ext.to_str()) != Some("nuon") {
-                        continue;
-                    }
-                    match nuon_io::read_nuon(&path) {
-                        Ok(value) => match PackageState::from_value(value) {
-                            Ok(state) => {
-                                states.insert(state.name.clone(), state);
-                            }
-                            Err(e) => errors.push(format!("{}: {}", path.display(), e)),
-                        },
-                        Err(e) => errors.push(format!("{}: {}", path.display(), e)),
-                    }
-                }
-            }
-        }
-        (
-            Self {
-                root,
-                states,
-                dirty: HashSet::new(),
-                deleted: HashSet::new(),
-                linked_cache: None,
-            },
-            errors,
-        )
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 
     pub fn get(&self, name: &str) -> Option<&PackageState> {
@@ -136,13 +115,15 @@ impl InstalledWorld {
         if let Some(state) = self.states.get(dep) {
             return Some(state);
         }
-        self.states.values().find(|state| {
-            state.bins.contains_key(dep) || state.provides.iter().any(|p| p == dep)
-        })
+        self.states
+            .values()
+            .find(|state| state.bins.contains_key(dep) || state.provides.iter().any(|p| p == dep))
     }
 
     /// Compute the linked set: requested/held roots plus transitive runtime deps.
-    /// Lazy and cached; invalidates on mutation.
+    /// Lazy and cached; invalidates on mutation. Test-only: production callers use
+    /// [`linked_immut`].
+    #[cfg(test)]
     pub fn linked(&mut self) -> &HashSet<String> {
         if self.linked_cache.is_none() {
             self.linked_cache = Some(self.compute_linked());
@@ -179,6 +160,53 @@ impl InstalledWorld {
 
     pub fn to_states(&self) -> Vec<PackageState> {
         self.states.values().cloned().collect()
+    }
+
+    /// Installed package names mapped to their concrete versions, for the solver. Replaces the old
+    /// global `installed_versions()`.
+    pub fn installed_versions(&self) -> std::collections::BTreeMap<String, semver::Version> {
+        self.states
+            .values()
+            .filter_map(|state| {
+                parse_version_relaxed(&state.version)
+                    .ok()
+                    .map(|version| (state.name.clone(), version))
+            })
+            .collect()
+    }
+
+    /// Like [`installed_versions`], but omitting packages whose installed bits have drifted from
+    /// their current rune. Replaces the old global `installed_versions_current()`.
+    pub fn installed_versions_current(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, semver::Version>> {
+        let stale: std::collections::HashSet<String> = crate::store::closure::stale_installed(self)
+            .into_iter()
+            .map(|stale| stale.name)
+            .collect();
+        let mut versions = std::collections::BTreeMap::new();
+        for state in self.states.values() {
+            if stale.contains(&state.name) {
+                status(&format!(
+                    "{} {} drifted from its rune; not reusable",
+                    state.name, state.version
+                ));
+                continue;
+            }
+            if let Ok(version) = parse_version_relaxed(&state.version) {
+                versions.insert(state.name.clone(), version);
+            }
+        }
+        Ok(versions)
+    }
+
+    /// Recorded store hashes keyed by package name. Replaces `closure::installed_resolved()` and
+    /// similar ad-hoc scans.
+    pub fn store_hashes(&self) -> std::collections::BTreeMap<String, String> {
+        self.states
+            .values()
+            .map(|state| (state.name.clone(), state.store_hash.clone()))
+            .collect()
     }
 
     /// Commit dirty and deleted states into the provided transaction. Only rewrites files that

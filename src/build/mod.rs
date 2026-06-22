@@ -77,10 +77,10 @@ fn merge_path_env(env: &mut Vec<(String, String)>, additions: Vec<(String, Strin
 
 /// Returns the `bin/` directories of all installed core packages.
 fn core_bin_dirs() -> Result<Vec<PathBuf>> {
-    let states = install::installed_states()?;
+    let world = install::InstalledWorld::load_default()?;
     let mut dirs = Vec::new();
     for name in CORE_PACKAGES {
-        let Some(state) = states.iter().find(|s| s.name == *name) else {
+        let Some(state) = world.get(name) else {
             continue;
         };
         install::push_bin_dirs(&mut dirs, state);
@@ -106,8 +106,8 @@ pub fn read_rune_metadata(
 /// Returns `true` when `toolchain-wrappers` is installed, meaning the managed compiler boundary
 /// is available and the host compiler boundary is no longer needed.
 fn core_compiler_boundary_available() -> Result<bool> {
-    let states = install::installed_states()?;
-    Ok(states.iter().any(|s| s.name == "toolchain-wrappers"))
+    let world = install::InstalledWorld::load_default()?;
+    Ok(world.contains("toolchain-wrappers"))
 }
 
 /// The toolchain aliases shared by every musl-target build, independent of whether the floor is
@@ -208,13 +208,8 @@ pub fn build_env_for_target(
         is_musl_target(target) && !managed_boundary && paths::host_libc() == "musl";
 
     if is_musl_target(target) && !native_musl_host_boundary {
-        let states = install::installed_states()?;
-        let prefix = |name: &str| {
-            states
-                .iter()
-                .find(|s| s.name == name)
-                .map(|s| s.store_path.clone())
-        };
+        let world = install::InstalledWorld::load_default()?;
+        let prefix = |name: &str| world.get(name).map(|s| s.store_path.clone());
         match (prefix("musl"), prefix("linux-headers")) {
             // The managed floor is installed: retarget the compiler to musl explicitly. A host
             // clang/gcc defaults to the host gnu/glibc triple, so it leaks host libc into both

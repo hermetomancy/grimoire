@@ -67,24 +67,19 @@ fn dry_run_surfaces_conflicts_and_build_dep_closure_at_plan_time() {
         "dry run must name the build dep: {out}"
     );
 
-    // With the conflict installed, the *plan* refuses — in dry-run (after showing the plan)
-    // and in a real run before anything is fetched or built.
+    // With the conflict installed, the resolver refuses before any plan is printed or anything
+    // is fetched or built.
     assert_success(&run(root, &["install", "alpha"]), "install alpha");
     let blocked_dry = run(root, &["install", "beta", "--dry-run"]);
     assert_failure_contains(
         &blocked_dry,
-        "conflicts with installed `alpha`",
+        "`beta` conflicts with chosen `alpha`",
         "dry run surfaces the planned refusal",
-    );
-    assert!(
-        stdout(&blocked_dry).contains("plan:"),
-        "the refusing dry run still shows the plan first: {}",
-        stdout(&blocked_dry)
     );
     let blocked = run(root, &["install", "beta"]);
     assert_failure_contains(
         &blocked,
-        "conflicts with installed `alpha`",
+        "`beta` conflicts with chosen `alpha`",
         "real install refuses at plan time",
     );
     assert!(
@@ -143,7 +138,7 @@ fn store_only_conflict_does_not_block_a_linked_install() {
     let blocked = run(root, &["install", "seed"]);
     assert_failure_contains(
         &blocked,
-        "conflicts with installed `toolchain`",
+        "`seed` conflicts with chosen `toolchain`",
         "linked seed install refused while toolchain is linked",
     );
 }
@@ -178,7 +173,7 @@ fn conflicting_package_is_refused_until_the_conflict_leaves() {
     let blocked = run(root, &["install", "beta"]);
     assert_failure_contains(
         &blocked,
-        "conflicts with installed `alpha`",
+        "`beta` conflicts with chosen `alpha`",
         "conflicting install refused",
     );
     assert!(

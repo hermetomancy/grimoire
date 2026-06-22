@@ -166,9 +166,9 @@ fn check_state_generation_divergence() -> Result<usize> {
     let Some(snapshot) = profile::read_state_snapshot(&gen_dir)? else {
         return Ok(0); // pre-snapshot generation; nothing to compare against
     };
-    let installed: BTreeMap<String, String> = install::installed_states()?
-        .into_iter()
-        .map(|s| (s.name, s.version))
+    let installed: BTreeMap<String, String> = install::InstalledWorld::load_default()?
+        .iter()
+        .map(|s| (s.name.clone(), s.version.clone()))
         .collect();
     // Subset check, not equality: store-only installs (`grm tome build`) legitimately add
     // state entries that are not linked into the active generation. What must never happen
@@ -194,11 +194,11 @@ fn check_state_generation_divergence() -> Result<usize> {
 /// build deps) never link, so their bins cannot contest anything — rust-stage0 shipping
 /// `rustc` beside linked rust is by design, not a problem.
 fn check_duplicate_bins() -> Result<usize> {
-    let states = install::installed_states()?;
-    let linked = install::linked_set(&states);
+    let world = install::InstalledWorld::load_default()?;
+    let linked = world.linked_immut();
     let preferences = Preferences::load().unwrap_or_default();
     let mut owners: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for state in states.iter().filter(|state| linked.contains(&state.name)) {
+    for state in world.iter().filter(|state| linked.contains(&state.name)) {
         for bin in state.bins.keys() {
             owners.entry(bin).or_default().push(&state.name);
         }
@@ -334,10 +334,10 @@ fn report_managed_core_readiness() -> Result<()> {
 
 fn missing_core_tools() -> Result<Vec<String>> {
     let tools = core_userland_tools();
-    let states = install::installed_states()?;
+    let world = install::InstalledWorld::load_default()?;
     Ok(tools
         .iter()
-        .filter(|name| !states.iter().any(|state| state.name == **name))
+        .filter(|name| !world.contains(name))
         .map(|name| (*name).to_owned())
         .collect())
 }
@@ -367,7 +367,8 @@ fn check_tomes() -> Result<usize> {
 }
 
 fn check_packages() -> Result<usize> {
-    let states = install::installed_states()?;
+    let world = install::InstalledWorld::load_default()?;
+    let states = world.to_states();
     let active_packages = profile::current_generation_packages()?;
     let active_set: std::collections::BTreeSet<String> =
         active_packages.unwrap_or_default().into_iter().collect();
@@ -417,11 +418,12 @@ fn check_packages() -> Result<usize> {
 /// drift here makes that rebuild predictable instead of surprising ("X is up to date"
 /// followed by a 40-minute source build).
 fn check_address_drift() -> Result<()> {
-    let states = install::installed_states()?;
-    let drifted = crate::store::closure::stale_installed(&states);
+    let world = install::InstalledWorld::load_default()?;
+    let drifted = crate::store::closure::stale_installed(&world);
     if drifted.is_empty() {
         return Ok(());
     }
+    let states = world.to_states();
     let by_name: std::collections::BTreeMap<&str, &crate::model::PackageState> =
         states.iter().map(|s| (s.name.as_str(), s)).collect();
     for stale in &drifted {
@@ -451,7 +453,11 @@ fn check_lock(problems: &mut usize) -> Result<()> {
     let path = lock::lock_path()?;
     if path.exists() {
         field("lockfile", &path.display().to_string());
-    } else if install::installed_states()?.is_empty() {
+    } else if install::InstalledWorld::load_default()?
+        .iter()
+        .next()
+        .is_none()
+    {
         field("lockfile", "none (no packages installed)");
     } else {
         *problems += 1;

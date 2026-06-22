@@ -287,9 +287,9 @@ pub(super) fn restore_state_snapshot(gen_dir: &Path) -> Result<bool> {
     // path is gone is not worth keeping either.
     let snapshot_names: std::collections::HashSet<&str> =
         states.iter().map(|s| s.name.as_str()).collect();
-    let live_states = crate::install::installed_states().unwrap_or_default();
-    let live_linked = crate::install::linked_set(&live_states);
-    for live in live_states {
+    let live_world = crate::install::InstalledWorld::load_default().unwrap_or_default();
+    let live_linked = live_world.linked_immut();
+    for live in live_world.iter() {
         if snapshot_names.contains(live.name.as_str()) || live_linked.contains(&live.name) {
             continue;
         }
@@ -313,8 +313,5 @@ pub(super) fn restore_state_snapshot(gen_dir: &Path) -> Result<bool> {
     }
     let _ = fs::remove_dir_all(&backup);
 
-    // The lockfile is derived from state; rebuild it so it describes the activated set.
-    crate::install::lock::rebuild()
-        .context("rebuild lockfile from the activated generation's state")?;
     Ok(true)
 }
