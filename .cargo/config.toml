@@ -1,0 +1,10 @@
+# Dev builds (`cargo build`/`cargo test` run directly, not via `grm tome build`) invoke the managed
+# clang — the toolchain-wrappers `cc`, which is just `exec clang "$@"`. Unlike Apple's `/usr/bin/cc`,
+# a bare clang does not auto-locate the macOS SDK, so the C-sys crates (zstd-sys, aws-lc-sys, ring)
+# fail to find <string.h>. grm sets SDKROOT itself when it drives a build (see build/mod.rs), so
+# `force = false` defers to that and this only fills SDKROOT in for builds run directly.
+#
+# MacOSX.sdk is the stable symlink `xcrun --show-sdk-path` resolves to, so this survives SDK version
+# bumps. SDKROOT is Darwin-only; clang ignores it on Linux, so this is a no-op on the VM.
+[env]
+SDKROOT = { value = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk", force = false }
