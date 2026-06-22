@@ -8,15 +8,15 @@ heading when it is tagged.
 
 ### Added
 
-- `build_only` rune metadata: a build-only package (the managed `build-env` toolchain) is pinned in
-  the store and available to source builds, but neither it nor its runtime closure is linked into
-  the active profile — its bins (toybox's coreutils, clang, cmake, python3, …) are build machinery,
-  not user commands, so installing `build-env` no longer floods `profiles/current/bin`. PATH links
-  are seeded from explicitly-requested packages only — a toolchain tool you `grm install` directly
-  still links; one pulled in solely as `build-env`'s dependency does not. The package
-  stays a GC root (survives `grm clean`); `grm list` marks it `build-only` under `--all`. This
-  decouples "pinned in the store" from "linked onto PATH" (Nix-style: build inputs live in the store
-  but never on your PATH).
+- `build_only` rune metadata: a build-only package (the managed `build-env`, `clang`, and `llvm`)
+  is pinned in the store and available to source builds, but its bins stay off the active profile —
+  the managed toolchain (toybox's coreutils, clang, llvm, cmake, python3, …) is build machinery, not
+  user commands, so it no longer floods `profiles/current/bin`. A build-only package is a PATH
+  barrier: its runtime closure is never linked through it. The one exception is an explicit request —
+  `grm install clang` puts clang's own bins on PATH (you asked for it by name) without dragging its
+  build-only closure along. Build-only packages stay GC roots (survive `grm clean`); `grm list` marks
+  them `build-only` under `--all`. This decouples "pinned in the store" from "linked onto PATH"
+  (Nix-style: build inputs live in the store but never on your PATH).
 - `conflicts`/`replaces` rune metadata: mutual exclusion enforced at install time; renames
   migrate state and requested/held intent, and a bare `grm upgrade` discovers them.
 - `upstream_version` metadata field for non-semver upstreams, shown by `grm info`; the

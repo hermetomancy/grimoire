@@ -158,30 +158,38 @@ impl InstalledWorld {
         linked
     }
 
-    /// The subset of the linked set whose bins are symlinked onto the active PATH. Seeded from
-    /// **requested** (non-build-only) roots only, then walked through runtime deps — so a held
-    /// dependency reaches PATH solely when something the user explicitly asked for needs it at
-    /// runtime. Build-only packages (the managed toolchain, e.g. `build-env`) are never seeded and
-    /// act as PATH barriers: their held closure (clang, cmake, …) stays pinned in the store and
-    /// available for builds, but off PATH. A toolchain tool also requested directly (an explicit
-    /// `grm install cmake`) is still linked. This is the key difference from [`linked_immut`], the
-    /// GC-root set, which *also* seeds from held roots so the store keeps the whole closure.
+    /// The packages whose bins are symlinked onto the active PATH. Seeded from every **requested**
+    /// package, then walked through runtime deps — so a held dependency's bins link when something
+    /// the user explicitly asked for needs it at runtime (e.g. `rust` reaching the `cc` wrapper).
+    /// Build-only packages are PATH **barriers**: a build-only dependency (the managed toolchain —
+    /// `clang`, `llvm`, pulled in via the wrappers) never links and is not traversed, so its bins
+    /// stay in the store, reachable by store path, but off PATH. The deliberate exception is an
+    /// explicit request: `grm install clang` puts clang's own bins on PATH (the user asked for it by
+    /// name) without dragging its build-only closure along — a build-only package links only as a
+    /// requested seed, never as a dependency. Contrast [`linked_immut`], the GC-root set, which
+    /// keeps the whole runtime closure regardless.
     pub fn bin_linked_immut(&self) -> HashSet<String> {
         let mut linked: HashSet<String> = HashSet::new();
+        // Every requested package seeds, build-only included: an explicit `grm install clang` should
+        // put clang on PATH even though clang is build-only by default.
         let mut queue: VecDeque<&PackageState> = self
             .states
             .values()
-            .filter(|state| state.requested && !state.build_only)
+            .filter(|state| state.requested)
             .collect();
         while let Some(state) = queue.pop_front() {
-            // A build-only package is a PATH barrier: never linked, and its runtime closure is not
-            // pursued through it (the toolchain stays off PATH). Anything also reachable from a
-            // normal root is still enqueued via that path.
-            if state.build_only || !linked.insert(state.name.clone()) {
+            if !linked.insert(state.name.clone()) {
+                continue;
+            }
+            // A build-only package is a PATH barrier: its runtime closure is build machinery, so
+            // never pursue its deps. Its own bins stay linked — it only reaches here as a requested
+            // seed (a build-only dependency is skipped at the enqueue below, never linked).
+            if state.build_only {
                 continue;
             }
             for dep in &state.runtime_deps {
                 if let Some(dep_state) = self.resolve_dep(dep)
+                    && !dep_state.build_only
                     && !linked.contains(&dep_state.name)
                 {
                     queue.push_back(dep_state);
@@ -357,17 +365,29 @@ mod tests {
     }
 
     #[test]
-    fn bin_linked_excludes_build_only_and_its_exclusive_closure() {
+    fn bin_linked_links_build_only_only_when_requested_by_name() {
+        // `clang`: build-only, but explicitly requested -> its own bins link (user asked by name).
+        let mut clang = state("clang", &["llvm"], true, false);
+        clang.build_only = true;
+        // `llvm`: build-only, pulled in only as a dependency (held) -> stays off PATH.
+        let mut llvm = state("llvm", &[], false, true);
+        llvm.build_only = true;
+        // `build-env`: build-only meta seed -> links nothing of its held closure (`toolchain`).
         let mut build_env = state("build-env", &["toolchain"], true, false);
         build_env.build_only = true;
-        // `lib` and `toolchain` are both `held` deps (the realistic case): one reachable from the
-        // requested `app`, one only through build-env. A seed that included held roots would pull
-        // `toolchain` onto PATH regardless of the build-only barrier — the bug this guards against.
+        // `rust` (requested, non-build-only) reaches the held non-build-only `wrappers` (links, e.g.
+        // the `cc` wrapper) but the build-only `llvm` behind them is a barrier and stays off PATH.
+        let wrappers = state("wrappers", &["llvm"], false, true);
+        let rust = state("rust", &["wrappers"], true, false);
         let world = InstalledWorld {
             root: PathBuf::from("/tmp"),
             states: BTreeMap::from([
                 ("app".to_owned(), state("app", &["lib"], true, false)),
                 ("lib".to_owned(), state("lib", &[], false, true)),
+                ("rust".to_owned(), rust),
+                ("wrappers".to_owned(), wrappers),
+                ("clang".to_owned(), clang),
+                ("llvm".to_owned(), llvm),
                 ("build-env".to_owned(), build_env),
                 ("toolchain".to_owned(), state("toolchain", &[], false, true)),
             ]),
@@ -375,15 +395,19 @@ mod tests {
             deleted: HashSet::new(),
             linked_cache: None,
         };
-        // The full closure (GC roots / snapshot) still pins the build-only package and its deps.
-        let linked = world.linked_immut();
-        assert!(linked.contains("build-env") && linked.contains("toolchain"));
-        // The PATH set keeps the held dep reachable from a requested root (`lib`) but drops the
-        // build-only root and its held-only closure (`toolchain`).
         let on_path = world.bin_linked_immut();
+        // Requested packages and their reachable non-build-only runtime deps link.
         assert!(on_path.contains("app") && on_path.contains("lib"));
-        assert!(!on_path.contains("build-env"));
+        assert!(on_path.contains("rust") && on_path.contains("wrappers"));
+        // A build-only package links its own bins when explicitly requested (`grm install clang`)...
+        assert!(on_path.contains("clang"));
+        // ...but never as a dependency: `llvm` (behind the non-build-only `wrappers` and the
+        // build-only `clang`) and `toolchain` (behind build-env) stay off PATH.
+        assert!(!on_path.contains("llvm"));
         assert!(!on_path.contains("toolchain"));
+        // The GC-root set still pins the whole closure regardless.
+        let linked = world.linked_immut();
+        assert!(linked.contains("llvm") && linked.contains("toolchain"));
     }
 
     #[test]
