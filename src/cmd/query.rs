@@ -17,8 +17,7 @@ use crate::{
     nu::runtime::EmbeddedNuRuntime,
     solve, tome,
     util::paths,
-    util::progress,
-    util::table::{self, Cell},
+    util::output::{self, Cell},
 };
 
 #[derive(Debug, Clone)]
@@ -41,11 +40,11 @@ pub fn search(args: QueryArg) -> Result<()> {
         }
     }
 
-    progress::finish();
+    output::finish();
     if matches.is_empty() {
         // Data-less result: say so on a terminal; piped output stays empty for scripts.
         if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-            println!("{}", progress::faint(&format!("no matches for `{query}`")));
+            output::line(&output::faint(&format!("no matches for `{query}`")));
         }
         return Ok(());
     }
@@ -60,7 +59,7 @@ pub fn search(args: QueryArg) -> Result<()> {
             ]
         })
         .collect();
-    table::print_rows(rows);
+    output::print_rows(rows);
     Ok(())
 }
 
@@ -85,7 +84,7 @@ pub fn info(args: PackageArg) -> Result<()> {
         }
 
         if !first {
-            println!("\n{}\n", progress::faint("---"));
+            output::line(&output::faint("---"));
         }
         first = false;
 
@@ -94,9 +93,6 @@ pub fn info(args: PackageArg) -> Result<()> {
         }
 
         for pkg in available {
-            if installed.is_some() {
-                println!();
-            }
             print_available(pkg);
         }
     }
@@ -132,7 +128,7 @@ pub fn upgrade(args: UpgradeArgs) -> Result<()> {
     };
 
     if targets.is_empty() {
-        progress::report("no installed packages");
+        output::report("no installed packages");
         return Ok(());
     }
 
@@ -178,23 +174,23 @@ pub fn upgrade(args: UpgradeArgs) -> Result<()> {
     if args.dry_run {
         print_upgrade_plan(&to_upgrade);
         for (old, new) in &renames {
-            println!("  ~ {old} → {new} (replaced)");
+            output::line(&format!("  ~ {old} → {new} (replaced)"));
         }
         return Ok(());
     }
 
     let mut names: Vec<String> = to_upgrade.into_iter().map(|(name, _, _)| name).collect();
     for (old, new) in renames {
-        progress::report(&format!(
+        output::report(&format!(
             "{} {}",
-            progress::accent(new.as_str()),
-            progress::faint(&format!("replaces {old}"))
+            output::accent(new.as_str()),
+            output::faint(&format!("replaces {old}"))
         ));
         names.push(new);
     }
     let mut announce = format!(
         "upgrading {} package{}…",
-        progress::strong(&names.len().to_string()),
+        output::strong(&names.len().to_string()),
         if names.len() == 1 { "" } else { "s" }
     );
     // Say what the upgrade *implies*, not just what was asked: missing or drifted build
@@ -209,14 +205,14 @@ pub fn upgrade(args: UpgradeArgs) -> Result<()> {
         } else {
             ""
         };
-        announce.push_str(&progress::faint(&format!(
+        announce.push_str(&output::faint(&format!(
             " (+ {} build dep{} to realize: {}{ellipsis})",
             extra.len(),
             if extra.len() == 1 { "" } else { "s" },
             shown.join(", ")
         )));
     }
-    progress::note(&announce);
+    output::note(&announce);
     install::upgrade_packages(&names)
 }
 
@@ -266,7 +262,7 @@ fn collect_upgrades(
     // When the drift comes from the build environment, every affected package shares the
     // same cause — say it once instead of per line.
     if let Some(diff) = stale_info.iter().find_map(|stale| stale.env_change.clone()) {
-        progress::note(&format!("build environment changed: {diff}"));
+        output::note(&format!("build environment changed: {diff}"));
     }
 
     let mut to_upgrade: Vec<(String, Version, Version)> = Vec::new();
@@ -275,7 +271,7 @@ fn collect_upgrades(
             bail!("package `{name}` is not installed");
         };
         if !explicit && held.get(name).copied().unwrap_or(false) {
-            progress::warn(&format!(
+            output::warn(&format!(
                 "{name} is held; skipping (use `grm unhold {name}` to allow)"
             ));
             continue;
@@ -286,27 +282,27 @@ fn collect_upgrades(
                     // A major bump deserves a persistent line the user can act on; routine
                     // bumps just feed the transient progress spinner.
                     if newest.major > current.major {
-                        progress::warn(&format!(
+                        output::warn(&format!(
                             "{} {} — major version (next time: grm hold {name})",
-                            progress::strong(name),
-                            progress::strong(&format!("{current} → {newest}")),
+                            output::strong(name),
+                            output::strong(&format!("{current} → {newest}")),
                         ));
                     } else {
-                        progress::status(&format!("upgrading {name} {current} → {newest}"));
+                        output::status(&format!("upgrading {name} {current} → {newest}"));
                     }
                 }
                 to_upgrade.push((name.clone(), current.clone(), newest));
             }
             _ if drifted.contains(name.as_str()) => {
                 if !dry_run {
-                    progress::status(&format!("rebuilding {name} {current} (address drifted)"));
+                    output::status(&format!("rebuilding {name} {current} (address drifted)"));
                 }
                 to_upgrade.push((name.clone(), current.clone(), current.clone()));
             }
-            _ => progress::report(&format!(
+            _ => output::report(&format!(
                 "{} {}",
-                progress::accent(name),
-                progress::faint(&format!("is up to date ({current})"))
+                output::accent(name),
+                output::faint(&format!("is up to date ({current})"))
             )),
         }
     }
@@ -314,12 +310,12 @@ fn collect_upgrades(
 }
 
 fn print_upgrade_plan(to_upgrade: &[(String, Version, Version)]) {
-    println!("plan:");
+    output::line("plan:");
     for (name, current, newest) in to_upgrade {
         if current == newest {
-            println!("  ~ {name} {current} (rebuild: address drifted)");
+            output::line(&format!("  ~ {name} {current} (rebuild: address drifted)"));
         } else {
-            println!("  ~ {name} {current} → {newest}");
+            output::line(&format!("  ~ {name} {current} → {newest}"));
         }
     }
 }
@@ -370,64 +366,53 @@ fn rune_files(runes_dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(runes)
 }
 
-/// An `info` field line: faint key, plain value — identical bytes when piped (the styling
-/// helpers are no-ops off-terminal), so scripts and tests keep parsing `  key: value`.
-fn field(key: &str, value: &str) {
-    println!("{} {value}", progress::faint(&format!("  {key}:")));
-}
-
 fn print_installed(state: &PackageState) {
-    println!("{}", progress::strong("installed:"));
-    field("name", &progress::strong(&state.name));
-    field("version", &state.version);
+    output::heading("installed");
+    output::field("name", &output::strong(&state.name));
+    output::field("version", &state.version);
     if let Some(upstream) = &state.upstream_version {
-        field("upstream version", upstream);
+        output::field("upstream version", upstream);
     }
     if let Some(target) = &state.target {
-        field("target", target);
+        output::field("target", target);
     }
-    field("archive_hash", &state.archive_hash);
+    output::field("archive hash", &state.archive_hash);
     if !state.bins.is_empty() {
-        println!("{}", progress::faint("  bins:"));
-        for (name, path) in &state.bins {
-            println!("    {name}: {}", progress::faint(path));
-        }
+        output::field("bins", &join_bins(state.bins.iter()));
     }
     if !state.notes.is_empty() {
-        println!("{}", progress::faint("  notes:"));
-        for note in &state.notes {
-            println!("    {note}");
-        }
+        output::field("notes", &state.notes.join(" · "));
     }
 }
 
 fn print_available(package: &TomePackage) {
-    println!("{}", progress::strong("available:"));
-    field("name", &progress::strong(&package.metadata.name));
-    field("version", &package.metadata.version);
+    output::heading("available");
+    output::field("name", &output::strong(&package.metadata.name));
+    output::field("version", &package.metadata.version);
     if let Some(upstream) = &package.metadata.upstream_version {
-        field("upstream version", upstream);
+        output::field("upstream version", upstream);
     }
-    field("tome", &package.tome);
-    field("rune", &package.rune.display().to_string());
+    output::field("tome", &package.tome);
+    output::field("rune", &package.rune.display().to_string());
     if let Some(parent) = &package.metadata.split_from {
-        field("split from", &progress::strong(parent));
+        output::field("split from", &output::strong(parent));
     }
     if let Some(summary) = &package.metadata.summary {
-        field("summary", summary);
+        output::field("summary", summary);
     }
     let target = paths::target_triple();
     let bins = package.metadata.bins_for(&target);
     if !bins.is_empty() {
-        println!("{}", progress::faint("  bins:"));
-        for (name, path) in &bins {
-            println!("    {name}: {}", progress::faint(path));
-        }
+        output::field("bins", &join_bins(bins.iter()));
     }
     if !package.metadata.notes.is_empty() {
-        println!("{}", progress::faint("  notes:"));
-        for note in &package.metadata.notes {
-            println!("    {note}");
-        }
+        output::field("notes", &package.metadata.notes.join(" · "));
     }
+}
+
+/// `name → path, name → path` for a bins map, the one-line value of the `bins` info field.
+fn join_bins<'a>(bins: impl Iterator<Item = (&'a String, &'a String)>) -> String {
+    bins.map(|(name, path)| format!("{name} → {path}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }

@@ -20,7 +20,7 @@ use crate::{
     cli::CleanArgs,
     install, profile,
     util::paths,
-    util::progress::{accent, faint, report, status},
+    util::output::{accent, faint, line, report, status},
 };
 
 pub fn clean(args: CleanArgs) -> Result<()> {
@@ -122,23 +122,26 @@ fn dry_run_clean(args: &CleanArgs) -> Result<()> {
         report("nothing to clean");
         return Ok(());
     }
-    println!("plan:");
+    line("plan:");
     for name in &swept {
-        println!("  - {name} (unused dependency)");
+        line(&format!("  - {name} (unused dependency)"));
     }
     if old_generations > 0 {
-        println!("  - {old_generations} old generation(s)");
+        line(&format!("  - {old_generations} old generation(s)"));
     }
     for basename in &doomed_stores {
-        println!("  - store/{basename}");
+        line(&format!("  - store/{basename}"));
     }
     if cache_entries > 0 {
-        println!(
+        line(&format!(
             "  - {cache_entries} cache entr{}",
             if cache_entries == 1 { "y" } else { "ies" }
-        );
+        ));
     }
-    println!("would reclaim {}", format_bytes(store_bytes + cache_bytes));
+    line(&format!(
+        "would reclaim {}",
+        format_bytes(store_bytes + cache_bytes)
+    ));
     Ok(())
 }
 

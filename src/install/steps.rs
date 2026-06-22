@@ -10,7 +10,7 @@ use crate::{
     solve::{Plan, PlanStep, Substitute},
     tome,
     util::paths,
-    util::progress::{report, status},
+    util::output::{report, status},
 };
 
 use super::*;
@@ -92,12 +92,12 @@ impl Installer {
     fn dry_run_source_root(&self, rune: &Path) -> Result<()> {
         let metadata =
             build::read_rune_metadata(rune, build::tome_name_for_rune(rune)?.as_deref())?;
-        println!(
+        crate::util::output::line(&format!(
             "plan:\n  + {} {} (source rune {})",
             metadata.name,
             metadata.version,
             rune.display()
-        );
+        ));
         let target = paths::target_triple();
         let mut combined = metadata.deps.build_for(&target);
         combined.extend(
@@ -123,12 +123,12 @@ impl Installer {
     fn dry_run_local_root(&self, package: &str) -> Result<()> {
         let archive_path = PathBuf::from(package);
         let metadata = inspect_archive(&archive_path)?;
-        println!(
+        crate::util::output::line(&format!(
             "plan:\n  + {} {} (local archive {})",
             metadata.name,
             metadata.version,
             archive_path.display()
-        );
+        ));
         let target = paths::target_triple();
         let runtime: Vec<Dependency> = metadata
             .deps
@@ -429,10 +429,10 @@ impl Installer {
         for (name, lines) in &self.notes {
             report(&format!(
                 "notes for {}:",
-                crate::util::progress::strong(name)
+                crate::util::output::strong(name)
             ));
             for line in lines {
-                crate::util::progress::note(&format!("  {line}"));
+                crate::util::output::note(&format!("  {line}"));
             }
         }
     }

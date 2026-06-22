@@ -30,6 +30,12 @@ heading when it is tagged.
 
 ### Changed
 
+- All user-facing output now flows through one module (`util::output`) with typed outputters in
+  three tiers: result (`report` ✦ / `warn` ! / `problem` ✗ / `note`), data (`field` / `heading` /
+  `print_rows` / `line`), and progress (spinner / `status` / `success` / build log). Bare
+  `println!`/`eprintln!` are denied outside that module (clippy `disallowed-macros`). `info`,
+  `doctor`, and `tome info` render as `key: value` fields under bold section headings; `doctor`
+  health problems are now `✗` on stderr. Piped output stays plain and byte-stable.
 - The managed core userland references `python3-minimal` (the stdlib-only build interpreter) rather
   than `python3`: the build-PATH floor and `grm doctor`'s readiness check are updated to match the
   tome split. The full `python3` is no longer a core package.

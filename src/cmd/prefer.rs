@@ -14,8 +14,7 @@ use crate::{
     install,
     model::preferences::Preferences,
     profile,
-    util::progress::{self, report},
-    util::table::{self, Cell},
+    util::output::{self, Cell, report},
 };
 
 pub fn prefer(args: PreferArgs) -> Result<()> {
@@ -38,7 +37,7 @@ pub fn prefer(args: PreferArgs) -> Result<()> {
 fn list() -> Result<()> {
     let preferences = Preferences::load()?;
     if !preferences.providers.is_empty() {
-        println!("{}", progress::strong("preferred:"));
+        output::heading("preferred");
         let rows = preferences
             .providers
             .iter()
@@ -49,7 +48,7 @@ fn list() -> Result<()> {
                 ]
             })
             .collect();
-        table::print_rows(rows);
+        output::print_rows(rows);
     }
 
     let mut contested: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -73,7 +72,7 @@ fn list() -> Result<()> {
         return Ok(());
     }
     if !contested.is_empty() {
-        println!("{}", progress::strong("contested (no preference set):"));
+        output::heading("contested (no preference set)");
         let rows = contested
             .into_iter()
             .map(|(capability, providers)| {
@@ -83,7 +82,7 @@ fn list() -> Result<()> {
                 ]
             })
             .collect();
-        table::print_rows(rows);
+        output::print_rows(rows);
     }
     Ok(())
 }
@@ -92,14 +91,14 @@ fn set(capability: &str, package: &str, dry_run: bool) -> Result<()> {
     validate_provider(capability, package)?;
     if dry_run {
         let claimants = installed_claimants(capability)?;
-        println!(
+        output::note(&format!(
             "would set `{capability}` → `{package}`{}",
             if claimants >= 2 {
                 " and relink the active generation"
             } else {
                 ""
             }
-        );
+        ));
         return Ok(());
     }
     let mut preferences = Preferences::load()?;
@@ -122,7 +121,7 @@ fn unset(capability: &str, dry_run: bool) -> Result<()> {
         return Ok(());
     }
     if dry_run {
-        println!("would clear the preference for `{capability}`");
+        output::note(&format!("would clear the preference for `{capability}`"));
         return Ok(());
     }
     // Refuse to clear a preference the active generation still depends on: without it the

@@ -389,7 +389,7 @@ pub fn warn_parent_prefix_leaks(member: &str, dir: &Path, parent_prefix: &Path) 
         }
     }
     if !hits.is_empty() {
-        crate::util::progress::warn(&format!(
+        crate::util::output::warn(&format!(
             "split member {member} bakes the parent's store prefix into {} — those paths \
              point at the parent's remainder, not this package",
             hits.join(", ")

@@ -61,7 +61,7 @@ pub(crate) fn add_rune_command_context(mut engine_state: EngineState) -> EngineS
 
     if let Err(err) = engine_state.merge_delta(delta) {
         // Registration is static; a failure here is a programming error, not user input.
-        eprintln!("error registering rune commands: {err:?}");
+        crate::util::output::problem(&format!("error registering rune commands: {err:?}"));
     }
     engine_state
 }

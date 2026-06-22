@@ -18,7 +18,7 @@ use crate::{
     },
     nu::nuon_io,
     util::paths,
-    util::progress::{accent, faint, report, status, success},
+    util::output::{accent, faint, report, status, success},
 };
 
 use super::world::InstalledWorld;

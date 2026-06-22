@@ -17,7 +17,7 @@ use std::{
     thread,
 };
 
-use crate::util::progress;
+use crate::util::output;
 
 use super::*;
 
@@ -379,7 +379,7 @@ pub(crate) fn spawn_build_log_reader(
                 }
                 tail.push_back(line.clone());
             }
-            progress::build_log_line(&line);
+            output::build_log_line(&line);
             if let Some(file) = &log_file
                 && let Ok(mut f) = file.lock()
             {
@@ -443,7 +443,11 @@ mod tests {
         let value = working_set
             .get_constant(var_id)
             .map_err(|err| anyhow!("package const: {err}"))?;
-        eprintln!("{value:#?}");
+        // Debug dump in a parser smoke test, not user-facing output.
+        #[allow(clippy::disallowed_macros)]
+        {
+            eprintln!("{value:#?}");
+        }
         Ok(())
     }
 

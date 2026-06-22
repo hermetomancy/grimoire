@@ -15,6 +15,7 @@ use crate::{
     install,
     model::PackageState,
     solve,
+    util::output::line,
     util::paths,
 };
 
@@ -36,7 +37,7 @@ pub fn files(args: PackageArg) -> Result<()> {
                 continue;
             }
             let rel = entry.path().strip_prefix(&store)?;
-            println!("{}", rel.display());
+            line(&rel.display().to_string());
         }
     }
     Ok(())
@@ -71,7 +72,7 @@ pub fn owns(args: OwnsArgs) -> Result<()> {
         );
     }
     for state in owners {
-        println!("{}\t{}", state.name, state.version);
+        line(&format!("{}\t{}", state.name, state.version));
     }
     Ok(())
 }
@@ -91,10 +92,10 @@ pub fn provides(args: ProvidesArgs) -> Result<()> {
         );
     }
     for (package, (version, installed)) in providers {
-        println!(
+        line(&format!(
             "{package}\t{version}\t{}",
             if installed { "installed" } else { "available" }
-        );
+        ));
     }
     Ok(())
 }

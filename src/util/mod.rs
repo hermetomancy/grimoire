@@ -4,6 +4,5 @@
 pub(crate) mod fs_util;
 pub(crate) mod paths;
 pub(crate) mod process_lock;
-pub(crate) mod progress;
-pub(crate) mod table;
+pub(crate) mod output;
 pub(crate) mod time_util;

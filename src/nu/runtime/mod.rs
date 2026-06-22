@@ -15,7 +15,7 @@ use crate::{
     fetch::FetchedSource,
     model::{BuildManifest, PackageMetadata, TomeManifest},
     nu::nuon_io,
-    util::progress,
+    util::output,
 };
 
 mod env;
@@ -172,7 +172,7 @@ fn build_context(
     }
     env.push(
         "GRIMOIRE_VERBOSITY",
-        Value::string(progress::verbosity_name(), span),
+        Value::string(output::verbosity_name(), span),
     );
     for (key, value) in extra_env {
         env.push(key, Value::string(value, span));

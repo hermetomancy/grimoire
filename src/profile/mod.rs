@@ -18,7 +18,7 @@ use crate::{
     install::InstalledWorld,
     model::PackageState,
     util::paths,
-    util::progress::{note, status, strong, success, warn},
+    util::output::{note, status, strong, success, warn},
 };
 
 mod gc;
@@ -308,12 +308,16 @@ pub fn dry_run_activation(generation: Option<u64>) -> Result<()> {
         bail!("generation {target} does not exist");
     }
     if current_generation_id()? == Some(target) {
-        println!("generation {target} is already active; activation would only converge state");
+        crate::util::output::line(&format!(
+            "generation {target} is already active; activation would only converge state"
+        ));
         return Ok(());
     }
-    println!("would switch to generation {target}:");
+    crate::util::output::line(&format!("would switch to generation {target}:"));
     let Some(snapshot) = read_state_snapshot(&gen_dir)? else {
-        println!("  (no state snapshot — profile view would switch, state would be untouched)");
+        crate::util::output::line(
+            "  (no state snapshot — profile view would switch, state would be untouched)",
+        );
         return Ok(());
     };
     let current: std::collections::BTreeMap<String, String> = InstalledWorld::load_default()?
@@ -324,14 +328,16 @@ pub fn dry_run_activation(generation: Option<u64>) -> Result<()> {
         snapshot.into_iter().map(|s| (s.name, s.version)).collect();
     for (name, version) in &target_set {
         match current.get(name) {
-            None => println!("  + {name} {version}"),
-            Some(now) if now != version => println!("  ~ {name} {now} → {version}"),
+            None => crate::util::output::line(&format!("  + {name} {version}")),
+            Some(now) if now != version => {
+                crate::util::output::line(&format!("  ~ {name} {now} → {version}"))
+            }
             _ => {}
         }
     }
     for name in current.keys() {
         if !target_set.contains_key(name) {
-            println!("  - {name}");
+            crate::util::output::line(&format!("  - {name}"));
         }
     }
     Ok(())

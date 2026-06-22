@@ -8,7 +8,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::{nu::nuon_io, util::paths, util::progress::warn};
+use crate::{nu::nuon_io, util::paths, util::output::warn};
 
 use super::*;
 

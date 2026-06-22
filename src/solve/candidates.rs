@@ -201,7 +201,7 @@ pub(crate) fn gather_rune_candidate(name: &str, target: &str) -> Result<Option<R
     match read_rune_candidate(&rune, name, target) {
         Ok(candidate) => Ok(Some(candidate)),
         Err(err) => {
-            crate::util::progress::warn(&format!(
+            crate::util::output::warn(&format!(
                 "ignoring local rune `{}` for `{name}`: {err:#}; resolving `{name}` from \
                  configured tomes instead",
                 rune.display()

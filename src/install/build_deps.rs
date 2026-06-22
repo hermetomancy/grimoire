@@ -61,7 +61,7 @@ pub(crate) fn ensure_build_deps_installed_inner(
                 .unwrap_or_else(|| {
                     "its rune, a dependency, or the build environment changed".to_owned()
                 });
-            crate::util::progress::warn(&format!(
+            crate::util::output::warn(&format!(
                 "{} {} drifted from its expected address ({cause}); rebuilding",
                 state.name, state.version
             ));

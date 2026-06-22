@@ -1,0 +1,10 @@
+# All user-facing output must flow through `util::output` (the typed outputters: report/warn/
+# problem/note, field/heading/list/line, status/success). Bare print macros are banned everywhere
+# else so output stays cohesive and stream-correct; the `util::output` submodules opt back in with
+# `#![allow(clippy::disallowed_macros)]`.
+disallowed-macros = [
+    { path = "std::println", reason = "use util::output (report/field/line/...) instead of println!" },
+    { path = "std::print", reason = "use util::output instead of print!" },
+    { path = "std::eprintln", reason = "use util::output (status/problem/...) instead of eprintln!" },
+    { path = "std::eprint", reason = "use util::output instead of eprint!" },
+]

@@ -29,7 +29,7 @@ use crate::{
     nu::runtime::{BuildDirs, BuildEnv, EmbeddedNuRuntime},
     tome,
     util::paths,
-    util::progress::{report, status},
+    util::output::{report, status},
 };
 
 /// Core packages whose `bin/` directories are always prepended to build PATH.
@@ -659,7 +659,7 @@ fn run_rune_build(
         Err(e) => {
             if std::env::var_os("GRIMOIRE_KEEP_BUILD").is_some() {
                 let kept = temp.keep();
-                crate::util::progress::note(&format!(
+                crate::util::output::note(&format!(
                     "build workspace kept at {} (GRIMOIRE_KEEP_BUILD)",
                     kept.display()
                 ));

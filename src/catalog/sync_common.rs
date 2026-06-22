@@ -16,8 +16,7 @@ use crate::{
     nu::nuon_io,
     util::fs_util,
     util::paths,
-    util::progress,
-    util::table::{self, Cell},
+    util::output::{self, Cell},
 };
 
 /// Returns `true` when `url` is a local directory containing `manifest_name`.
@@ -109,7 +108,7 @@ pub fn copy_local_source(
     let source = PathBuf::from(url)
         .canonicalize()
         .with_context(|| format!("resolve source {url}"))?;
-    progress::status(&format!("copying local ({name})"));
+    output::status(&format!("copying local ({name})"));
     fs_util::copy_dir_all(&source, staged, name)
         .with_context(|| format!("copy local source for {name}"))?;
     Ok(true)
@@ -196,7 +195,7 @@ pub fn capture_signer(
         if let Err(err) = signing::verify_detached(manifest_path, advertised) {
             bail!("{entity_kind} `{name}` manifest signature does not verify: {err}",);
         }
-        progress::report(&format!(
+        output::report(&format!(
             "pinned {} signer(s) for {entity_kind} `{name}` (trust on first use)",
             advertised.len(),
         ));
@@ -207,7 +206,7 @@ pub fn capture_signer(
         existing.len() == advertised.len() && existing.iter().all(|k| advertised.contains(k));
     if !sets_match {
         if signing::verify_detached(manifest_path, existing).is_ok() {
-            progress::report(&format!(
+            output::report(&format!(
                 "{entity_kind} `{name}` rotated signing keys ({} → {})",
                 existing.len(),
                 advertised.len(),
@@ -266,10 +265,10 @@ pub fn remove_catalog<C: Catalog>(name: &str, remove_cache: bool) -> anyhow::Res
             fs::remove_dir_all(&cache_path)?;
         }
     }
-    progress::report(&format!(
+    output::report(&format!(
         "removed {} {}",
         C::ENTITY_KIND,
-        progress::accent(name)
+        output::accent(name)
     ));
     Ok(())
 }
@@ -286,7 +285,7 @@ pub fn list_catalogs<C: Catalog>() -> anyhow::Result<()> {
             ]
         })
         .collect();
-    table::print_rows(rows);
+    output::print_rows(rows);
     Ok(())
 }
 
@@ -326,7 +325,7 @@ pub fn sync_catalog_cache<C: Catalog, T>(
     let staged = temp.path().join("cache");
 
     if !copy_local_source(state.name(), state.url(), &staged, manifest_name)? {
-        progress::status(&format!("cloning {} ({})", C::ENTITY_KIND, state.name()));
+        output::status(&format!("cloning {} ({})", C::ENTITY_KIND, state.name()));
         clone(state.url(), state.ref_name(), &staged)
             .with_context(|| format!("could not sync {} `{}`", C::ENTITY_KIND, state.name()))?;
     }

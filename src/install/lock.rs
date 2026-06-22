@@ -86,7 +86,7 @@ pub fn export(dest: &std::path::Path) -> Result<()> {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     std::fs::copy(&src, dest).with_context(|| format!("write lockfile to {}", dest.display()))?;
-    crate::util::progress::report(&crate::util::progress::accent(&format!(
+    crate::util::output::report(&crate::util::output::accent(&format!(
         "exported lockfile to {}",
         dest.display()
     )));

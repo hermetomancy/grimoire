@@ -8,7 +8,7 @@ use std::{
     path::PathBuf,
 };
 
-use crate::{model::Dependency, model::preferences::Preferences, util::paths, util::progress};
+use crate::{model::Dependency, model::preferences::Preferences, util::paths, util::output};
 
 use super::*;
 
@@ -146,7 +146,7 @@ impl Resolver<'_> {
         if let Some(preferred) = self.preferences.get(&dep.name)
             && !providers.contains(preferred)
         {
-            progress::warn(&format!(
+            output::warn(&format!(
                 "preference for `{}` names `{preferred}`, which no longer provides it; ignoring",
                 dep.name
             ));

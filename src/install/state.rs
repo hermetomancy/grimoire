@@ -3,8 +3,7 @@
 use anyhow::{Result, bail};
 
 use crate::{
-    util::progress::{self, report},
-    util::table::{self, Cell},
+    util::output::{self, Cell, report},
 };
 
 use super::world::InstalledWorld;
@@ -14,7 +13,7 @@ pub fn list(args: crate::cli::ListArgs) -> Result<()> {
     let world = InstalledWorld::load_default()?;
     let states = world.to_states();
     if states.is_empty() {
-        println!("no packages installed");
+        output::line("no packages installed");
         return Ok(());
     }
     let linked = world.linked_immut();
@@ -34,7 +33,7 @@ pub fn list(args: crate::cli::ListArgs) -> Result<()> {
     if shown.is_empty() {
         // Only reachable with `--explicit` and nothing requested; the default and `--all`
         // always include the (non-empty) linked set.
-        println!("no explicitly-installed packages");
+        output::line("no explicitly-installed packages");
         return Ok(());
     }
     let hidden = states.len() - shown.len();
@@ -61,7 +60,7 @@ pub fn list(args: crate::cli::ListArgs) -> Result<()> {
             ]
         })
         .collect();
-    table::print_rows(rows);
+    output::print_rows(rows);
 
     // A terminal gets a closing summary; piped output stays rows-only for scripts.
     if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
@@ -85,7 +84,7 @@ pub fn list(args: crate::cli::ListArgs) -> Result<()> {
                 summary.push_str(&format!(", {hidden} store-only hidden (--all)"));
             }
         }
-        println!("{}", progress::faint(&summary));
+        output::line(&output::faint(&summary));
     }
     Ok(())
 }
@@ -143,16 +142,16 @@ fn dry_run_hold(name: &str, held: bool) -> Result<()> {
         bail!("package `{name}` is not installed");
     };
     if state.held == held {
-        println!(
+        output::note(&format!(
             "{name} is already {}; nothing to do",
             if held { "held" } else { "not held" }
-        );
+        ));
     } else {
-        println!(
+        output::note(&format!(
             "would {} {name} {}",
             if held { "hold" } else { "release" },
             state.version
-        );
+        ));
     }
     Ok(())
 }
@@ -179,7 +178,7 @@ pub(crate) fn set_hold(
     if announce {
         report(&format!(
             "{} {}",
-            progress::accent(name),
+            output::accent(name),
             if held { "held" } else { "released" }
         ));
     }

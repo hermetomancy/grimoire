@@ -10,7 +10,7 @@ use std::collections::{HashSet, VecDeque};
 use crate::{
     model::PackageState,
     util::paths,
-    util::progress::{accent, note, report, strong, warn},
+    util::output::{accent, note, report, strong, warn},
 };
 
 use super::world::InstalledWorld;
@@ -84,25 +84,25 @@ fn dry_run_remove(packages: &[String]) -> Result<()> {
     let linked = world.linked_immut();
     let removal_set: HashSet<&str> = packages.iter().map(String::as_str).collect();
     let mut to_remove = Vec::new();
-    println!("plan:");
+    crate::util::output::line("plan:");
     for package in packages {
         let Some(target) = states.iter().find(|state| state.name == *package) else {
             bail!("package `{package}` is not installed");
         };
         let dependents = dependents_outside(&states, target, &removal_set, &linked);
         if dependents.is_empty() {
-            println!("  - {} {}", target.name, target.version);
+            crate::util::output::line(&format!("  - {} {}", target.name, target.version));
             to_remove.push(target.name.clone());
         } else {
-            println!(
+            crate::util::output::line(&format!(
                 "  ~ {} kept — still required by {}; demoted to dependency",
                 target.name,
                 dependents.join(", ")
-            );
+            ));
         }
     }
     for orphan in simulate_orphan_sweep(&states, &to_remove, &[]) {
-        println!("  - {orphan} (unused dependency)");
+        crate::util::output::line(&format!("  - {orphan} (unused dependency)"));
     }
     Ok(())
 }

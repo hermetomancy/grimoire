@@ -7,7 +7,7 @@ use std::{collections::BTreeSet, fs, path::Path};
 
 use crate::{
     util::paths,
-    util::progress::{accent, faint, report, warn},
+    util::output::{accent, faint, report, warn},
 };
 
 use super::*;

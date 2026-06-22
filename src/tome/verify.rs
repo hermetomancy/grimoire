@@ -125,7 +125,7 @@ pub(crate) fn load_raw_index(cache: &Path, packages: &TomePackages) -> Result<Op
             // a blocker can steer users from verified binaries to source builds; the
             // warning is the tell.
             crate::fetch::IndexFetch::Unreachable(err) => {
-                crate::util::progress::warn(&format!(
+                crate::util::output::warn(&format!(
                     "binhost unreachable ({err:#}); continuing without its binary \
                      packages — affected installs build from source"
                 ));

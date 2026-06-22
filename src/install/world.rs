@@ -10,7 +10,7 @@ use std::{
 use crate::{
     model::{PackageState, parse_version_relaxed},
     nu::nuon_io,
-    util::{paths, progress::status},
+    util::{paths, output::status},
 };
 
 /// The installed package world: loaded once per command, mutated in memory, and committed to disk

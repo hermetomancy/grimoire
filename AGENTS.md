@@ -206,21 +206,25 @@ depends on a POSIX userland at `/usr/bin` and `/bin`. Default target triples:
 2. Error messages are for humans. Say what failed and, where possible, what to do.
 3. The CLI is imperative and explicit. Commands accept multiple positional packages where
    semantically reasonable; multi-package mutations are one all-or-nothing transaction (§9.3).
-4. **Result lines share one vocabulary** (`util/progress`), in three tiers:
-   - `✦` headline results (`report`): the outcomes the user asked for. Their subject (package
-     and version, the switch outcome) is emphasized with `accent` (bold green); trailing
-     detail is de-emphasized with `faint` after an em dash (`ripgrep 14.1.0 — prebuilt,
-     checksum verified`).
-   - dimmed, unprefixed context lines (`note`): secondary confirmations and transitions that
-     frame the headlines (`generation 4 is now current`, `switching profile to generation 4…`)
-     — embed `strong` (bold) subjects inside them.
-   - `!` cautions (`warn`): surprises that deserve a glance (`postgres 16.3 → 17.0 — major
-     version`). Never hand-roll a `!` or `warning:` prefix into a `report`.
+4. **All user-facing output flows through `util::output`** — commands never call `println!`/
+   `eprintln!` directly (denied crate-wide via clippy `disallowed-macros`; only the `util::output`
+   submodules opt back in). It owns stdout/stderr and styles once from `--quiet`/`--verbose`, in
+   three tiers:
+   - **Result** (stdout; `report`/`warn`/`note` gated by `--quiet`): `✦` headline results
+     (`report`) — subject in `accent` (bold green), trailing detail in `faint` after an em dash
+     (`ripgrep 14.1.0 — prebuilt, checksum verified`); `!` cautions (`warn`) for surprises that
+     deserve a glance (`postgres 16.3 → 17.0 — major version`); `✗` problems (`problem`, stderr,
+     always shown) for diagnostics like `doctor` findings; dimmed unprefixed context lines
+     (`note`) framing the headlines, with `strong` (bold) subjects embedded.
+   - **Data** (stdout, always shown — it is what the user asked for): `field(key, value)` detail,
+     `heading(title)` section titles, `print_rows` aligned tables (tab-separated when piped), and
+     `line` for raw/preformatted output (a store hash, a dry-run plan row).
+   - **Progress** (stderr): `status`/`success` steps folded into a transient spinner, plus the
+     live build-log pane (`build_log_line`).
 
-   Version transitions use `→`. List-style data renders through `util/table` (aligned styled
-   columns on a terminal, tab-separated when piped). Decorations and styling appear only on a
-   terminal with `NO_COLOR` unset; piped output stays plain and byte-stable. Phrasing is
-   lowercase and calm: say what happened, not how hard it was.
+   Never hand-roll a `!`/`✗`/`warning:` prefix into a `report`. Version transitions use `→`.
+   Decorations and styling appear only on a terminal with `NO_COLOR` unset; piped output stays
+   plain and byte-stable. Phrasing is lowercase and calm: say what happened, not how hard it was.
 
 ## 13. Testing
 

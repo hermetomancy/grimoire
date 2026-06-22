@@ -6,7 +6,7 @@ use std::fs;
 use crate::{
     cli::{TomeInitArgs, TomeRuneArgs},
     model::{validate_package_name, validate_package_version, validate_tome_name},
-    util::progress::report,
+    util::output::report,
 };
 
 /// Scaffolds a new tome: a self-naming `tome.rn` manifest, empty `runes/` and `sources/`
@@ -39,7 +39,7 @@ pub fn init(args: TomeInitArgs) -> Result<()> {
         fs::write(&gitignore_path, "/dist/\n")?;
     }
 
-    use crate::util::progress::{accent, faint, note};
+    use crate::util::output::{accent, faint, note};
     report(&format!(
         "created tome {} {}",
         accent(&args.name),
@@ -73,8 +73,8 @@ pub fn rune(args: TomeRuneArgs) -> Result<()> {
     fs::write(&rune_path, rune_template(&args.name, &args.version))?;
     report(&format!(
         "created rune {} {}",
-        crate::util::progress::accent(&args.name),
-        crate::util::progress::faint(&format!("in {}", rune_path.display()))
+        crate::util::output::accent(&args.name),
+        crate::util::output::faint(&format!("in {}", rune_path.display()))
     ));
     Ok(())
 }

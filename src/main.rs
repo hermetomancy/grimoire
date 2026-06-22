@@ -5,6 +5,10 @@
 //! the target and builds from source otherwise, into a user-local root with no privilege
 //! escalation. This crate is the binary; `main` parses the CLI and dispatches to each module's
 //! command entry point (`install`, `build`, `tome`, `doctor`, `query`, …).
+//!
+//! All user-facing output flows through [`util::output`]; bare `println!`/`eprintln!` are denied
+//! crate-wide (the `util::output` submodules opt back in). See `clippy.toml`.
+#![deny(clippy::disallowed_macros)]
 
 mod archive;
 mod build;
@@ -24,7 +28,7 @@ mod util;
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Command, GenerationCommand, PkgCommand, TomeCommand};
-use util::{process_lock, progress, progress::Verbosity};
+use util::{output, output::Verbosity, process_lock};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -35,19 +39,19 @@ fn main() -> Result<()> {
     } else {
         Verbosity::Normal
     };
-    progress::set_verbosity(verbosity);
+    output::set_verbosity(verbosity);
     // Tear the live spinner down before a panic message prints: the spinner thread redraws
     // stderr on a timer, and a panic mid-redraw would interleave escape sequences with the
     // panic report. The default hook still runs afterwards.
     let default_panic = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        progress::finish();
+        output::finish();
         default_panic(info);
     }));
     // Tear down any live spinner before returning so it never lingers in front of an error report
     // (anyhow prints to stderr) or the shell prompt.
     let result = run(cli);
-    progress::finish();
+    output::finish();
     result
 }
 
@@ -119,7 +123,7 @@ fn run(cli: Cli) -> Result<()> {
 
         Command::StoreHash(args) => {
             for package in &args.packages {
-                println!("{}", store::closure::store_hash(package)?);
+                output::line(&store::closure::store_hash(package)?);
             }
             Ok(())
         }
@@ -141,13 +145,13 @@ fn switch_generation(args: cli::SwitchArgs) -> Result<()> {
         Some(id) => id,
         None => profile::switch_to_previous()?,
     };
-    progress::report(&format!(
+    output::report(&format!(
         "{} {}",
-        progress::accent(&format!(
+        output::accent(&format!(
             "switched to generation {id} in {:.2}s",
             started.elapsed().as_secs_f64(),
         )),
-        progress::faint("— nothing was rebuilt, nothing was lost"),
+        output::faint("— nothing was rebuilt, nothing was lost"),
     ));
     Ok(())
 }

@@ -4,7 +4,7 @@
 use anyhow::Result;
 use std::collections::BTreeMap;
 
-use crate::{profile, util::time_util};
+use crate::{profile, util::output::line, util::time_util};
 
 /// How many per-package changes a generation line spells out before collapsing the rest
 /// into a count, so a large upgrade does not wrap the listing into unreadability.
@@ -27,17 +27,17 @@ pub fn generations() -> Result<()> {
             }
             None => "initial".to_owned(),
         };
-        println!(
+        line(&format!(
             "{} gen-{:<4} {}  {:>3} packages  {changes}",
             marker,
             generation.id,
             time_util::format_timestamp(generation.created),
             generation.packages.len(),
-        );
+        ));
     }
 
     if let Some(id) = current {
-        println!("profiles/current → gen-{id}");
+        line(&format!("profiles/current → gen-{id}"));
     }
     Ok(())
 }

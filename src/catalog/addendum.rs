@@ -18,7 +18,7 @@ use crate::{
     },
     nu::nuon_io,
     tome,
-    util::progress::{accent, note, report, status, warn},
+    util::output::{accent, note, report, status, warn},
 };
 
 const MANIFEST: &str = "addendum.nuon";
@@ -28,10 +28,10 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
     validate_tome_ref(&args.ref_name)?;
     sync_common::validate_local_source(&args.git_url, MANIFEST)?;
     if args.dry_run {
-        println!(
+        note(&format!(
             "would clone {} (ref {}) and register the addendum under its manifest name",
             args.git_url, args.ref_name
-        );
+        ));
         return Ok(());
     }
 
@@ -68,7 +68,7 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
 
 pub fn remove(args: TomeRemoveArgs) -> Result<()> {
     if args.dry_run {
-        println!("would remove addendum `{}` and its cache", args.name);
+        note(&format!("would remove addendum `{}` and its cache", args.name));
         return Ok(());
     }
     sync_common::remove_catalog::<AddendumState>(&args.name, true)
@@ -95,10 +95,10 @@ pub fn update(args: TomeUpdateArgs) -> Result<()> {
     let mut any_failed = false;
     for state in addenda {
         if args.dry_run {
-            println!(
+            note(&format!(
                 "would sync addendum `{}` from {} (ref {})",
                 state.name, state.url, state.ref_name
-            );
+            ));
             continue;
         }
         match sync_addendum_cache(&state) {

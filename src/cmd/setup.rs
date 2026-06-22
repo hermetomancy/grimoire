@@ -12,26 +12,26 @@ use crate::util::paths;
 pub fn setup(args: crate::cli::SetupArgs) -> Result<()> {
     if env::var_os("GRIMOIRE_ROOT").is_some() {
         let root = paths::install_root()?;
-        println!(
+        crate::util::output::note(&format!(
             "GRIMOIRE_ROOT is set; using {} as the store root. No system-wide setup needed.",
             root.display()
-        );
+        ));
         ensure_profile_on_path(args.dry_run)?;
         return Ok(());
     }
     if args.dry_run {
         #[cfg(target_os = "macos")]
-        println!(
+        crate::util::output::note(
             "would register /grm in /etc/synthetic.conf (requires sudo) and prompt for a \
-             reboot so macOS creates the synthetic root directory"
+             reboot so macOS creates the synthetic root directory",
         );
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        println!("would create /grm (requires sudo) and chown it to the current user");
+        crate::util::output::note("would create /grm (requires sudo) and chown it to the current user");
         ensure_profile_on_path(true)?;
-        println!(
+        crate::util::output::note(&format!(
             "would then add the {CORE_TOME_URL} and {WORLD_TOME_URL} tomes (if no tome \
              is configured) and install grimoire through itself"
-        );
+        ));
         return Ok(());
     }
 
@@ -61,8 +61,8 @@ fn ensure_profile_on_path(dry_run: bool) -> Result<()> {
     let home = env::var("HOME").context("HOME is not set; cannot locate a shell rc file")?;
     let line = path_line(&shell_name(), &display_with_home(&bin, &home));
     let Some(rc) = rc_file(&shell_name(), Path::new(&home)) else {
-        println!("add the profile bin to your shell's PATH:");
-        println!("  {line}");
+        crate::util::output::note("add the profile bin to your shell's PATH:");
+        crate::util::output::note(&format!("  {line}"));
         return Ok(());
     };
 
@@ -73,7 +73,7 @@ fn ensure_profile_on_path(dry_run: bool) -> Result<()> {
         return Ok(());
     }
     if dry_run {
-        println!("would append to {}: {line}", rc.display());
+        crate::util::output::note(&format!("would append to {}: {line}", rc.display()));
         return Ok(());
     }
     if let Some(parent) = rc.parent() {
@@ -88,10 +88,10 @@ fn ensure_profile_on_path(dry_run: bool) -> Result<()> {
     content.push_str(&line);
     content.push('\n');
     fs::write(&rc, content).with_context(|| format!("append PATH line to {}", rc.display()))?;
-    println!(
+    crate::util::output::report(&format!(
         "added the profile bin to PATH in {}; restart your shell (or `source` it) to use it",
         rc.display()
-    );
+    ));
     Ok(())
 }
 
@@ -157,14 +157,14 @@ fn bootstrap_core() -> Result<()> {
 
     if crate::tome::load_tomes()?.is_empty() {
         for (name, url) in [("core", CORE_TOME_URL), ("world", WORLD_TOME_URL)] {
-            crate::util::progress::note(&format!("adding the {name} tome from {url}…"));
+            crate::util::output::note(&format!("adding the {name} tome from {url}…"));
             if let Err(e) = crate::tome::add(crate::cli::TomeAddArgs {
                 git_url: url.to_owned(),
                 ref_name: "main".to_owned(),
                 signer: Vec::new(),
                 dry_run: false,
             }) {
-                crate::util::progress::warn(&format!(
+                crate::util::output::warn(&format!(
                     "could not add the {name} tome: {e:#}; add it with `grm tome add {url}`"
                 ));
                 if name == "core" {
@@ -180,7 +180,7 @@ fn bootstrap_core() -> Result<()> {
     if grimoire_installed {
         return Ok(());
     }
-    crate::util::progress::note("installing grimoire through itself…");
+    crate::util::output::note("installing grimoire through itself…");
     if let Err(e) = crate::install::install(crate::cli::InstallArgs {
         packages: vec!["grimoire".to_owned()],
         from_source: false,
@@ -188,7 +188,7 @@ fn bootstrap_core() -> Result<()> {
         sha256: None,
         dry_run: false,
     }) {
-        crate::util::progress::warn(&format!(
+        crate::util::output::warn(&format!(
             "could not install grimoire through itself: {e:#}; run `grm install grimoire` \
              once the tome publishes it"
         ));
@@ -199,12 +199,18 @@ fn bootstrap_core() -> Result<()> {
 fn setup_posix(path: &Path) -> Result<()> {
     if path.exists() {
         if is_writable(path)? {
-            println!("Grimoire store {} is already set up.", path.display());
+            crate::util::output::report(&format!(
+                "Grimoire store {} is already set up.",
+                path.display()
+            ));
             return Ok(());
         }
         if let Some((uid, gid)) = sudo_identity() {
             chown_path(path, uid, gid)?;
-            println!("Made {} writable for the invoking user.", path.display());
+            crate::util::output::report(&format!(
+                "Made {} writable for the invoking user.",
+                path.display()
+            ));
             return Ok(());
         }
         bail!(
@@ -219,16 +225,16 @@ fn setup_posix(path: &Path) -> Result<()> {
 
     if let Some((uid, gid)) = sudo_identity() {
         chown_path(path, uid, gid)?;
-        println!(
+        crate::util::output::report(&format!(
             "Created {} and made it owned by the invoking user.",
             path.display()
-        );
+        ));
     } else {
-        println!("Created {} (owned by root).", path.display());
-        println!(
+        crate::util::output::report(&format!("Created {} (owned by root).", path.display()));
+        crate::util::output::note(&format!(
             "To make it user-writable, run: sudo chown $(whoami): {}",
             path.display()
-        );
+        ));
     }
     Ok(())
 }
@@ -278,13 +284,13 @@ fn setup_macos() -> Result<()> {
     fs::rename(&temp, synthetic)
         .with_context(|| format!("atomically update {}", synthetic.display()))?;
 
-    println!("Added '{marker}' to {}.", synthetic.display());
-    println!(
+    crate::util::output::report(&format!("Added '{marker}' to {}.", synthetic.display()));
+    crate::util::output::note(&format!(
         "Reboot your Mac. After reboot, {} will exist.",
         path.display()
-    );
-    println!("Then rerun `grm setup` to adjust permissions, or run:");
-    println!("  sudo chown $(whoami): {}", path.display());
+    ));
+    crate::util::output::note("Then rerun `grm setup` to adjust permissions, or run:");
+    crate::util::output::note(&format!("  sudo chown $(whoami): {}", path.display()));
     Ok(())
 }
 

@@ -19,7 +19,7 @@ use crate::{
     profile,
     solve::{self, Plan, PlanStep},
     util::paths,
-    util::progress::report,
+    util::output::report,
 };
 
 pub(crate) mod lock;
@@ -173,9 +173,9 @@ pub fn install(args: InstallArgs) -> Result<()> {
             } else {
                 ""
             };
-            crate::util::progress::note(&format!(
+            crate::util::output::note(&format!(
                 "+ {} build dep{} to realize: {}{ellipsis}",
-                crate::util::progress::strong(&extra.len().to_string()),
+                crate::util::output::strong(&extra.len().to_string()),
                 if extra.len() == 1 { "" } else { "s" },
                 shown.join(", ")
             ));
@@ -322,7 +322,9 @@ pub fn restore(args: crate::cli::RestoreArgs) -> Result<()> {
             .collect();
         let swept = simulate_orphan_sweep(&states, &[], &strays);
         for name in swept {
-            println!("  - {name} (not recorded in the lock; would be swept)");
+            crate::util::output::line(&format!(
+                "  - {name} (not recorded in the lock; would be swept)"
+            ));
         }
         return Ok(());
     }
@@ -347,11 +349,11 @@ pub fn restore(args: crate::cli::RestoreArgs) -> Result<()> {
     installer.report_notes();
     report(&format!(
         "{} {}",
-        crate::util::progress::accent(&format!(
+        crate::util::output::accent(&format!(
             "restored {} requested package(s)",
             requested.len()
         )),
-        crate::util::progress::faint(&format!("from {}", lock_file.display()))
+        crate::util::output::faint(&format!("from {}", lock_file.display()))
     ));
     Ok(())
 }
@@ -474,7 +476,7 @@ fn settle_capability_intent(name: &str, dry_run: bool, locked: bool) -> Result<(
     providers.sort();
     providers.dedup();
     if dry_run {
-        crate::util::progress::warn(&format!(
+        crate::util::output::warn(&format!(
             "`{name}` is a capability with multiple providers ({}); a real install will ask \
              which one you mean",
             providers.join(", ")
@@ -489,13 +491,14 @@ fn settle_capability_intent(name: &str, dry_run: bool, locked: bool) -> Result<(
         );
     }
 
-    println!("`{name}` is provided by multiple packages:");
+    crate::util::output::line(&format!("`{name}` is provided by multiple packages:"));
     for (index, provider) in providers.iter().enumerate() {
-        println!("  {}) {provider}", index + 1);
+        crate::util::output::line(&format!("  {}) {provider}", index + 1));
     }
-    print!("which should provide `{name}`? [1-{}]: ", providers.len());
-    use std::io::Write;
-    std::io::stdout().flush().ok();
+    crate::util::output::prompt(&format!(
+        "which should provide `{name}`? [1-{}]: ",
+        providers.len()
+    ));
     let mut answer = String::new();
     std::io::stdin()
         .read_line(&mut answer)
@@ -566,10 +569,10 @@ fn refuse_plan_conflicts(plan: &Plan) -> Result<()> {
 
 fn print_plan(plan: &Plan, installed: &BTreeMap<String, Version>) -> Result<()> {
     if plan.steps.is_empty() {
-        println!("plan: already satisfied (no install steps)");
+        crate::util::output::line("plan: already satisfied (no install steps)");
         return Ok(());
     }
-    println!("plan:");
+    crate::util::output::line("plan:");
     print_plan_body(plan);
     print_plan_consequences(plan, installed)
 }
@@ -578,12 +581,12 @@ fn print_plan(plan: &Plan, installed: &BTreeMap<String, Version>) -> Result<()> 
 /// has already printed a synthetic root step (source-rune or local-archive install).
 fn print_plan_body(plan: &Plan) {
     for step in &plan.steps {
-        println!(
+        crate::util::output::line(&format!(
             "  + {} {} ({})",
             step.name,
             step.version,
             describe_origin(step)
-        );
+        ));
     }
 }
 
@@ -596,18 +599,18 @@ fn print_plan_consequences(plan: &Plan, installed: &BTreeMap<String, Version>) -
     for step in &plan.steps {
         for old in &step.replaces {
             if old != &step.name && linked.contains(old) {
-                println!("  ~ {old} → {} (replaced)", step.name);
+                crate::util::output::line(&format!("  ~ {old} → {} (replaced)", step.name));
             }
         }
     }
 
     for (for_name, dep_step) in build_dep_closure(&plan.steps, installed)? {
-        println!(
+        crate::util::output::line(&format!(
             "  + {} {} ({}; build dep of {for_name}, store-only)",
             dep_step.name,
             dep_step.version,
             describe_origin(&dep_step)
-        );
+        ));
     }
     Ok(())
 }

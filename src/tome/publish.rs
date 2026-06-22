@@ -16,7 +16,7 @@ use crate::{
     model::{IndexEntry, PackageIndex, validate_package_name},
     nu::{nuon_io, runtime::EmbeddedNuRuntime},
     util::paths,
-    util::progress::{report, status},
+    util::output::{report, status},
 };
 
 use super::lint;
@@ -93,8 +93,8 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
         &mut catalog,
     )?;
 
-    crate::util::progress::note(&format!("registered in {}", index_path.display()));
-    crate::util::progress::note(&format!(
+    crate::util::output::note(&format!("registered in {}", index_path.display()));
+    crate::util::output::note(&format!(
         "publish: upload the contents of {} to the location in packages.repo",
         dist_dir.display()
     ));
@@ -153,8 +153,8 @@ pub(crate) fn build_runes(
                 .with_context(|| format!("linkage lint for `{}`", entry.name))?;
             report(&format!(
                 "built {} {}",
-                crate::util::progress::accent(&format!("{} {}", entry.name, entry.version)),
-                crate::util::progress::faint(&format!(
+                crate::util::output::accent(&format!("{} {}", entry.name, entry.version)),
+                crate::util::output::faint(&format!(
                     "({}) into {}",
                     entry.target,
                     archive.display()
@@ -274,11 +274,11 @@ pub(crate) fn rebuild_index(dist_dir: &Path) -> Result<PackageIndex> {
             Ok((store_hash, index_entry)) => {
                 report(&format!(
                     "indexed {} {}",
-                    crate::util::progress::accent(&format!(
+                    crate::util::output::accent(&format!(
                         "{} {}",
                         index_entry.name, index_entry.version
                     )),
-                    crate::util::progress::faint(&format!(
+                    crate::util::output::faint(&format!(
                         "({}) from {}",
                         index_entry.target, name
                     ))
@@ -286,7 +286,7 @@ pub(crate) fn rebuild_index(dist_dir: &Path) -> Result<PackageIndex> {
                 entries.insert(store_hash, index_entry);
             }
             Err(e) => {
-                crate::util::progress::warn(&format!("skipping {}: {e}", path.display()));
+                crate::util::output::warn(&format!("skipping {}: {e}", path.display()));
             }
         }
     }

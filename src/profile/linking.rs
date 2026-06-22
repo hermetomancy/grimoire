@@ -16,7 +16,7 @@ use std::{
 };
 
 use crate::{
-    model::PackageState, model::preferences::Preferences, util::paths, util::progress::warn,
+    model::PackageState, model::preferences::Preferences, util::paths, util::output::warn,
 };
 
 /// Subdirectories scanned for human-facing artifacts (man pages, completions, desktop files)

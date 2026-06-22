@@ -12,7 +12,7 @@ use crate::{
     cli::{TomeAddArgs, TomeInfoArgs, TomeRemoveArgs, TomeUpdateArgs},
     model::{Catalog, TomeState, validate_tome_name, validate_tome_ref, validate_tome_url},
     nu::{nuon_io, runtime::EmbeddedNuRuntime},
-    util::progress::{report, warn},
+    util::output::{self, report, warn},
 };
 
 use super::*;
@@ -22,10 +22,10 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
     validate_tome_ref(&args.ref_name)?;
     sync_common::validate_local_source(&args.git_url, "tome.rn")?;
     if args.dry_run {
-        println!(
+        output::note(&format!(
             "would clone {} (ref {}) and register the tome under its manifest name",
             args.git_url, args.ref_name
-        );
+        ));
         return Ok(());
     }
 
@@ -67,7 +67,7 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
     nuon_io::write_nuon(&state_path, &state.to_value())?;
     report(&format!(
         "added tome {}",
-        crate::util::progress::accent(&name)
+        crate::util::output::accent(&name)
     ));
     Ok(())
 }
@@ -79,23 +79,20 @@ pub fn list() -> Result<()> {
 pub fn info(args: TomeInfoArgs) -> Result<()> {
     validate_tome_name(&args.name)?;
     let tome = sync_common::load_catalog::<TomeState>(&args.name)?;
-    println!("{}", tome.name);
-    println!("  url:     {}", tome.url);
-    println!("  ref:     {}", tome.ref_name);
-    match &tome.checked_commit {
-        Some(commit) => println!("  commit:  {commit}"),
-        None => println!("  commit:  (not yet synced)"),
-    }
+    output::heading(&tome.name);
+    output::field("url", &tome.url);
+    output::field("ref", &tome.ref_name);
+    output::field(
+        "commit",
+        tome.checked_commit.as_deref().unwrap_or("(not yet synced)"),
+    );
     if let Some(desc) = tome.tome.as_ref().and_then(|m| m.description.as_ref()) {
-        println!("  about:   {desc}");
+        output::field("about", desc);
     }
     if tome.signer_pubkeys.is_empty() {
-        println!("  signing: unsigned");
+        output::field("signing", "unsigned");
     } else {
-        println!("  signers:");
-        for key in &tome.signer_pubkeys {
-            println!("    {key}");
-        }
+        output::field("signers", &tome.signer_pubkeys.join(", "));
     }
     Ok(())
 }
@@ -115,10 +112,10 @@ pub fn update(args: TomeUpdateArgs) -> Result<()> {
 
     for tome in tomes {
         if args.dry_run {
-            println!(
+            output::note(&format!(
                 "would sync tome `{}` from {} (ref {})",
                 tome.name, tome.url, tome.ref_name
-            );
+            ));
             continue;
         }
         let line = sync_tome_cache(&tome)?;
@@ -138,13 +135,13 @@ pub fn update_all_configured() -> Result<()> {
 pub fn remove(args: TomeRemoveArgs) -> Result<()> {
     if args.dry_run {
         let orphaned = installed_from_tome(&args.name).unwrap_or_default();
-        println!("would remove tome `{}` and its cache", args.name);
+        output::note(&format!("would remove tome `{}` and its cache", args.name));
         if !orphaned.is_empty() {
-            println!(
+            output::note(&format!(
                 "  installed packages losing their runes (stay installed, no longer \
                  rebuildable or drift-checked): {}",
                 orphaned.join(", ")
-            );
+            ));
         }
         return Ok(());
     }

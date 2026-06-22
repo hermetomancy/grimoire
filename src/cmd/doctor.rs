@@ -6,9 +6,6 @@
 use anyhow::{Context, Result};
 use std::{collections::BTreeMap, fs, path::Path};
 
-use owo_colors::OwoColorize;
-use std::io::IsTerminal;
-
 use crate::{
     build::toolchain,
     catalog::sync_common,
@@ -17,26 +14,9 @@ use crate::{
     model::{PackageState, preferences::Preferences},
     nu::nuon_io,
     profile, tome,
+    util::output::{self, field, problem},
     util::paths,
-    util::progress,
 };
-
-/// An environment/health field line: faint key, plain value — identical bytes when piped,
-/// so scripts and tests keep parsing `key: value`.
-fn field(key: &str, value: &str) {
-    println!("{} {value}", progress::faint(&format!("{key}:")));
-}
-
-/// A per-item problem on stderr: a yellow `!` on a terminal, the historical plain
-/// `grimoire: ` prefix when piped. Problems are diagnostics the user explicitly asked for,
-/// so they print regardless of verbosity.
-fn problem(message: &str) {
-    if std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
-        eprintln!("{} {message}", "!".bold().yellow());
-    } else {
-        eprintln!("grimoire: {message}");
-    }
-}
 
 const CORE_USERLAND_TOOLS_LINUX: &[&str] = &[
     "linux-headers",
@@ -96,7 +76,7 @@ pub fn doctor() -> Result<()> {
     check_lock(&mut problems)?;
 
     if problems == 0 {
-        field("health", &progress::strong("ok"));
+        field("health", &output::strong("ok"));
     } else {
         field("health", &format!("{problems} problem(s) found"));
     }
@@ -435,13 +415,13 @@ fn check_address_drift() -> Result<()> {
             Some(diff) => format!(" (build environment changed: {diff})"),
             None => String::new(),
         };
-        progress::note(&format!(
+        output::note(&format!(
             "{} drifted: installed {installed}, expected {}{cause}",
-            progress::strong(&stale.name),
+            output::strong(&stale.name),
             stale.expected
         ));
     }
-    progress::note(&format!(
+    output::note(&format!(
         "{} package(s) will rebuild at their new address the next time an install or \
          upgrade needs them (rune, dependency, or build environment changed)",
         drifted.len()

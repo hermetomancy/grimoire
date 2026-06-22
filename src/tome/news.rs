@@ -13,7 +13,7 @@ use crate::{
     catalog::sync_common,
     model::{Catalog, TomeState},
     nu::nuon_io,
-    util::progress::report,
+    util::output::report,
 };
 
 pub struct NewsItem {
@@ -102,7 +102,7 @@ pub fn surface_after_sync(tome_name: &str, cache: &Path, first_sync: bool) -> Re
         for item in fresh {
             print_item(tome_name, item, NEWS_UPDATE_BODY_LINES);
         }
-        crate::util::progress::note(&format!(
+        crate::util::output::note(&format!(
             "run `grm tome news {tome_name}` to read items in full"
         ));
     }
@@ -113,7 +113,7 @@ pub fn surface_after_sync(tome_name: &str, cache: &Path, first_sync: bool) -> Re
 const NEWS_UPDATE_BODY_LINES: usize = 10;
 
 fn print_item(tome_name: &str, item: &NewsItem, cap: usize) {
-    use crate::util::progress::{faint, note, strong};
+    use crate::util::output::{faint, note, strong};
     report(&format!(
         "{} {}",
         faint(&format!("news [{tome_name}]")),
@@ -140,7 +140,7 @@ fn advance_marker(mut state: TomeState, newest: String) -> Result<()> {
 
 /// The `grm tome news` command: prints unread items in full and advances the marker, or with
 /// `all` prints everything and leaves the marker untouched. Explicitly requested data, so it
-/// prints with `println!` (visible under `--quiet`).
+/// prints via the data tier (`output::line`, visible under `--quiet`).
 pub fn news_command(name: Option<String>, all: bool) -> Result<()> {
     let tomes = match name {
         Some(name) => vec![sync_common::load_catalog::<TomeState>(&name)?],
@@ -157,13 +157,13 @@ pub fn news_command(name: Option<String>, all: bool) -> Result<()> {
         };
         for item in to_show {
             printed_any = true;
-            println!("news [{}] {}", tome.name, item.title);
+            crate::util::output::line(&format!("news [{}] {}", tome.name, item.title));
             if !item.body.is_empty() {
-                for line in item.body.lines() {
-                    println!("  {line}");
+                for body_line in item.body.lines() {
+                    crate::util::output::line(&format!("  {body_line}"));
                 }
             }
-            println!();
+            crate::util::output::line("");
         }
         if !all
             && let Some(newest) = items.last().map(|item| item.id.clone())
