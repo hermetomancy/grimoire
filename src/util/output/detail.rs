@@ -32,9 +32,22 @@ pub fn heading(title: &str) {
 
 /// A raw, unstyled stdout line, always printed — for verbatim machine-readable data a script
 /// consumes (a store hash) or a preformatted block the caller has already laid out. Prefer
-/// [`field`]/[`heading`]/[`super::print_rows`] for anything with structure to render.
+/// [`field`]/[`heading`]/[`super::print_rows`]/[`list_item`] for anything with structure to render.
 pub fn line(text: &str) {
     clear_spinner();
     clear_live_build_log();
     println!("{text}");
+}
+
+/// One item of a bulleted list — the single-column counterpart to [`super::print_rows`]. On a
+/// terminal: `  • item` with a dimmed bullet; piped: the bare item, one per line, so scripts and
+/// tests keep parsing one value per line. Always prints (it is the requested data).
+pub fn list_item(text: &str) {
+    clear_spinner();
+    clear_live_build_log();
+    if stdout_styled() {
+        println!("  {} {text}", "•".dimmed());
+    } else {
+        println!("{text}");
+    }
 }

@@ -4,7 +4,11 @@
 use anyhow::Result;
 use std::collections::BTreeMap;
 
-use crate::{profile, util::output::line, util::time_util};
+use crate::{
+    profile,
+    util::output::{Cell, note, print_rows},
+    util::time_util,
+};
 
 /// How many per-package changes a generation line spells out before collapsing the rest
 /// into a count, so a large upgrade does not wrap the listing into unreadability.
@@ -15,29 +19,35 @@ pub fn generations() -> Result<()> {
     let generations = profile::list_generations()?;
     let current = profile::current_generation_id()?;
 
-    for (index, generation) in generations.iter().enumerate() {
-        let marker = if current == Some(generation.id) {
-            "*"
-        } else {
-            " "
-        };
-        let changes = match generations.get(index + 1) {
-            Some(previous) => {
-                diff_changes(&package_versions(generation), &package_versions(previous))
-            }
-            None => "initial".to_owned(),
-        };
-        line(&format!(
-            "{} gen-{:<4} {}  {:>3} packages  {changes}",
-            marker,
-            generation.id,
-            time_util::format_timestamp(generation.created),
-            generation.packages.len(),
-        ));
-    }
+    let rows = generations
+        .iter()
+        .enumerate()
+        .map(|(index, generation)| {
+            let is_current = current == Some(generation.id);
+            let marker = if is_current { "*" } else { " " };
+            let changes = match generations.get(index + 1) {
+                Some(previous) => {
+                    diff_changes(&package_versions(generation), &package_versions(previous))
+                }
+                None => "initial".to_owned(),
+            };
+            let id_cell = format!("{marker} gen-{}", generation.id);
+            vec![
+                if is_current {
+                    Cell::strong(id_cell)
+                } else {
+                    Cell::plain(id_cell)
+                },
+                Cell::faint(time_util::format_timestamp(generation.created)),
+                Cell::plain(format!("{} packages", generation.packages.len())),
+                Cell::faint(changes),
+            ]
+        })
+        .collect();
+    print_rows(rows);
 
     if let Some(id) = current {
-        line(&format!("profiles/current → gen-{id}"));
+        note(&format!("profiles/current → gen-{id}"));
     }
     Ok(())
 }

@@ -15,7 +15,7 @@ use crate::{
     install,
     model::PackageState,
     solve,
-    util::output::line,
+    util::output::{Cell, list_item, print_rows},
     util::paths,
 };
 
@@ -37,7 +37,12 @@ pub fn files(args: PackageArg) -> Result<()> {
                 continue;
             }
             let rel = entry.path().strip_prefix(&store)?;
-            line(&rel.display().to_string());
+            // Skip grimoire's own package metadata (.grimoire/package.nuon, .grimoire/rune.rn,
+            // written into every store package by archive::pack) — not files the package installed.
+            if rel.starts_with(".grimoire") {
+                continue;
+            }
+            list_item(&rel.display().to_string());
         }
     }
     Ok(())
@@ -71,9 +76,11 @@ pub fn owns(args: OwnsArgs) -> Result<()> {
             args.path.display()
         );
     }
-    for state in owners {
-        line(&format!("{}\t{}", state.name, state.version));
-    }
+    let rows = owners
+        .iter()
+        .map(|state| vec![Cell::strong(&state.name), Cell::plain(&state.version)])
+        .collect();
+    print_rows(rows);
     Ok(())
 }
 
@@ -91,12 +98,21 @@ pub fn provides(args: ProvidesArgs) -> Result<()> {
             args.name
         );
     }
-    for (package, (version, installed)) in providers {
-        line(&format!(
-            "{package}\t{version}\t{}",
-            if installed { "installed" } else { "available" }
-        ));
-    }
+    let rows = providers
+        .into_iter()
+        .map(|(package, (version, installed))| {
+            vec![
+                Cell::strong(package),
+                Cell::plain(version),
+                if installed {
+                    Cell::plain("installed")
+                } else {
+                    Cell::faint("available")
+                },
+            ]
+        })
+        .collect();
+    print_rows(rows);
     Ok(())
 }
 

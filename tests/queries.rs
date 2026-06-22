@@ -417,8 +417,12 @@ fn files_owns_and_provides_resolve_package_contents() {
     assert_success(&files, "files app");
     let listed = stdout(&files);
     assert!(
-        listed.contains("bin/app") && listed.contains(".grimoire/package.nuon"),
+        listed.contains("bin/app"),
         "files should list the package contents: {listed}"
+    );
+    assert!(
+        !listed.contains(".grimoire/"),
+        "files must not list grimoire's own store metadata (.grimoire/*): {listed}"
     );
     assert_failure_contains(
         &run(root, &["pkg", "files", "nosuchpkg"]),
