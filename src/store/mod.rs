@@ -229,6 +229,7 @@ mod tests {
             store_path: None,
             targets: Vec::new(),
             fixed_output,
+            build_only: false,
             summary: None,
             bins: BTreeMap::new(),
             sources: BTreeMap::from([(

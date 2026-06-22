@@ -17,27 +17,27 @@ pub fn list(args: crate::cli::ListArgs) -> Result<()> {
         return Ok(());
     }
     let linked = world.linked_immut();
-    // The environment is what `list` answers for; store-only packages are cache and only
-    // appear under `--all`. `--explicit` narrows the other way — to just the requested
-    // roots, the answer to "what did I actually ask for" (the set `grm install` rebuilds).
+    let bin_linked = world.bin_linked_immut();
+    // The environment is what `list` answers for: the PATH-linked set. Store-only cache and
+    // build-only toolchain packages (pinned but never linked) only appear under `--all`.
+    // `--explicit` narrows the other way — to just the requested roots, the answer to "what did I
+    // actually ask for" (the set `grm install` rebuilds).
     let shown: Vec<_> = states
         .iter()
         .filter(|state| {
             if args.explicit {
                 state.requested
             } else {
-                args.all || linked.contains(&state.name)
+                args.all || bin_linked.contains(&state.name)
             }
         })
         .collect();
     if shown.is_empty() {
-        // Only reachable with `--explicit` and nothing requested; the default and `--all`
-        // always include the (non-empty) linked set.
         output::line("no explicitly-installed packages");
         return Ok(());
     }
     let hidden = states.len() - shown.len();
-    let (total, mut held, mut store_only) = (shown.len(), 0usize, 0usize);
+    let (total, mut held, mut store_only, mut build_only) = (shown.len(), 0, 0, 0);
     let rows = shown
         .iter()
         .map(|state| {
@@ -45,10 +45,13 @@ pub fn list(args: crate::cli::ListArgs) -> Result<()> {
                 held += 1;
                 Cell::caution("held")
             } else if !linked.contains(&state.name) {
-                // Present in the store for reuse (build dep, residue) but not part of the
-                // user's environment.
+                // Present in the store for reuse (build dep, residue) but not the environment.
                 store_only += 1;
                 Cell::faint("store-only")
+            } else if !bin_linked.contains(&state.name) {
+                // A managed toolchain package: pinned in the store but kept off the PATH.
+                build_only += 1;
+                Cell::faint("build-only")
             } else {
                 Cell::plain("")
             };
@@ -71,17 +74,20 @@ pub fn list(args: crate::cli::ListArgs) -> Result<()> {
                 summary.push_str(&format!(" — {held} held"));
             }
         } else {
-            let linked_count = total - held - store_only;
+            let linked_count = total - held - store_only - build_only;
             let mut parts = vec![format!("{linked_count} linked")];
             if held > 0 {
                 parts.push(format!("{held} held"));
+            }
+            if build_only > 0 {
+                parts.push(format!("{build_only} build-only"));
             }
             if store_only > 0 {
                 parts.push(format!("{store_only} store-only"));
             }
             summary.push_str(&format!(" — {}", parts.join(", ")));
             if !args.all && hidden > 0 {
-                summary.push_str(&format!(", {hidden} store-only hidden (--all)"));
+                summary.push_str(&format!(", {hidden} hidden (--all)"));
             }
         }
         output::line(&output::faint(&summary));

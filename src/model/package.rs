@@ -21,6 +21,11 @@ pub struct PackageMetadata {
     /// by its sources alone, so its store hash excludes the host build environment and dependency
     /// closure (a Nix fixed-output derivation).
     pub fixed_output: bool,
+    /// `true` for the managed build-environment toolchain (`build-env` and its kind). It is
+    /// installed and pinned like any requested package, but neither it nor its runtime closure is
+    /// linked into the active profile — the toolchain is build machinery, not user commands, so it
+    /// stays in the store (available for builds, survives `grm clean`) without flooding the PATH.
+    pub build_only: bool,
     pub summary: Option<String>,
     /// Binaries this package provides, keyed by target pattern (`default`, OS name like `linux`,
     /// or full triple like `linux-x86_64-musl`). Merged at resolution time: `default` → OS → exact.
@@ -90,6 +95,7 @@ impl PackageMetadata {
         let summary = optional_string(&record, "summary")?;
         let store_path = optional_string(&record, "store_path")?;
         let fixed_output = optional_bool(&record, "fixed_output")?.unwrap_or(false);
+        let build_only = optional_bool(&record, "build_only")?.unwrap_or(false);
         // A package with no executables (e.g. a library) is valid: `bins` defaults to empty.
         let bins = match record.get("bins") {
             Some(value) => parse_target_conditional_bins(value, "package field `bins`")?,
@@ -135,6 +141,7 @@ impl PackageMetadata {
             store_path,
             targets,
             fixed_output,
+            build_only,
             summary,
             bins,
             sources,
@@ -218,6 +225,9 @@ impl PackageMetadata {
         }
         if self.fixed_output {
             record.push("fixed_output", Value::bool(true, Span::unknown()));
+        }
+        if self.build_only {
+            record.push("build_only", Value::bool(true, Span::unknown()));
         }
 
         // Archives are target-specific, so write resolved bins under `default`.
@@ -497,6 +507,7 @@ mod tests {
             store_path: None,
             targets: Vec::new(),
             fixed_output: true,
+            build_only: false,
             summary: None,
             bins: BTreeMap::new(),
             sources,
@@ -539,6 +550,7 @@ mod tests {
             store_path: None,
             targets: vec![],
             fixed_output: false,
+            build_only: false,
             summary: None,
             bins,
             sources: BTreeMap::new(),

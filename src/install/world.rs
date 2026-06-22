@@ -158,6 +158,37 @@ impl InstalledWorld {
         linked
     }
 
+    /// The subset of the linked set whose bins are symlinked onto the active PATH. Excludes
+    /// build-only packages (the managed toolchain, e.g. `build-env`) and anything reachable only
+    /// through them: those stay pinned in the store and available for builds, but their bins are
+    /// build machinery, not user commands. A toolchain tool also reachable from a normal requested
+    /// root (an explicit `grm install cmake`) is still linked. Same seed/closure as [`linked_immut`]
+    /// otherwise, so for an install with no build-only packages the two sets are identical.
+    pub fn bin_linked_immut(&self) -> HashSet<String> {
+        let mut linked: HashSet<String> = HashSet::new();
+        let mut queue: VecDeque<&PackageState> = self
+            .states
+            .values()
+            .filter(|state| (state.requested || state.held) && !state.build_only)
+            .collect();
+        while let Some(state) = queue.pop_front() {
+            // A build-only package is a PATH barrier: never linked, and its runtime closure is not
+            // pursued through it (the toolchain stays off PATH). Anything also reachable from a
+            // normal root is still enqueued via that path.
+            if state.build_only || !linked.insert(state.name.clone()) {
+                continue;
+            }
+            for dep in &state.runtime_deps {
+                if let Some(dep_state) = self.resolve_dep(dep)
+                    && !linked.contains(&dep_state.name)
+                {
+                    queue.push_back(dep_state);
+                }
+            }
+        }
+        linked
+    }
+
     pub fn to_states(&self) -> Vec<PackageState> {
         self.states.values().cloned().collect()
     }
@@ -285,6 +316,7 @@ mod tests {
             conflicts: Vec::new(),
             replaces: Vec::new(),
             build_env: None,
+            build_only: false,
         }
     }
 
@@ -320,6 +352,32 @@ mod tests {
         let linked = world.linked().clone();
         assert!(linked.contains("app"));
         assert!(!linked.contains("cache"));
+    }
+
+    #[test]
+    fn bin_linked_excludes_build_only_and_its_exclusive_closure() {
+        let mut build_env = state("build-env", &["toolchain"], true, false);
+        build_env.build_only = true;
+        let world = InstalledWorld {
+            root: PathBuf::from("/tmp"),
+            states: BTreeMap::from([
+                ("app".to_owned(), state("app", &["lib"], true, false)),
+                ("lib".to_owned(), state("lib", &[], false, false)),
+                ("build-env".to_owned(), build_env),
+                ("toolchain".to_owned(), state("toolchain", &[], false, false)),
+            ]),
+            dirty: HashSet::new(),
+            deleted: HashSet::new(),
+            linked_cache: None,
+        };
+        // The full closure (GC roots / snapshot) still pins the build-only package and its deps.
+        let linked = world.linked_immut();
+        assert!(linked.contains("build-env") && linked.contains("toolchain"));
+        // The PATH set drops the build-only root and anything reachable only through it.
+        let on_path = world.bin_linked_immut();
+        assert!(on_path.contains("app") && on_path.contains("lib"));
+        assert!(!on_path.contains("build-env"));
+        assert!(!on_path.contains("toolchain"));
     }
 
     #[test]

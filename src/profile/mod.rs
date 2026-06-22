@@ -58,19 +58,6 @@ pub fn generation_dir(id: u64) -> Result<PathBuf> {
     Ok(profiles_dir()?.join(format!("gen-{id}")))
 }
 
-/// Returns the list of package names in the currently active generation, if one exists.
-pub fn current_generation_packages() -> Result<Option<Vec<String>>> {
-    let Some(id) = current_generation_id()? else {
-        return Ok(None);
-    };
-    let gen_dir = generation_dir(id)?;
-    if !gen_dir.exists() {
-        return Ok(None);
-    }
-    let metadata = read_generation_metadata(&gen_dir)?;
-    Ok(Some(metadata.packages))
-}
-
 /// Returns the ID of the currently active generation, if one exists.
 pub fn current_generation_id() -> Result<Option<u64>> {
     let link = current_profile_link()?;
@@ -170,12 +157,23 @@ pub fn create_generation(world: &InstalledWorld) -> Result<u64> {
         .filter(|state| linked_names.contains(&state.name))
         .collect();
 
-    // Resolve contested bin names across the whole linked set before linking anything, so
-    // the outcome does not depend on package iteration order.
-    let skip_bins = contested_bin_skips(&linked)?;
+    // Only the PATH-linked subset is symlinked into the profile. Build-only packages (the managed
+    // toolchain — `build-env` and its runtime closure) stay in `linked` so they are recorded and
+    // pinned as GC roots below, but their bins are build machinery, not user commands, so they
+    // never reach `bin/`. With no build-only packages installed, `on_path == linked`.
+    let bin_linked_names = world.bin_linked_immut();
+    let on_path: Vec<&PackageState> = linked
+        .iter()
+        .copied()
+        .filter(|state| bin_linked_names.contains(&state.name))
+        .collect();
+
+    // Resolve contested bin names across the PATH-linked set before linking anything, so the
+    // outcome does not depend on package iteration order.
+    let skip_bins = contested_bin_skips(&on_path)?;
     let no_skips = BTreeSet::new();
 
-    for state in &linked {
+    for state in &on_path {
         let store_path = PathBuf::from(&state.store_path);
         if !store_path.exists() {
             warn(&format!(

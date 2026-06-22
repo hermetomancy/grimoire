@@ -51,6 +51,9 @@ pub struct PackageState {
     /// realized. Lets drift detection say *which* identity component moved instead of
     /// just "address drifted". `None` for states written before recording started.
     pub build_env: Option<String>,
+    /// `true` for managed build-environment packages (`build-env`): pinned in the store but never
+    /// linked into the active profile — bins are build machinery, not user commands. From the rune.
+    pub build_only: bool,
 }
 
 impl PackageState {
@@ -80,6 +83,7 @@ impl PackageState {
         let notes = optional_string_list(&record, "notes")?;
         let upstream_version = optional_string(&record, "upstream_version")?;
         let build_env = optional_string(&record, "build_env")?;
+        let build_only = optional_bool(&record, "build_only")?.unwrap_or(false);
         let conflicts = optional_string_list(&record, "conflicts")?;
         let replaces = optional_string_list(&record, "replaces")?;
 
@@ -103,6 +107,7 @@ impl PackageState {
             conflicts,
             replaces,
             build_env,
+            build_only,
         })
     }
 
@@ -150,6 +155,9 @@ impl PackageState {
         record.push("replaces", string_list_value(&self.replaces));
         if let Some(build_env) = &self.build_env {
             record.push("build_env", Value::string(build_env, Span::unknown()));
+        }
+        if self.build_only {
+            record.push("build_only", Value::bool(true, Span::unknown()));
         }
         Value::record(record, Span::unknown())
     }

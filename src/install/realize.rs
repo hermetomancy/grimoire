@@ -520,6 +520,7 @@ pub(crate) fn build_package_state(
         conflicts: metadata.conflicts.clone(),
         replaces: metadata.replaces.clone(),
         build_env: crate::build::toolchain::build_env_id(),
+        build_only: metadata.build_only,
     }
 }
 

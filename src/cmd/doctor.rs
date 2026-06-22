@@ -349,9 +349,9 @@ fn check_tomes() -> Result<usize> {
 fn check_packages() -> Result<usize> {
     let world = install::InstalledWorld::load_default()?;
     let states = world.to_states();
-    let active_packages = profile::current_generation_packages()?;
-    let active_set: std::collections::BTreeSet<String> =
-        active_packages.unwrap_or_default().into_iter().collect();
+    // Only PATH-linked packages have profile bin links to verify; store-only cache and build-only
+    // toolchain packages (pinned but never linked) do not.
+    let bin_linked = world.bin_linked_immut();
     field("installed packages", &states.len().to_string());
 
     let bin_dir = profile::current_profile_link()?.join("bin");
@@ -369,9 +369,9 @@ fn check_packages() -> Result<usize> {
             ));
         }
 
-        // Only expect profile links for packages in the active generation;
-        // store-only installs (e.g. from `tome build --all`) are not linked.
-        if !active_set.contains(&state.name) {
+        // Only expect profile links for PATH-linked packages; store-only installs (e.g. from
+        // `tome build --all`) and build-only toolchain packages are not linked.
+        if !bin_linked.contains(&state.name) {
             continue;
         }
 

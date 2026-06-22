@@ -275,6 +275,7 @@ mod tests {
             conflicts: Vec::new(),
             replaces: Vec::new(),
             build_env: None,
+            build_only: false,
         }
     }
 

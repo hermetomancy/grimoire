@@ -8,6 +8,13 @@ heading when it is tagged.
 
 ### Added
 
+- `build_only` rune metadata: a build-only package (the managed `build-env` toolchain) is pinned in
+  the store and available to source builds, but neither it nor its runtime closure is linked into
+  the active profile — its bins (toybox's coreutils, clang, cmake, python3, …) are build machinery,
+  not user commands, so installing `build-env` no longer floods `profiles/current/bin`. The package
+  stays a GC root (survives `grm clean`); `grm list` marks it `build-only` under `--all`. This
+  decouples "pinned in the store" from "linked onto PATH" (Nix-style: build inputs live in the store
+  but never on your PATH).
 - `conflicts`/`replaces` rune metadata: mutual exclusion enforced at install time; renames
   migrate state and requested/held intent, and a bare `grm upgrade` discovers them.
 - `upstream_version` metadata field for non-semver upstreams, shown by `grm info`; the
