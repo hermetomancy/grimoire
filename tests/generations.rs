@@ -66,7 +66,7 @@ fn switch_restores_package_state_and_lockfile() {
     let beta_state = root.join("state").join("packages").join("beta.nuon");
     assert!(beta_state.exists(), "beta installed in gen 2");
 
-    assert_success(&run(root, &["switch"]), "switch to gen 1");
+    assert_success(&run(root, &["generation", "switch"]), "switch to gen 1");
 
     // State now describes the switched-to generation, not the abandoned one.
     assert!(
@@ -100,7 +100,7 @@ fn mutation_after_switch_does_not_resurrect_dropped_packages() {
     let root = root.path();
     setup_two_generations(root);
 
-    assert_success(&run(root, &["switch"]), "switch to gen 1");
+    assert_success(&run(root, &["generation", "switch"]), "switch to gen 1");
     assert_success(&run(root, &["install", "gamma"]), "install gamma (gen 3)");
 
     let list = stdout(&run(root, &["list"]));
@@ -125,8 +125,8 @@ fn switch_forward_restores_the_newer_set() {
     let root = root.path();
     setup_two_generations(root);
 
-    assert_success(&run(root, &["switch"]), "switch to gen 1");
-    assert_success(&run(root, &["switch", "2"]), "switch forward to gen 2");
+    assert_success(&run(root, &["generation", "switch"]), "switch to gen 1");
+    assert_success(&run(root, &["generation", "switch", "2"]), "switch forward to gen 2");
 
     let list = stdout(&run(root, &["list"]));
     assert!(
@@ -150,7 +150,7 @@ fn clean_preserves_the_switch_back_target() {
     assert_success(&run(root, &["install", "gamma"]), "install gamma (gen 3)");
 
     assert_success(&run(root, &["clean", "--keep", "1"]), "clean --keep 1");
-    let switched = run(root, &["switch"]);
+    let switched = run(root, &["generation", "switch"]);
     assert_success(&switched, "switch after aggressive clean");
     let list = stdout(&run(root, &["list"]));
     assert!(
@@ -206,9 +206,9 @@ fn doctor_flags_state_generation_divergence() {
     );
 
     // Re-activating the current generation is the documented repair path.
-    let current = stdout(&run(root, &["generations"]));
+    let current = stdout(&run(root, &["generation", "list"]));
     assert!(current.contains("* gen-2"), "gen 2 active: {current}");
-    assert_success(&run(root, &["switch", "2"]), "re-activate to converge");
+    assert_success(&run(root, &["generation", "switch", "2"]), "re-activate to converge");
     assert!(
         root.join("state")
             .join("packages")
@@ -296,7 +296,7 @@ fn failed_generation_link_is_retried_by_the_next_install() {
 
     // Settling the contest unwedges the same re-run: it relinks and the environment
     // finally contains mawk.
-    assert_success(&run(root, &["prefer", "awk", "gawk"]), "prefer awk gawk");
+    assert_success(&run(root, &["pkg", "prefer", "awk", "gawk"]), "prefer awk gawk");
     assert_success(
         &run(root, &["install", "mawk"]),
         "install mawk after preference relinks",

@@ -91,7 +91,7 @@ fn preference_changes_the_capability_providers_address() {
     let _tome = setup_capability_tome(root);
 
     let default_hash = store_hash(root, "app");
-    assert_success(&run(root, &["prefer", "awk", "mawk"]), "prefer awk mawk");
+    assert_success(&run(root, &["pkg", "prefer", "awk", "mawk"]), "prefer awk mawk");
     let preferred_hash = store_hash(root, "app");
     assert_ne!(
         default_hash, preferred_hash,
@@ -147,7 +147,7 @@ fn explicit_install_of_contested_capability_asks_or_errors() {
     );
 
     // A recorded preference settles it; the install proceeds deterministically.
-    assert_success(&run(root, &["prefer", "awk", "mawk"]), "prefer awk mawk");
+    assert_success(&run(root, &["pkg", "prefer", "awk", "mawk"]), "prefer awk mawk");
     assert_success(
         &run(root, &["install", "awk"]),
         "install awk with preference",

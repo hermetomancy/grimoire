@@ -32,17 +32,17 @@ its own work.
 - **Managed build dependencies.** Source builds install declared build dependencies and cache
 them store-only for later builds.
 - **Reproducible state.** The lockfile records packages, versions, archive hashes, content
-addresses, install reasons, holds, and tome commits; `grm restore` rebuilds the recorded set
+addresses, install reasons, holds, and tome commits; `grm generation restore` rebuilds the recorded set
 on any install root, and `--locked` operations refuse to resolve against a tome that moved
 off its pinned commit.
 - **Trustable binaries.** Tome indexes can be minisign-signed and TOFU-pinned, so an index
 signature authenticates every archive hash it publishes.
 - **Generations and switching.** Every install/remove/upgrade creates a new generation;
-`grm switch` moves between them (back or forward) instantly without rebuilding.
+`grm generation switch` moves between them (back or forward) instantly without rebuilding.
 - **Distro-citizen tooling.** Install-reason tracking — removing a package takes its
 now-unneeded dependencies with it in the same transaction — file-ownership queries
-(`grm files`, `grm owns`, `grm provides`), preferred providers for contested commands
-(`grm prefer awk gawk`), post-install notes, and tome news.
+(`grm pkg files`, `grm pkg owns`, `grm pkg provides`), preferred providers for contested commands
+(`grm pkg prefer awk gawk`), post-install notes, and tome news.
 
 ## Positioning
 
@@ -52,7 +52,7 @@ now-unneeded dependencies with it in the same transaction — file-ownership que
 | Recipe authoring | imperative Nushell `build` function | **Portage / Pacman** (PKGBUILD/ebuild) |
 | Build-time customization | `build_flags` | **Portage USE flags** |
 | Catalogs / overlays | tomes + addenda | **AUR / overlays** |
-| Contested commands | `grm prefer` | **update-alternatives / eselect** |
+| Contested commands | `grm pkg prefer` | **update-alternatives / eselect** |
 | Build / trust | managed clang/LLVM toolchain, signed binhost | **Pacman / Gentoo binhost** |
 
 ## Install
@@ -81,15 +81,15 @@ grm ls                        # the linked environment; --all adds cached build 
 
 # Upgrade, hold, switch generations
 grm upgrade
-grm hold hello
-grm unhold hello
-grm switch
+grm pkg hold hello
+grm pkg unhold hello
+grm generation switch
 
 # Ask questions
-grm files hello                       # what did this package install?
-grm owns ~/.grimoire/profiles/current/bin/hello   # what installed this file?
-grm provides awk                      # who can provide this command?
-grm prefer awk gawk                   # pick the provider when several can
+grm pkg files hello                   # what did this package install?
+grm pkg owns ~/.grimoire/profiles/current/bin/hello   # what installed this file?
+grm pkg provides awk                  # who can provide this command?
+grm pkg prefer awk gawk               # pick the provider when several can
 
 # Clean up
 grm remove hello                      # dependencies nothing needs anymore leave with it

@@ -31,72 +31,60 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     // -----------------------------------------------------------------------
-    // Packages
+    // Package shortcuts — the common `pkg` operations, mirrored at the root for
+    // convenience. Each shares its Args and handler with the matching `grm pkg <verb>`.
     // -----------------------------------------------------------------------
-    /// Build a package archive from a rune without installing it.
-    #[command(visible_alias = "b")]
-    Build(BuildArgs),
     /// Install a package by name, from a local archive, or from a rune.
-    #[command(visible_aliases = ["in", "i"])]
+    #[command(visible_aliases = ["ins", "add"])]
     Install(InstallArgs),
-    /// Remove an installed package. Runtime dependencies installed solely for this package —
-    /// that no other installed package still requires — leave in the same transaction. A
-    /// package something still requires is kept and demoted to dependency status instead, so
-    /// it is removed automatically once nothing needs it. Store contents are untouched (so
-    /// switching back still works); `grm clean` reclaims the disk space.
-    #[command(visible_aliases = ["rm", "uninstall"])]
-    Remove(MutatePackagesArgs),
     /// Upgrade installed packages to the latest available version. Packages held with
-    /// `grm hold` are skipped (or, if named explicitly, refused with an error).
+    /// `grm pkg hold` are skipped (or, if named explicitly, refused with an error).
     #[command(visible_alias = "up")]
     Upgrade(UpgradeArgs),
-    /// Hold an installed package back from `grm upgrade` until it is released.
-    #[command(visible_alias = "pin")]
-    Hold(MutatePackagesArgs),
-    /// Release a held package so it is eligible for `grm upgrade` again.
-    #[command(visible_alias = "unpin")]
-    Unhold(MutatePackagesArgs),
-    /// Restore the package set a lockfile records: install every requested package at its
-    /// pinned version and hash, restore requested/held intent, and sweep anything the lock
-    /// does not account for. Tomes must already be configured (and, for git tomes, synced at
-    /// the lock's pinned commits).
-    Restore(RestoreArgs),
-    /// Choose which package provides a contested capability or bin (e.g. `grm prefer awk gawk`).
-    /// With no arguments, lists preferences and currently contested capabilities. Note that
-    /// `install --locked` still pins concrete providers from the lockfile; a changed preference
-    /// cannot override a locked install.
-    Prefer(PreferArgs),
-
-    // -----------------------------------------------------------------------
-    // Query
-    // -----------------------------------------------------------------------
+    /// Remove an installed package and any runtime dependencies nothing else needs (same
+    /// transaction). Store contents are untouched (so switching back still works); `grm clean`
+    /// reclaims the disk space.
+    #[command(visible_aliases = ["rm", "del"])]
+    Remove(MutatePackagesArgs),
     /// List installed packages with their versions and targets. By default only the linked
     /// environment is shown; `--all` includes store-only packages (cached build deps).
     #[command(visible_alias = "ls")]
     List(ListArgs),
     /// Search configured tomes for packages.
-    #[command(visible_aliases = ["s", "find"])]
+    #[command(visible_alias = "sea")]
     Search(QueryArg),
     /// Show detailed information about a package.
     Info(PackageArg),
-    /// List the files an installed package placed in the store.
-    Files(PackageArg),
-    /// Show which installed package owns a file (a store path or a profile path).
-    Owns(OwnsArgs),
-    /// Show which packages provide a command or capability, installed or available.
-    Provides(ProvidesArgs),
+    /// Build a package archive from a rune without installing it.
+    Build(BuildArgs),
 
     // -----------------------------------------------------------------------
-    // Profiles
+    // Noun groups
     // -----------------------------------------------------------------------
-    /// Switch to a generation by ID (forward or back), or to the previous generation when no ID
-    /// is given. Switching only re-points the profile and restores that generation's recorded
-    /// state — nothing is rebuilt.
-    #[command(visible_alias = "sw")]
-    Switch(SwitchArgs),
-    /// List generations.
-    #[command(visible_alias = "gens")]
-    Generations,
+    /// Package operations: the full set, including the root shortcuts above plus hold/unhold,
+    /// file-ownership queries, and provider preference.
+    Pkg {
+        #[command(subcommand)]
+        command: PkgCommand,
+    },
+    /// Manage tomes: the git repositories packages are resolved from.
+    Tome {
+        #[command(subcommand)]
+        command: TomeCommand,
+    },
+    /// Manage addenda: data-only overlays that patch tome rune definitions.
+    #[command(visible_alias = "ad")]
+    Addendum {
+        #[command(subcommand)]
+        command: AddendumCommand,
+    },
+    /// Manage generations: the environment snapshots every mutating command records, and
+    /// switching between them.
+    #[command(visible_alias = "gen")]
+    Generation {
+        #[command(subcommand)]
+        command: GenerationCommand,
+    },
 
     // -----------------------------------------------------------------------
     // Maintenance
@@ -118,21 +106,6 @@ pub enum Command {
     Setup(SetupArgs),
 
     // -----------------------------------------------------------------------
-    // Catalogs
-    // -----------------------------------------------------------------------
-    /// Manage tomes: the git repositories packages are resolved from.
-    Tome {
-        #[command(subcommand)]
-        command: TomeCommand,
-    },
-    /// Manage addenda: data-only overlays that patch tome rune definitions.
-    #[command(visible_alias = "ad")]
-    Addendum {
-        #[command(subcommand)]
-        command: AddendumCommand,
-    },
-
-    // -----------------------------------------------------------------------
     // Hidden
     // -----------------------------------------------------------------------
     /// Print the content-addressed store hash a package resolves to (its rune plus its runtime
@@ -145,6 +118,71 @@ pub enum Command {
     /// Render man pages for `grm` and every subcommand into a directory.
     #[command(hide = true)]
     Man(ManArgs),
+}
+
+/// `grm pkg <command>`: the full set of package operations. The common ones (install, upgrade,
+/// remove, list, search, info, build) are also exposed directly at the root.
+#[derive(Debug, Subcommand)]
+pub enum PkgCommand {
+    /// Install a package by name, from a local archive, or from a rune.
+    Install(InstallArgs),
+    /// Upgrade installed packages to the latest available version. Packages held with
+    /// `grm pkg hold` are skipped (or, if named explicitly, refused with an error).
+    Upgrade(UpgradeArgs),
+    /// Remove an installed package. Runtime dependencies installed solely for this package —
+    /// that no other installed package still requires — leave in the same transaction. A
+    /// package something still requires is kept and demoted to dependency status instead, so
+    /// it is removed automatically once nothing needs it. Store contents are untouched (so
+    /// switching back still works); `grm clean` reclaims the disk space.
+    Remove(MutatePackagesArgs),
+    /// List installed packages with their versions and targets. By default only the linked
+    /// environment is shown; `--all` includes store-only packages (cached build deps).
+    List(ListArgs),
+    /// Search configured tomes for packages.
+    Search(QueryArg),
+    /// Show detailed information about a package.
+    Info(PackageArg),
+    /// Build a package archive from a rune without installing it.
+    Build(BuildArgs),
+    /// Hold an installed package back from `grm upgrade` until it is released.
+    #[command(visible_alias = "pin")]
+    Hold(MutatePackagesArgs),
+    /// Release a held package so it is eligible for `grm upgrade` again.
+    #[command(visible_alias = "unpin")]
+    Unhold(MutatePackagesArgs),
+    /// List the files an installed package placed in the store.
+    Files(PackageArg),
+    /// Show which installed package owns a file (a store path or a profile path).
+    Owns(OwnsArgs),
+    /// Show which packages provide a command or capability, installed or available.
+    Provides(ProvidesArgs),
+    /// Choose which package provides a contested capability or bin (e.g. `grm pkg prefer awk gawk`).
+    /// With no arguments, lists preferences and currently contested capabilities. Note that
+    /// `install --locked` still pins concrete providers from the lockfile; a changed preference
+    /// cannot override a locked install.
+    Prefer(PreferArgs),
+}
+
+/// `grm generation <command>`: manage generations — the environment snapshots every mutating
+/// command records, and switching between them.
+#[derive(Debug, Subcommand)]
+pub enum GenerationCommand {
+    /// List generations.
+    #[command(visible_alias = "ls")]
+    List,
+    /// Switch to a generation by ID (forward or back), or to the previous generation when no ID
+    /// is given. Switching only re-points the profile and restores that generation's recorded
+    /// state — nothing is rebuilt.
+    #[command(visible_alias = "sw")]
+    Switch(SwitchArgs),
+    /// Export the current generation's lockfile (its packages, versions, and hashes) to a path,
+    /// for sharing or reproducing the set elsewhere. The inverse of `restore --lockfile`.
+    Lock(GenerationLockArgs),
+    /// Restore the package set a lockfile records: install every requested package at its
+    /// pinned version and hash, restore requested/held intent, and sweep anything the lock
+    /// does not account for. Tomes must already be configured (and, for git tomes, synced at
+    /// the lock's pinned commits).
+    Restore(RestoreArgs),
 }
 
 #[derive(Debug, Args)]
@@ -308,6 +346,13 @@ pub struct SwitchArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct GenerationLockArgs {
+    /// Path to write the lockfile to. Defaults to `grimoire.lock.nuon` in the current directory.
+    #[arg(short, long, default_value = "grimoire.lock.nuon")]
+    pub output: PathBuf,
+}
+
+#[derive(Debug, Args)]
 pub struct CleanArgs {
     /// Number of recent generations to keep (including the current one). The switch-back target
     /// is always kept.
@@ -343,6 +388,14 @@ pub enum TomeCommand {
     /// items in full and marks them seen; `--all` re-reads everything without touching the
     /// seen marker.
     News(TomeNewsArgs),
+    /// Show a tome's details: URL, tracked ref, pinned commit, description, and signer keys.
+    Info(TomeInfoArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct TomeInfoArgs {
+    /// Tome to show.
+    pub name: String,
 }
 
 #[derive(Debug, Args)]

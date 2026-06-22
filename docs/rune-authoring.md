@@ -144,9 +144,9 @@ deps: {
   record (`{ name: "openssl", version: ">=3" }`, semver requirement), or a bracket string
   (`"linux-headers[linux-*]"`) gating the dep on a target glob.
 - A dependency name may be a **capability** rather than a literal package (`"awk"` resolves
-  to any provider; `grm prefer` breaks ties). Use the capability when any implementation
+  to any provider; `grm pkg prefer` breaks ties). Use the capability when any implementation
   works; use the literal name when you need that one. Resolution order is deterministic —
-  the `grm prefer` choice, else an installed provider, else the first provider by name —
+  the `grm pkg prefer` choice, else an installed provider, else the first provider by name —
   because the chosen provider folds into the dependent's store hash: building against
   `gawk`'s awk and `mawk`'s awk are different content at different addresses, and a prebuilt
   only substitutes for users whose resolution matches the builder's.
@@ -166,7 +166,7 @@ bins: {
 ```
 
 - Any key that differs from the package `name` is a **capability**: `awk` resolves to this
-  package in dependency resolution, and `grm prefer awk <pkg>` chooses among multiple
+  package in dependency resolution, and `grm pkg prefer awk <pkg>` chooses among multiple
   providers.
 - **Discovery merges with declaration at pack time.** After a successful build, every
   executable staged under `bin/` is discovered; discovered names win on collision, but a
@@ -201,7 +201,7 @@ on Alpine, toybox once the managed userland is bootstrapped):
   `sed` mean GNU sed *for that build* — declaration is specificity.
 - When a user explicitly installs an ambiguous capability (`grm install sed` with several
   providers and no preference), Grimoire asks which implementation they mean and records
-  the answer as a `grm prefer` choice. Rune-declared deps never prompt: they resolve
+  the answer as a `grm pkg prefer` choice. Rune-declared deps never prompt: they resolve
   deterministically (preference → installed provider → first by name).
 
 Single-implementation tools (`cmake`, `python3`, `llvm`) keep their upstream names — there

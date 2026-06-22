@@ -52,6 +52,14 @@ heading when it is tagged.
   `collect-garbage` removed; removal sweeps orphans in the same transaction and demotes
   still-required packages; `switch [GEN]` activates any generation (or the previous one with
   no argument); `clean [--keep N]` is the one reclamation command.
+- CLI reorganized into noun groups: `pkg` (install/upgrade/remove/list/search/info/build plus
+  hold/unhold/files/owns/provides/prefer), `tome`, `addendum`, and `generation`
+  (list/switch/lock/restore). The seven common package verbs keep root shortcuts
+  (`grm install` == `grm pkg install`; aliases ins/add, up, rm/del, ls, sea). Moves:
+  `grm switch`→`grm generation switch`, `grm generations`→`grm generation list`,
+  `grm restore`→`grm generation restore`, and hold/unhold/files/owns/provides/prefer→`grm pkg …`.
+  New: `grm generation lock` (export the current lockfile, the inverse of `restore --lockfile`)
+  and `grm tome info`. Hard cutover, no compatibility aliases.
 - Removal is store-preserving: store directories survive until `grm clean` collects them, so
   switching back after remove works and reinstalls are cheap.
 - Dependency reuse is content-addressed: a package whose rune drifted (same version, new

@@ -100,7 +100,7 @@ inherited host env vars unless Grimoire deliberately sets them.
 
 **Capability resolution:** any `bins` key that differs from the package name is a capability
 (`gawk` provides `gawk` and `awk`). Literal names resolve directly; capability names resolve
-to any provider, with `grm prefer` breaking ties (an explicit `grm install <capability>` with
+to any provider, with `grm pkg prefer` breaking ties (an explicit `grm install <capability>` with
 several providers and no preference asks the user and records the answer). Depend on the
 capability (`awk`) when any implementation will do; on the literal name (`gawk`) when you
 need that implementation. Multi-implementation standard utilities are packaged under their
@@ -161,7 +161,7 @@ Grimoire has no database. Durability is explicit transaction directories plus at
    *linked* package state it was built from — the environment, not the cache. Store-only
    packages (cached build deps, residue) appear in neither the snapshot nor the
    generation's GC roots, so `grm clean` can reclaim them; activation preserves their live
-   records untouched. `grm switch` restores `state/packages/` and the lockfile from the
+   records untouched. `grm generation switch` restores `state/packages/` and the lockfile from the
    snapshot *before* flipping the `current` symlink, so the active generation and the
    recorded state always describe the same world — rolling back really rolls back, and the
    next mutating command builds on the activated set instead of resurrecting the abandoned

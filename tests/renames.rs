@@ -213,7 +213,7 @@ fn replacing_package_migrates_state_and_intent() {
         "tome add renametome",
     );
     assert_success(&run(root, &["install", "oldname"]), "install oldname");
-    assert_success(&run(root, &["hold", "oldname"]), "hold oldname");
+    assert_success(&run(root, &["pkg", "hold", "oldname"]), "hold oldname");
 
     // The catalog renames the package; an explicit install of the new name migrates.
     fs::write(

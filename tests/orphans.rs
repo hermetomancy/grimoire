@@ -223,7 +223,7 @@ fn held_dependency_survives_orphan_sweep() {
     );
     assert_success(&run(root, &["tome", "update", "heldcore"]), "tome update");
     assert_success(&run(root, &["install", "app"]), "install app");
-    assert_success(&run(root, &["hold", "lib"]), "hold lib");
+    assert_success(&run(root, &["pkg", "hold", "lib"]), "hold lib");
 
     let remove_app = run(root, &["remove", "app"]);
     assert_success(&remove_app, "remove app");

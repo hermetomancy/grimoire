@@ -23,7 +23,7 @@ mod util;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Command, TomeCommand};
+use cli::{Cli, Command, GenerationCommand, PkgCommand, TomeCommand};
 use util::{process_lock, progress, progress::Verbosity};
 
 fn main() -> Result<()> {
@@ -63,56 +63,38 @@ fn run(cli: Cli) -> Result<()> {
     };
 
     match cli.command {
-        Command::Build(args) => build::build(args),
+        // Root shortcuts share their Args + handler with the matching `grm pkg <verb>`.
         Command::Install(args) => install::install(args),
+        Command::Upgrade(args) => cmd::query::upgrade(args),
         Command::Remove(args) => install::remove(args),
-        Command::Clean(args) => cmd::clean::clean(args),
-        Command::Setup(args) => cmd::setup::setup(args),
         Command::List(args) => install::list(args),
-        Command::Doctor => cmd::doctor::doctor(),
         Command::Search(args) => cmd::query::search(args),
         Command::Info(args) => cmd::query::info(args),
-        Command::Upgrade(args) => cmd::query::upgrade(args),
-        Command::Hold(args) => install::hold(args),
-        Command::Unhold(args) => install::unhold(args),
-        Command::Restore(args) => install::restore(args),
-        Command::Files(args) => cmd::files::files(args),
-        Command::Owns(args) => cmd::files::owns(args),
-        Command::Provides(args) => cmd::files::provides(args),
-        Command::Prefer(args) => cmd::prefer::prefer(args),
-        Command::Switch(args) => {
-            if args.dry_run {
-                return profile::dry_run_activation(args.generation);
-            }
-            let started = std::time::Instant::now();
-            match args.generation {
-                Some(id) => {
-                    if profile::activate_generation(id)? {
-                        progress::report(&format!(
-                            "{} {}",
-                            progress::accent(&format!(
-                                "switched to generation {id} in {:.2}s",
-                                started.elapsed().as_secs_f64(),
-                            )),
-                            progress::faint("— nothing was rebuilt, nothing was lost"),
-                        ));
-                    }
-                }
-                None => {
-                    let id = profile::switch_to_previous()?;
-                    progress::report(&format!(
-                        "{} {}",
-                        progress::accent(&format!(
-                            "switched to generation {id} in {:.2}s",
-                            started.elapsed().as_secs_f64(),
-                        )),
-                        progress::faint("— nothing was rebuilt, nothing was lost"),
-                    ));
-                }
-            }
-            Ok(())
-        }
-        Command::Generations => cmd::generations::generations(),
+        Command::Build(args) => build::build(args),
+
+        Command::Pkg { command } => match command {
+            PkgCommand::Install(args) => install::install(args),
+            PkgCommand::Upgrade(args) => cmd::query::upgrade(args),
+            PkgCommand::Remove(args) => install::remove(args),
+            PkgCommand::List(args) => install::list(args),
+            PkgCommand::Search(args) => cmd::query::search(args),
+            PkgCommand::Info(args) => cmd::query::info(args),
+            PkgCommand::Build(args) => build::build(args),
+            PkgCommand::Hold(args) => install::hold(args),
+            PkgCommand::Unhold(args) => install::unhold(args),
+            PkgCommand::Files(args) => cmd::files::files(args),
+            PkgCommand::Owns(args) => cmd::files::owns(args),
+            PkgCommand::Provides(args) => cmd::files::provides(args),
+            PkgCommand::Prefer(args) => cmd::prefer::prefer(args),
+        },
+
+        Command::Generation { command } => match command {
+            GenerationCommand::List => cmd::generations::generations(),
+            GenerationCommand::Switch(args) => switch_generation(args),
+            GenerationCommand::Lock(args) => install::lock::export(&args.output),
+            GenerationCommand::Restore(args) => install::restore(args),
+        },
+
         Command::Tome { command } => match command {
             TomeCommand::Init(args) => tome::init(args),
             TomeCommand::Rune(args) => tome::rune(args),
@@ -122,6 +104,7 @@ fn run(cli: Cli) -> Result<()> {
             TomeCommand::Remove(args) => tome::remove(args),
             TomeCommand::List => tome::list(),
             TomeCommand::News(args) => tome::news::news_command(args.name, args.all),
+            TomeCommand::Info(args) => tome::info(args),
         },
         Command::Addendum { command } => match command {
             cli::AddendumCommand::Add(args) => catalog::addendum::add(args),
@@ -129,6 +112,11 @@ fn run(cli: Cli) -> Result<()> {
             cli::AddendumCommand::List => catalog::addendum::list(),
             cli::AddendumCommand::Update(args) => catalog::addendum::update(args),
         },
+
+        Command::Doctor => cmd::doctor::doctor(),
+        Command::Clean(args) => cmd::clean::clean(args),
+        Command::Setup(args) => cmd::setup::setup(args),
+
         Command::StoreHash(args) => {
             for package in &args.packages {
                 println!("{}", store::closure::store_hash(package)?);
@@ -140,18 +128,65 @@ fn run(cli: Cli) -> Result<()> {
     }
 }
 
+/// `grm generation switch`: re-point the profile to another generation (a specific ID, or the
+/// previous one when none is given) and restore its recorded state. Nothing is rebuilt.
+fn switch_generation(args: cli::SwitchArgs) -> Result<()> {
+    if args.dry_run {
+        return profile::dry_run_activation(args.generation);
+    }
+    let started = std::time::Instant::now();
+    let id = match args.generation {
+        // `activate_generation` returns false when that generation is already current; no message.
+        Some(id) if !profile::activate_generation(id)? => return Ok(()),
+        Some(id) => id,
+        None => profile::switch_to_previous()?,
+    };
+    progress::report(&format!(
+        "{} {}",
+        progress::accent(&format!(
+            "switched to generation {id} in {:.2}s",
+            started.elapsed().as_secs_f64(),
+        )),
+        progress::faint("— nothing was rebuilt, nothing was lost"),
+    ));
+    Ok(())
+}
+
 fn mutates_install_root(command: &Command) -> bool {
+    // `--dry-run` resolves and prints a plan without writing anything; it can run while another
+    // `grm` holds the lock.
     match command {
-        // `--dry-run` resolves and prints a plan without writing anything; it can run while
-        // another `grm` holds the lock.
+        // Root package shortcuts mirror the pkg group.
         Command::Install(args) => !args.dry_run,
         Command::Upgrade(args) => !args.dry_run,
-        // Bare `grm prefer` only lists; setting or unsetting mutates state and may relink.
-        Command::Prefer(args) => args.capability.is_some() && !args.dry_run,
-        Command::Remove(args) | Command::Hold(args) | Command::Unhold(args) => !args.dry_run,
-        Command::Clean(args) => !args.dry_run,
-        Command::Restore(args) => !args.dry_run,
-        Command::Switch(args) => !args.dry_run,
+        Command::Remove(args) => !args.dry_run,
+        Command::Build(_) => true,
+        Command::List(_) | Command::Search(_) | Command::Info(_) => false,
+
+        Command::Pkg { command } => match command {
+            PkgCommand::Install(args) => !args.dry_run,
+            PkgCommand::Upgrade(args) => !args.dry_run,
+            PkgCommand::Remove(args) | PkgCommand::Hold(args) | PkgCommand::Unhold(args) => {
+                !args.dry_run
+            }
+            // Bare `grm pkg prefer` only lists; setting or unsetting mutates state and may relink.
+            PkgCommand::Prefer(args) => args.capability.is_some() && !args.dry_run,
+            PkgCommand::Build(_) => true,
+            PkgCommand::List(_)
+            | PkgCommand::Search(_)
+            | PkgCommand::Info(_)
+            | PkgCommand::Files(_)
+            | PkgCommand::Owns(_)
+            | PkgCommand::Provides(_) => false,
+        },
+
+        Command::Generation { command } => match command {
+            GenerationCommand::Switch(args) => !args.dry_run,
+            GenerationCommand::Restore(args) => !args.dry_run,
+            // `list` is a read; `lock` only writes a user-chosen output path, not install-root state.
+            GenerationCommand::List | GenerationCommand::Lock(_) => false,
+        },
+
         Command::Tome { command } => match command {
             TomeCommand::Add(args) => !args.dry_run,
             TomeCommand::Update(args) => !args.dry_run,
@@ -170,18 +205,12 @@ fn mutates_install_root(command: &Command) -> bool {
             cli::AddendumCommand::Remove(args) => !args.dry_run,
             cli::AddendumCommand::List => false,
         },
-        Command::Build(_) => true,
-        Command::List(_)
-        | Command::Files(_)
-        | Command::Owns(_)
-        | Command::Provides(_)
-        | Command::Doctor
-        | Command::Search(_)
-        | Command::Info(_)
-        | Command::Generations
+
+        Command::Clean(args) => !args.dry_run,
+        Command::Doctor
+        | Command::Setup(_)
         | Command::StoreHash(_)
         | Command::Completions(_)
-        | Command::Man(_)
-        | Command::Setup(_) => false,
+        | Command::Man(_) => false,
     }
 }

@@ -9,7 +9,7 @@ use std::{
 
 use crate::{
     catalog::sync_common,
-    cli::{TomeAddArgs, TomeRemoveArgs, TomeUpdateArgs},
+    cli::{TomeAddArgs, TomeInfoArgs, TomeRemoveArgs, TomeUpdateArgs},
     model::{Catalog, TomeState, validate_tome_name, validate_tome_ref, validate_tome_url},
     nu::{nuon_io, runtime::EmbeddedNuRuntime},
     util::progress::{report, warn},
@@ -74,6 +74,30 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
 
 pub fn list() -> Result<()> {
     sync_common::list_catalogs::<TomeState>()
+}
+
+pub fn info(args: TomeInfoArgs) -> Result<()> {
+    validate_tome_name(&args.name)?;
+    let tome = sync_common::load_catalog::<TomeState>(&args.name)?;
+    println!("{}", tome.name);
+    println!("  url:     {}", tome.url);
+    println!("  ref:     {}", tome.ref_name);
+    match &tome.checked_commit {
+        Some(commit) => println!("  commit:  {commit}"),
+        None => println!("  commit:  (not yet synced)"),
+    }
+    if let Some(desc) = tome.tome.as_ref().and_then(|m| m.description.as_ref()) {
+        println!("  about:   {desc}");
+    }
+    if tome.signer_pubkeys.is_empty() {
+        println!("  signing: unsigned");
+    } else {
+        println!("  signers:");
+        for key in &tome.signer_pubkeys {
+            println!("    {key}");
+        }
+    }
+    Ok(())
 }
 
 pub fn update(args: TomeUpdateArgs) -> Result<()> {

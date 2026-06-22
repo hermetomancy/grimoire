@@ -680,7 +680,7 @@ fn doctor_ignores_store_only_bin_collisions() {
         "store-only bins must not be flagged contested: {}",
         stderr(&doctor)
     );
-    let prefer = run(root, &["prefer"]);
+    let prefer = run(root, &["pkg", "prefer"]);
     assert!(
         !stdout(&prefer).contains("contested (no preference set):"),
         "store-only bins must not appear contested in prefer: {}",

@@ -173,12 +173,12 @@ fn prefer_resolves_contested_bins_between_installed_packages() {
 
     // Preferring a package that doesn't provide the capability is rejected with providers.
     assert_failure_contains(
-        &run(root, &["prefer", "tool", "nosuchpkg"]),
+        &run(root, &["pkg", "prefer", "tool", "nosuchpkg"]),
         "does not provide `tool`",
         "prefer a non-provider",
     );
 
-    assert_success(&run(root, &["prefer", "tool", "beta"]), "prefer beta");
+    assert_success(&run(root, &["pkg", "prefer", "tool", "beta"]), "prefer beta");
     assert_success(
         &run(root, &["install", "beta"]),
         "install beta after prefer",
@@ -190,7 +190,7 @@ fn prefer_resolves_contested_bins_between_installed_packages() {
     );
 
     // Switching the preference relinks the active generation without reinstalling.
-    assert_success(&run(root, &["prefer", "tool", "alpha"]), "prefer alpha");
+    assert_success(&run(root, &["pkg", "prefer", "tool", "alpha"]), "prefer alpha");
     assert_eq!(
         stdout(&run_shim(root, "tool")).trim(),
         "alpha",
@@ -198,7 +198,7 @@ fn prefer_resolves_contested_bins_between_installed_packages() {
     );
 
     // The listing shows the recorded choice.
-    let listing = run(root, &["prefer"]);
+    let listing = run(root, &["pkg", "prefer"]);
     assert_success(&listing, "prefer listing");
     assert!(
         stdout(&listing).contains("tool\talpha"),
@@ -209,13 +209,13 @@ fn prefer_resolves_contested_bins_between_installed_packages() {
     // Clearing the preference is refused while the bin is still contested; once only one
     // claimant remains it succeeds.
     assert_failure_contains(
-        &run(root, &["prefer", "--unset", "tool"]),
+        &run(root, &["pkg", "prefer", "--unset", "tool"]),
         "would leave it contested",
         "unset while contested",
     );
     assert_success(&run(root, &["remove", "beta"]), "remove beta");
     assert_success(
-        &run(root, &["prefer", "--unset", "tool"]),
+        &run(root, &["pkg", "prefer", "--unset", "tool"]),
         "unset after remove",
     );
     assert_eq!(
@@ -258,7 +258,7 @@ fn solver_resolves_capability_dependency_through_preference() {
     );
     assert_success(&run(root, &["tome", "update", "capcore"]), "tome update");
 
-    assert_success(&run(root, &["prefer", "tool", "beta"]), "prefer beta");
+    assert_success(&run(root, &["pkg", "prefer", "tool", "beta"]), "prefer beta");
     assert_success(&run(root, &["install", "consumer"]), "install consumer");
     assert!(
         root.join("state")
@@ -413,7 +413,7 @@ fn files_owns_and_provides_resolve_package_contents() {
     assert_success(&run(root, &["install", "app"]), "install app");
 
     // files: relative paths of everything the package staged into the store.
-    let files = run(root, &["files", "app"]);
+    let files = run(root, &["pkg", "files", "app"]);
     assert_success(&files, "files app");
     let listed = stdout(&files);
     assert!(
@@ -421,7 +421,7 @@ fn files_owns_and_provides_resolve_package_contents() {
         "files should list the package contents: {listed}"
     );
     assert_failure_contains(
-        &run(root, &["files", "nosuchpkg"]),
+        &run(root, &["pkg", "files", "nosuchpkg"]),
         "is not installed",
         "files for unknown package",
     );
@@ -432,7 +432,7 @@ fn files_owns_and_provides_resolve_package_contents() {
         .join("current")
         .join("bin")
         .join("app");
-    let owns = run(root, &["owns", profile_bin.to_str().unwrap()]);
+    let owns = run(root, &["pkg", "owns", profile_bin.to_str().unwrap()]);
     assert_success(&owns, "owns profile bin");
     assert!(
         stdout(&owns).contains("app\t0.1.0"),
@@ -441,7 +441,7 @@ fn files_owns_and_provides_resolve_package_contents() {
     );
 
     let store_file = installed_store_dir(root, "lib").unwrap().join("bin/lib");
-    let owns_store = run(root, &["owns", store_file.to_str().unwrap()]);
+    let owns_store = run(root, &["pkg", "owns", store_file.to_str().unwrap()]);
     assert_success(&owns_store, "owns store path");
     assert!(
         stdout(&owns_store).contains("lib\t0.1.0"),
@@ -452,13 +452,13 @@ fn files_owns_and_provides_resolve_package_contents() {
     let foreign = root.join("not-owned.txt");
     fs::write(&foreign, "hello").unwrap();
     assert_failure_contains(
-        &run(root, &["owns", foreign.to_str().unwrap()]),
+        &run(root, &["pkg", "owns", foreign.to_str().unwrap()]),
         "is not owned by any installed package",
         "owns on a foreign path",
     );
 
     // provides: installed packages report `installed`, rune-only capabilities `available`.
-    let provides_app = run(root, &["provides", "app"]);
+    let provides_app = run(root, &["pkg", "provides", "app"]);
     assert_success(&provides_app, "provides app");
     assert!(
         stdout(&provides_app).contains("app\t0.1.0\tinstalled"),
@@ -466,7 +466,7 @@ fn files_owns_and_provides_resolve_package_contents() {
         stdout(&provides_app)
     );
 
-    let provides_ex = run(root, &["provides", "ex"]);
+    let provides_ex = run(root, &["pkg", "provides", "ex"]);
     assert_success(&provides_ex, "provides ex");
     assert!(
         stdout(&provides_ex).contains("gex\t0.3.0\tavailable"),
@@ -475,7 +475,7 @@ fn files_owns_and_provides_resolve_package_contents() {
     );
 
     assert_failure_contains(
-        &run(root, &["provides", "nothing-has-this"]),
+        &run(root, &["pkg", "provides", "nothing-has-this"]),
         "nothing provides",
         "provides with no providers",
     );
@@ -495,7 +495,7 @@ fn completions_and_man_render_from_cli_definition() {
         bash_out.contains("_grm") || bash_out.contains("_grm()"),
         "bash completion defines a function: {bash_out}"
     );
-    for subcommand in ["install", "remove", "tome", "addendum", "hold"] {
+    for subcommand in ["install", "remove", "tome", "generation", "pkg"] {
         assert!(
             bash_out.contains(subcommand),
             "completion enumerates `{subcommand}`"
@@ -512,7 +512,7 @@ fn completions_and_man_render_from_cli_definition() {
         root_page.contains(".TH grm"),
         "grm.1 is a troff page with the expected title header: {root_page:.200}"
     );
-    for sub in ["install", "remove", "clean", "hold"] {
+    for sub in ["install", "remove", "clean", "pkg", "generation"] {
         let path = out.join(format!("grm-{sub}.1"));
         assert!(
             path.exists(),
@@ -701,7 +701,7 @@ fn owns_reports_only_the_linked_provider_for_a_contested_bin() {
         ),
         "tome add awktome",
     );
-    assert_success(&run(root, &["prefer", "awk", "gawk"]), "prefer awk gawk");
+    assert_success(&run(root, &["pkg", "prefer", "awk", "gawk"]), "prefer awk gawk");
     assert_success(
         &run(root, &["install", "gawk", "mawk"]),
         "install gawk + mawk",
@@ -712,7 +712,7 @@ fn owns_reports_only_the_linked_provider_for_a_contested_bin() {
         .join("current")
         .join("bin")
         .join("awk");
-    let owns = run(root, &["owns", awk_bin.to_str().unwrap()]);
+    let owns = run(root, &["pkg", "owns", awk_bin.to_str().unwrap()]);
     assert_success(&owns, "owns contested awk bin");
     let out = stdout(&owns);
     assert!(

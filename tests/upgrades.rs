@@ -72,14 +72,14 @@ fn hold_and_unhold_refresh_lockfile_once() {
         "install hello",
     );
 
-    assert_success(&run(root, &["hold", "hello"]), "hold hello");
+    assert_success(&run(root, &["pkg", "hold", "hello"]), "hold hello");
     let list = stdout(&run(root, &["list", "--explicit"]));
     assert!(
         list.contains("held"),
         "list shows held package after hold: {list}"
     );
 
-    assert_success(&run(root, &["unhold", "hello"]), "unhold hello");
+    assert_success(&run(root, &["pkg", "unhold", "hello"]), "unhold hello");
     let list = stdout(&run(root, &["list", "--explicit"]));
     assert!(
         !list.contains("held"),
@@ -278,7 +278,7 @@ fn hold_skips_upgrade_until_released() {
     assert_success(&run(root, &["tome", "update", "holdcore"]), "tome update");
     assert_success(&run(root, &["install", "holdpkg"]), "install holdpkg 0.1.0");
 
-    let hold = run(root, &["hold", "holdpkg"]);
+    let hold = run(root, &["pkg", "hold", "holdpkg"]);
     assert_success(&hold, "hold holdpkg");
     assert!(
         stdout(&hold).contains("holdpkg held"),
@@ -337,7 +337,7 @@ fn hold_skips_upgrade_until_released() {
     );
 
     // Release and try again — now the upgrade goes through.
-    let unhold = run(root, &["unhold", "holdpkg"]);
+    let unhold = run(root, &["pkg", "unhold", "holdpkg"]);
     assert_success(&unhold, "unhold holdpkg");
     assert!(
         stdout(&unhold).contains("holdpkg released"),
@@ -694,7 +694,7 @@ fn restore_reproduces_locked_set_on_a_fresh_root() {
         "tome update (source)",
     );
     assert_success(&run(source_root, &["install", "app"]), "install app");
-    assert_success(&run(source_root, &["hold", "lib"]), "hold lib");
+    assert_success(&run(source_root, &["pkg", "hold", "lib"]), "hold lib");
     let lock_text =
         fs::read_to_string(source_root.join("state").join("grimoire.lock.nuon")).unwrap();
     assert!(
@@ -722,7 +722,7 @@ fn restore_reproduces_locked_set_on_a_fresh_root() {
     );
     let restore = run(
         fresh_root,
-        &["restore", "--lockfile", saved_lock.to_str().unwrap()],
+        &["generation", "restore", "--lockfile", saved_lock.to_str().unwrap()],
     );
     assert_success(&restore, "restore from saved lock");
 

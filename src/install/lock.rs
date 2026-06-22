@@ -73,6 +73,26 @@ pub fn rebuild(world: &InstalledWorld) -> Result<()> {
     nuon_io::write_nuon(&path, &lock.to_value())
 }
 
+/// `grm generation lock`: export the current install lockfile to `dest`, for sharing or
+/// reproducing the recorded set elsewhere (the inverse of `grm generation restore --lockfile`).
+/// The live lock at `state/grimoire.lock.nuon` is regenerated on every mutating command; this
+/// copies that snapshot out. Errors when nothing is installed yet (no lock to export).
+pub fn export(dest: &std::path::Path) -> Result<()> {
+    let src = lock_path()?;
+    if !src.exists() {
+        bail!("no lockfile to export yet — install something first");
+    }
+    if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    std::fs::copy(&src, dest).with_context(|| format!("write lockfile to {}", dest.display()))?;
+    crate::util::progress::report(&crate::util::progress::accent(&format!(
+        "exported lockfile to {}",
+        dest.display()
+    )));
+    Ok(())
+}
+
 /// Reads the recorded packages from `grimoire.lock.nuon`. Returns `None` when no lockfile exists
 /// yet, so callers can distinguish "nothing locked" from a parse failure. The lockfile is inert
 /// data read through the shared NUON layer (AGENTS.md §4).

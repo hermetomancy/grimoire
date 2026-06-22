@@ -622,7 +622,7 @@ fn held_package_is_not_re_realized_for_rune_drift() {
     );
     assert_success(&add, "add holdfast tome");
     assert_success(&run(root, &["install", "pinned"]), "install pinned");
-    assert_success(&run(root, &["hold", "pinned"]), "hold pinned");
+    assert_success(&run(root, &["pkg", "hold", "pinned"]), "hold pinned");
     let state_before = state_text(root, "pinned");
 
     fs::write(runes.join("pinned.rn"), pinned_rune("payload two")).unwrap();
@@ -647,7 +647,7 @@ fn held_package_is_not_re_realized_for_rune_drift() {
     );
 
     // Releasing the hold lets the pending drift apply on the next install.
-    assert_success(&run(root, &["unhold", "pinned"]), "unhold pinned");
+    assert_success(&run(root, &["pkg", "unhold", "pinned"]), "unhold pinned");
     let after = run(root, &["install", "pinned"]);
     assert_success(&after, "reinstall after unhold");
     assert_eq!(
