@@ -151,7 +151,7 @@ fn switch_generation(args: cli::SwitchArgs) -> Result<()> {
             "switched to generation {id} in {:.2}s",
             started.elapsed().as_secs_f64(),
         )),
-        output::faint("— nothing was rebuilt, nothing was lost"),
+        output::faint("— no rebuild"),
     ));
     Ok(())
 }
