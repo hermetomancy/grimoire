@@ -158,18 +158,20 @@ impl InstalledWorld {
         linked
     }
 
-    /// The subset of the linked set whose bins are symlinked onto the active PATH. Excludes
-    /// build-only packages (the managed toolchain, e.g. `build-env`) and anything reachable only
-    /// through them: those stay pinned in the store and available for builds, but their bins are
-    /// build machinery, not user commands. A toolchain tool also reachable from a normal requested
-    /// root (an explicit `grm install cmake`) is still linked. Same seed/closure as [`linked_immut`]
-    /// otherwise, so for an install with no build-only packages the two sets are identical.
+    /// The subset of the linked set whose bins are symlinked onto the active PATH. Seeded from
+    /// **requested** (non-build-only) roots only, then walked through runtime deps — so a held
+    /// dependency reaches PATH solely when something the user explicitly asked for needs it at
+    /// runtime. Build-only packages (the managed toolchain, e.g. `build-env`) are never seeded and
+    /// act as PATH barriers: their held closure (clang, cmake, …) stays pinned in the store and
+    /// available for builds, but off PATH. A toolchain tool also requested directly (an explicit
+    /// `grm install cmake`) is still linked. This is the key difference from [`linked_immut`], the
+    /// GC-root set, which *also* seeds from held roots so the store keeps the whole closure.
     pub fn bin_linked_immut(&self) -> HashSet<String> {
         let mut linked: HashSet<String> = HashSet::new();
         let mut queue: VecDeque<&PackageState> = self
             .states
             .values()
-            .filter(|state| (state.requested || state.held) && !state.build_only)
+            .filter(|state| state.requested && !state.build_only)
             .collect();
         while let Some(state) = queue.pop_front() {
             // A build-only package is a PATH barrier: never linked, and its runtime closure is not
@@ -358,13 +360,16 @@ mod tests {
     fn bin_linked_excludes_build_only_and_its_exclusive_closure() {
         let mut build_env = state("build-env", &["toolchain"], true, false);
         build_env.build_only = true;
+        // `lib` and `toolchain` are both `held` deps (the realistic case): one reachable from the
+        // requested `app`, one only through build-env. A seed that included held roots would pull
+        // `toolchain` onto PATH regardless of the build-only barrier — the bug this guards against.
         let world = InstalledWorld {
             root: PathBuf::from("/tmp"),
             states: BTreeMap::from([
                 ("app".to_owned(), state("app", &["lib"], true, false)),
-                ("lib".to_owned(), state("lib", &[], false, false)),
+                ("lib".to_owned(), state("lib", &[], false, true)),
                 ("build-env".to_owned(), build_env),
-                ("toolchain".to_owned(), state("toolchain", &[], false, false)),
+                ("toolchain".to_owned(), state("toolchain", &[], false, true)),
             ]),
             dirty: HashSet::new(),
             deleted: HashSet::new(),
@@ -373,7 +378,8 @@ mod tests {
         // The full closure (GC roots / snapshot) still pins the build-only package and its deps.
         let linked = world.linked_immut();
         assert!(linked.contains("build-env") && linked.contains("toolchain"));
-        // The PATH set drops the build-only root and anything reachable only through it.
+        // The PATH set keeps the held dep reachable from a requested root (`lib`) but drops the
+        // build-only root and its held-only closure (`toolchain`).
         let on_path = world.bin_linked_immut();
         assert!(on_path.contains("app") && on_path.contains("lib"));
         assert!(!on_path.contains("build-env"));
