@@ -51,3 +51,23 @@ pub fn list_item(text: &str) {
         println!("{text}");
     }
 }
+
+/// One step of a dry-run plan: a change marker colored by kind — `+` add (green), `-` remove (red),
+/// `~` change (yellow) — followed by the step text. On a terminal the marker is bold-colored; piped,
+/// the bare `  + text` form is kept byte-for-byte so scripts and tests keep parsing plans. Always
+/// prints (a plan is requested data).
+pub fn plan_item(marker: char, text: &str) {
+    clear_spinner();
+    clear_live_build_log();
+    if stdout_styled() {
+        let painted = match marker {
+            '+' => super::green(&marker.to_string()),
+            '-' => super::red(&marker.to_string()),
+            '~' => super::yellow(&marker.to_string()),
+            _ => marker.to_string(),
+        };
+        println!("  {painted} {text}");
+    } else {
+        println!("  {marker} {text}");
+    }
+}

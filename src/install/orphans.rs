@@ -91,18 +91,21 @@ fn dry_run_remove(packages: &[String]) -> Result<()> {
         };
         let dependents = dependents_outside(&states, target, &removal_set, &linked);
         if dependents.is_empty() {
-            crate::util::output::line(&format!("  - {} {}", target.name, target.version));
+            crate::util::output::plan_item('-', &format!("{} {}", target.name, target.version));
             to_remove.push(target.name.clone());
         } else {
-            crate::util::output::line(&format!(
-                "  ~ {} kept — still required by {}; demoted to dependency",
-                target.name,
-                dependents.join(", ")
-            ));
+            crate::util::output::plan_item(
+                '~',
+                &format!(
+                    "{} kept — still required by {}; demoted to dependency",
+                    target.name,
+                    dependents.join(", ")
+                ),
+            );
         }
     }
     for orphan in simulate_orphan_sweep(&states, &to_remove, &[]) {
-        crate::util::output::line(&format!("  - {orphan} (unused dependency)"));
+        crate::util::output::plan_item('-', &format!("{orphan} (unused dependency)"));
     }
     Ok(())
 }

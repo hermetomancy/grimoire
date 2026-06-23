@@ -581,12 +581,10 @@ fn print_plan(plan: &Plan, installed: &BTreeMap<String, Version>) -> Result<()> 
 /// has already printed a synthetic root step (source-rune or local-archive install).
 fn print_plan_body(plan: &Plan) {
     for step in &plan.steps {
-        crate::util::output::line(&format!(
-            "  + {} {} ({})",
-            step.name,
-            step.version,
-            describe_origin(step)
-        ));
+        crate::util::output::plan_item(
+            '+',
+            &format!("{} {} ({})", step.name, step.version, describe_origin(step)),
+        );
     }
 }
 
@@ -599,18 +597,21 @@ fn print_plan_consequences(plan: &Plan, installed: &BTreeMap<String, Version>) -
     for step in &plan.steps {
         for old in &step.replaces {
             if old != &step.name && linked.contains(old) {
-                crate::util::output::line(&format!("  ~ {old} → {} (replaced)", step.name));
+                crate::util::output::plan_item('~', &format!("{old} → {} (replaced)", step.name));
             }
         }
     }
 
     for (for_name, dep_step) in build_dep_closure(&plan.steps, installed)? {
-        crate::util::output::line(&format!(
-            "  + {} {} ({}; build dep of {for_name}, store-only)",
-            dep_step.name,
-            dep_step.version,
-            describe_origin(&dep_step)
-        ));
+        crate::util::output::plan_item(
+            '+',
+            &format!(
+                "{} {} ({}; build dep of {for_name}, store-only)",
+                dep_step.name,
+                dep_step.version,
+                describe_origin(&dep_step)
+            ),
+        );
     }
     Ok(())
 }

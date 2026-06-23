@@ -174,7 +174,7 @@ pub fn upgrade(args: UpgradeArgs) -> Result<()> {
     if args.dry_run {
         print_upgrade_plan(&to_upgrade);
         for (old, new) in &renames {
-            output::line(&format!("  ~ {old} → {new} (replaced)"));
+            output::plan_item('~', &format!("{old} → {new} (replaced)"));
         }
         return Ok(());
     }
@@ -313,9 +313,9 @@ fn print_upgrade_plan(to_upgrade: &[(String, Version, Version)]) {
     output::line("plan:");
     for (name, current, newest) in to_upgrade {
         if current == newest {
-            output::line(&format!("  ~ {name} {current} (rebuild: address drifted)"));
+            output::plan_item('~', &format!("{name} {current} (rebuild: address drifted)"));
         } else {
-            output::line(&format!("  ~ {name} {current} → {newest}"));
+            output::plan_item('~', &format!("{name} {current} → {newest}"));
         }
     }
 }

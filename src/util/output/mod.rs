@@ -29,7 +29,7 @@ mod list;
 mod progress;
 mod result;
 
-pub use detail::{field, heading, line, list_item};
+pub use detail::{field, heading, line, list_item, plan_item};
 pub use list::{Cell, print_rows};
 pub use progress::{build_log_line, status, success};
 pub use result::{accent, faint, note, problem, prompt, report, strong, warn};
@@ -104,4 +104,8 @@ fn yellow(symbol: &str) -> String {
 
 fn red(symbol: &str) -> String {
     symbol.bold().red().to_string()
+}
+
+fn green(symbol: &str) -> String {
+    symbol.bold().green().to_string()
 }

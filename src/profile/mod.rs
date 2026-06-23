@@ -326,16 +326,16 @@ pub fn dry_run_activation(generation: Option<u64>) -> Result<()> {
         snapshot.into_iter().map(|s| (s.name, s.version)).collect();
     for (name, version) in &target_set {
         match current.get(name) {
-            None => crate::util::output::line(&format!("  + {name} {version}")),
+            None => crate::util::output::plan_item('+', &format!("{name} {version}")),
             Some(now) if now != version => {
-                crate::util::output::line(&format!("  ~ {name} {now} → {version}"))
+                crate::util::output::plan_item('~', &format!("{name} {now} → {version}"))
             }
             _ => {}
         }
     }
     for name in current.keys() {
         if !target_set.contains_key(name) {
-            crate::util::output::line(&format!("  - {name}"));
+            crate::util::output::plan_item('-', name);
         }
     }
     Ok(())

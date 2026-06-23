@@ -23,22 +23,36 @@ pub fn man(args: ManArgs) -> Result<()> {
     fs::create_dir_all(&args.output)
         .with_context(|| format!("create man output directory {}", args.output.display()))?;
     let cmd = Cli::command();
-    render_page(&cmd, "grm.1", &args)?;
+    let count = render_tree(&cmd, "grm", "grm", &args)?;
+    report(&format!(
+        "wrote {count} man pages into {}",
+        args.output.display()
+    ));
+    Ok(())
+}
+
+/// Render a man page for `cmd` and every nested subcommand, recursively. `stem` is the dashed
+/// filename stem (`grm-pkg-list` → `grm-pkg-list.1`); `invocation` is the space-joined command line
+/// (`grm pkg list`), set as the bin name so the synopsis reads correctly at each level. The flat
+/// loop this replaces gave group subcommands (`grm pkg`, `grm generation`) a page but skipped their
+/// children, which had `--help` but no man page.
+fn render_tree(cmd: &clap::Command, stem: &str, invocation: &str, args: &ManArgs) -> Result<usize> {
+    let titled = cmd.clone().bin_name(invocation.to_owned());
+    render_page(&titled, &format!("{stem}.1"), args)?;
     let mut count = 1usize;
     for sub in cmd.get_subcommands() {
         // Skip clap's auto-generated `help` subcommand; users don't expect a man page for it.
         if sub.get_name() == "help" {
             continue;
         }
-        let file = format!("grm-{}.1", sub.get_name());
-        render_page(sub, &file, &args)?;
-        count += 1;
+        count += render_tree(
+            sub,
+            &format!("{stem}-{}", sub.get_name()),
+            &format!("{invocation} {}", sub.get_name()),
+            &args,
+        )?;
     }
-    report(&format!(
-        "wrote {count} man pages into {}",
-        args.output.display()
-    ));
-    Ok(())
+    Ok(count)
 }
 
 fn render_page(cmd: &clap::Command, file: &str, args: &ManArgs) -> Result<()> {

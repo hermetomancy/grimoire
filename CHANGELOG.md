@@ -39,6 +39,9 @@ heading when it is tagged.
 
 ### Changed
 
+- Dry-run plans and generation diffs colorize their change markers — `+` add (green), `-` remove
+  (red), `~` change (yellow) — on a terminal; piped output keeps the bare `  + name` form byte-for-
+  byte. Routed through a new `util::output::plan_item` so every plan renders identically.
 - All user-facing output now flows through one module (`util::output`) with typed outputters in
   three tiers: result (`report` ✦ / `warn` ! / `problem` ✗ / `note`), data (`field` / `heading` /
   `print_rows` / `line`), and progress (spinner / `status` / `success` / build log). Bare
@@ -101,6 +104,9 @@ heading when it is tagged.
 
 ### Fixed
 
+- `grm man` now generates pages for nested subcommands (`grm-pkg-install.1`,
+  `grm-generation-switch.1`, …); it recursed only the top level before, so grouped subcommands had
+  `--help` but no man page. Each page's synopsis uses the full `grm pkg install` invocation.
 - `grm install <name>` no longer fails when the working directory holds an entry of the same name.
   Argument routing distinguished a local archive (and `find_rune` a source rune) by bare path
   existence, so a `grimoire/` source checkout next to `grm install grimoire` was handed to archive
