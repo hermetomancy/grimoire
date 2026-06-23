@@ -81,15 +81,9 @@ fn doctor_reports_health_and_problems() {
         empty_out.contains("installed packages: 0"),
         "doctor counts packages: {empty_out}"
     );
-    let packages = core_readiness_packages();
-    let missing = packages.join(", ");
-    let expected = format!(
-        "managed core userland: incomplete (0/{n}, missing {missing})",
-        n = packages.len()
-    );
     assert!(
-        empty_out.contains(&expected),
-        "doctor reports missing managed core tools: {empty_out}"
+        empty_out.contains("managed core userland: build-env not installed"),
+        "doctor reports build-env not installed: {empty_out}"
     );
     assert!(
         empty_out.contains("health: ok"),

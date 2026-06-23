@@ -18,44 +18,6 @@ use crate::{
     util::paths,
 };
 
-const CORE_USERLAND_TOOLS_LINUX: &[&str] = &[
-    "linux-headers",
-    "musl",
-    "llvm",
-    "clang",
-    "cmake",
-    "python3-minimal",
-    "gmake",
-    "toolchain-wrappers",
-    "dash",
-    "mawk",
-    "uutils",
-    "gsed",
-    "ggrep",
-];
-
-const CORE_USERLAND_TOOLS_NON_LINUX: &[&str] = &[
-    "llvm",
-    "clang",
-    "cmake",
-    "python3-minimal",
-    "gmake",
-    "toolchain-wrappers",
-    "dash",
-    "mawk",
-    "uutils",
-    "gsed",
-    "ggrep",
-];
-
-fn core_userland_tools() -> &'static [&'static str] {
-    if paths::target_triple().starts_with("linux-") {
-        CORE_USERLAND_TOOLS_LINUX
-    } else {
-        CORE_USERLAND_TOOLS_NON_LINUX
-    }
-}
-
 /// Reports Grimoire's environment and validates local state. Health results (counts, the
 /// environment summary) go to stdout; per-item problems go to stderr (AGENTS.md §12.1). A clean
 /// run reports zero problems; problems are diagnostics, not a hard error.
@@ -298,36 +260,20 @@ fn check_source_build_readiness() -> Result<usize> {
     Ok(1)
 }
 
+/// build-env's dependency closure *is* the managed build requirement (the compiler toolchain plus
+/// the userland floor), so its presence is the single readiness check — no per-package list to
+/// drift out of sync with the runes.
 fn report_managed_core_readiness() -> Result<()> {
-    let tools = core_userland_tools();
-    let missing = missing_core_tools()?;
-    let installed = tools.len() - missing.len();
-    if missing.is_empty() {
-        field(
-            "managed core userland",
-            &format!("ready ({installed}/{total})", total = tools.len()),
-        );
+    let world = install::InstalledWorld::load_default()?;
+    if world.contains("build-env") {
+        field("managed core userland", "ready (build-env installed)");
     } else {
         field(
             "managed core userland",
-            &format!(
-                "incomplete ({installed}/{total}, missing {missing})",
-                total = tools.len(),
-                missing = missing.join(", ")
-            ),
+            "build-env not installed (run `grm install build-env`)",
         );
     }
     Ok(())
-}
-
-fn missing_core_tools() -> Result<Vec<String>> {
-    let tools = core_userland_tools();
-    let world = install::InstalledWorld::load_default()?;
-    Ok(tools
-        .iter()
-        .filter(|name| !world.contains(name))
-        .map(|name| (*name).to_owned())
-        .collect())
 }
 
 fn check_tomes() -> Result<usize> {

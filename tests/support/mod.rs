@@ -18,43 +18,6 @@ pub use fixtures::*;
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_grm");
 
-// Keep in sync with `CORE_USERLAND_TOOLS_{LINUX,NON_LINUX}` in src/cmd/doctor.rs — the readiness
-// check counts installed packages against those lists, and `make_fake_core_tome` stocks its index
-// from this one.
-pub fn core_readiness_packages() -> &'static [&'static str] {
-    if std::env::consts::OS == "linux" {
-        &[
-            "linux-headers",
-            "musl",
-            "llvm",
-            "clang",
-            "cmake",
-            "python3-minimal",
-            "gmake",
-            "toolchain-wrappers",
-            "dash",
-            "mawk",
-            "uutils",
-            "gsed",
-            "ggrep",
-        ]
-    } else {
-        &[
-            "llvm",
-            "clang",
-            "cmake",
-            "python3-minimal",
-            "gmake",
-            "toolchain-wrappers",
-            "dash",
-            "mawk",
-            "uutils",
-            "gsed",
-            "ggrep",
-        ]
-    }
-}
-
 type ZstdFileEncoder = zstd::stream::write::Encoder<'static, fs::File>;
 pub fn run(root: &Path, args: &[&str]) -> Output {
     Command::new(BIN)
@@ -340,8 +303,10 @@ pub fn make_fake_core_tome(triple: &str) -> TempDir {
     )
     .unwrap();
 
+    // doctor's readiness check is just build-env's presence (its closure is the build requirement),
+    // so that's all the fake core tome needs to stock.
     let mut entries = String::from("{\n  format: 2,\n    entries: {\n");
-    for package in core_readiness_packages() {
+    for package in ["build-env"] {
         let store_hash = format!("cafef00dcafef00d-{package}");
         let archive_name = format!("{package}-0.1.0-{triple}.tar.zst");
         let archive = make_versioned_archive_with_hash(

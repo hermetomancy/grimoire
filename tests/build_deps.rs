@@ -102,7 +102,7 @@ fn build_dependency_bins_take_precedence_over_host_tools() {
 }
 
 #[test]
-fn doctor_reports_managed_core_ready_after_minimal_core_install() {
+fn doctor_reports_ready_after_build_env_install() {
     let root = TempDir::new().unwrap();
     let root = root.path();
     let triple = target_triple();
@@ -115,19 +115,15 @@ fn doctor_reports_managed_core_ready_after_minimal_core_install() {
     );
     assert_success(&add, "add fake core tome");
 
-    let packages = core_readiness_packages();
-    for package in packages {
-        let install = run(root, &["install", package]);
-        assert_success(&install, &format!("install core package {package}"));
-    }
+    let install = run(root, &["install", "build-env"]);
+    assert_success(&install, "install build-env");
 
     let doctor = run(root, &["doctor"]);
-    assert_success(&doctor, "doctor after core readiness install");
+    assert_success(&doctor, "doctor after build-env install");
     let out = stdout(&doctor);
-    let expected = format!("managed core userland: ready ({n}/{n})", n = packages.len());
     assert!(
-        out.contains(&expected),
-        "doctor reports managed core readiness: {out}"
+        out.contains("managed core userland: ready (build-env installed)"),
+        "doctor reports build env readiness: {out}"
     );
 }
 
