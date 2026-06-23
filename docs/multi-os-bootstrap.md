@@ -34,7 +34,10 @@ and the compiler runtime (soft-float helpers, unwinder)?
   - rust's `unwind` crate links `-lgcc_s` by default on musl → `[target.<musl>].llvm-libunwind =
     "in-tree"` makes rust build LLVM's libunwind from source instead.
 - **macOS** — the platform SDK supplies libc, the CRT, and the C++ stdlib. Grimoire builds none of
-  it; it injects `SDKROOT` (see `build_env_for_target`) and leans on the SDK.
+  it; it locates the SDK with `xcrun --show-sdk-path` and injects `SDKROOT`, from **two** points:
+  `build_env_for_target` sets it for grm-driven builds, and the `cc`/`c++` wrappers fall back to it
+  when `SDKROOT` is unset — so a bare `cc` (cargo, make, an IDE) still finds system headers, since
+  the managed clang, unlike Apple's driver, has no built-in sysroot.
 - **FreeBSD (anticipated)** — base system supplies libc + CRT in `/usr/lib`. Closer to the macOS
   "lean on the platform" model than to the musl "build it yourself" model: likely **no floor build**,
   just point at base.
@@ -93,6 +96,7 @@ Do you build the compiler + C++ stdlib, or does the OS hand them to you?
 | Discovery vars | `install::build_dep_env_vars` | `CPATH`/`LIBRARY_PATH`/`CMAKE_PREFIX_PATH`/`PKG_CONFIG_PATH` for declared deps (and the musl/linux-headers floor). |
 | Toolchain boundary | `core_compiler_boundary_available` | Flips from host tools (bootstrap) to the managed clang once `toolchain-wrappers` is installed. |
 | Per-OS rune branches | `llvm.rn`, `rust.rn`, `grimoire.rn` | `if ($darwin_arch \| is-empty)` (llvm), `if $is_musl` (rust/grimoire). `libcxx.rn` is Linux-only via `targets`. |
+| macOS SDK in the wrappers | `toolchain-wrappers.rn` (driver wrappers) | `cc`/`c++`/`gcc`/`g++` set `SDKROOT` via `xcrun` when unset, so *bare* invocations find the SDK, not just grm-driven builds. The version banner is unchanged, so `build_env_id` is unaffected. |
 
 A recurring lesson: rust's bootstrap reads the **generic** `CFLAGS`/`CPATH` (not the per-triple
 `CFLAGS_<triple>`) when it builds its internal LLVM and runs cc-rs for build-host helpers. On the
