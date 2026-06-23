@@ -32,7 +32,9 @@ use crate::{
     util::output::{report, status},
 };
 
-/// Core packages whose `bin/` directories are always prepended to build PATH.
+/// Core packages whose `bin/` directories are always prepended to build PATH — the managed build
+/// floor. The toolchain (compiler, cmake, gmake, python3) plus the userland: a POSIX shell, awk,
+/// coreutils, sed, and grep, enough for autotools `configure` without the host `/usr/bin` tail.
 const CORE_PACKAGES: &[&str] = &[
     "linux-headers",
     "musl",
@@ -41,8 +43,13 @@ const CORE_PACKAGES: &[&str] = &[
     "cmake",
     "python3-minimal",
     "gmake",
-    "toybox",
     "toolchain-wrappers",
+    // Userland floor (replaces toybox, which was too thin for configure — no awk/sh/tr/expr/…).
+    "dash",
+    "mawk",
+    "uutils",
+    "gsed",
+    "ggrep",
 ];
 
 /// Returns `true` when `target` is a Linux musl triple.
@@ -183,10 +190,10 @@ fn inject_libcxx_flags(env: &mut [(String, String)], libcxx: &str) {
 }
 
 /// Constructs a [`BuildEnv`] for a build on `target`. Declared build-dep `bin/` dirs come
-/// first — declaration is specificity, so a rune that declares `gsed` gets GNU sed as
-/// plain `sed` even though the core floor (toybox) also ships one — then the core package
-/// dirs as the managed floor. When the managed compiler boundary is not yet available
-/// (bootstrap), host compiler tools are included after both.
+/// first — declaration is specificity, so a rune's explicitly declared build dep outranks the
+/// same command from the managed floor — then the core package dirs (the floor: toolchain plus
+/// the userland — shell/awk/coreutils/sed/grep). When the managed compiler boundary is not yet
+/// available (bootstrap), host compiler tools are included after both.
 pub fn build_env_for_target(
     path_dirs: Vec<PathBuf>,
     extra_env: Vec<(String, String)>,

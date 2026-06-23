@@ -8,6 +8,10 @@ heading when it is tagged.
 
 ### Added
 
+- Managed build-floor userland: `uutils` (Rust coreutils), `dash` (POSIX sh), `mawk` (awk), and
+  `ggrep` (GNU grep) join `gsed` on the build floor (`CORE_PACKAGES`), replacing `toybox` — whose
+  set was too thin for autotools `configure` (no awk/sh/tr/expr/…). The host `/usr/bin` tail stays
+  only as a shrinking fallback; `grm tome build --hermetic` enumerates what the floor still lacks.
 - `build_only` rune metadata: a build-only package (the managed `build-env`, `clang`, and `llvm`)
   is pinned in the store and available to source builds, but its bins stay off the active profile —
   the managed toolchain (toybox's coreutils, clang, llvm, cmake, python3, …) is build machinery, not
@@ -104,6 +108,10 @@ heading when it is tagged.
 
 ### Fixed
 
+- Source extraction now handles codeload tag tarballs. `source_archive_kind` keyed off the URL
+  suffix, so `codeload.github.com/.../tar.gz/0.9.0` (a dotted tag ref) was never recognized as a
+  tarball and went silently unextracted — leaving `$ctx.sources.main.dir` null and failing the build
+  with "Input type not supported." It now recognizes the `/tar.gz/<ref>` path form directly.
 - `grm man` now generates pages for nested subcommands (`grm-pkg-install.1`,
   `grm-generation-switch.1`, …); it recursed only the top level before, so grouped subcommands had
   `--help` but no man page. Each page's synopsis uses the full `grm pkg install` invocation.

@@ -65,8 +65,8 @@ in-process and reads/writes NUON data.
 Managed builds get a controlled `PATH`, in priority order: declared build-dep `bin/` dirs →
 core package `bin/` dirs → host compiler boundary symlinks (bootstrap only; skipped once
 `toolchain-wrappers` is installed) → POSIX ambient `/usr/bin` and `/bin`. Declared deps
-outrank the core floor deliberately: declaration is specificity, so a rune that declares
-`gsed` gets GNU sed as plain `sed` even though the floor (toybox) ships one too.
+outrank the core floor deliberately: declaration is specificity, so a rune's explicitly declared
+build dep wins over the same command from the floor.
 
 The environment is sandboxed: host discovery variables (`CMAKE_PREFIX_PATH`,
 `PKG_CONFIG_PATH`, `CPATH`, `LIBRARY_PATH`, language package-manager roots, Homebrew prefixes,
@@ -81,7 +81,7 @@ inherited host env vars unless Grimoire deliberately sets them.
    `deps.build`. Never rely on host env vars, Homebrew/MacPorts prefixes, language
    package-manager state, or the user's shell configuration.
 2. Do not declare *generic* POSIX utilities (`sed`, `grep`, `awk`, `find`, …) as build deps —
-   the ambient directories (or core toybox once bootstrapped) always provide them. Declaring
+   the ambient directories (or the managed floor once bootstrapped) always provide them. Declaring
    a specific *implementation* (`gsed` when GNU sed semantics are required) is correct and
    different: the declared dep outranks the floor, so plain `sed` then means GNU sed for
    that build.

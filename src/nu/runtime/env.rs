@@ -232,9 +232,9 @@ pub(crate) fn build_path_entries(env: &BuildEnv, host_tool_dir: Option<&Path>) -
     if let Some(dir) = host_tool_dir {
         entries.push(dir.to_path_buf());
     }
-    // POSIX ambient utilities are available in managed builds unless the build is hermetic:
-    // sed, grep, awk, find, mkdir, cp, chmod, expr, test, etc. `--hermetic` drops them to
-    // enumerate which runes silently reach for host tools toybox does not ship (stage-2 work).
+    // The host POSIX ambient tail (/usr/bin, /bin), appended as a shrinking fallback for tools the
+    // managed floor does not yet ship (perl, m4, …) now that the floor covers sh/awk/coreutils/sed/
+    // grep. `--hermetic` drops it to enumerate which runes still reach for the host (stage-2 work).
     if !env.hermetic {
         for dir in posix_ambient_dirs() {
             if dir.is_dir() && !entries.contains(&dir) {

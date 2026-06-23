@@ -544,7 +544,7 @@ mod tests {
         bins.insert("linux-x86_64-musl".to_owned(), musl);
 
         let meta = PackageMetadata {
-            name: "toybox".to_owned(),
+            name: "multitool".to_owned(),
             version: "0.8.13".to_owned(),
             target: None,
             store_path: None,

@@ -62,6 +62,13 @@ pub(super) fn source_archive_kind(url: &str) -> Option<SourceArchiveKind> {
     if normalized.ends_with(".tar.bz2") || normalized.ends_with(".tbz2") {
         return Some(SourceArchiveKind::TarBz2);
     }
+    // codeload / GitHub archive form encodes the container as a path segment before the git ref
+    // (`.../tar.gz/<ref>`). A dotted ref — a tag like `0.9.0` — defeats both the suffix check above
+    // and the extensionless-sniff fallback in `prepare_sources` (which only fires when the final
+    // segment has no `.`), so the archive would never extract. Recognize the segment directly.
+    if normalized.contains("/tar.gz/") {
+        return Some(SourceArchiveKind::TarGz);
+    }
     None
 }
 
@@ -187,5 +194,27 @@ mod tests {
             Some(SourceArchiveKind::TarBz2)
         ));
         assert!(source_archive_kind_sniffed(&txt).is_none());
+    }
+
+    #[test]
+    fn codeload_targz_path_form_detected_for_tag_and_commit_refs() {
+        // codeload names the container in the path before the ref. A dotted tag ref (`0.9.0`)
+        // defeated the suffix check and the extensionless-sniff path, so the archive never
+        // extracted and `$ctx.sources.main.dir` came through as null.
+        assert!(matches!(
+            source_archive_kind("https://codeload.github.com/uutils/coreutils/tar.gz/0.9.0"),
+            Some(SourceArchiveKind::TarGz)
+        ));
+        assert!(matches!(
+            source_archive_kind(
+                "https://codeload.github.com/o/r/tar.gz/58b0188a7b8b90251a96b14513355594ac7ec949"
+            ),
+            Some(SourceArchiveKind::TarGz)
+        ));
+        // A real suffix still wins; a plain release tarball is unaffected.
+        assert!(matches!(
+            source_archive_kind("https://ftp.gnu.org/gnu/grep/grep-3.12.tar.xz"),
+            Some(SourceArchiveKind::TarXz)
+        ));
     }
 }

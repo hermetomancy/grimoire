@@ -29,7 +29,7 @@ not here. When everything below is done and reflected in the design doc, delete 
 ### Bootstrap stage 1: core on all targets
 
 Build the core runes (`linux-headers`, `musl`, `llvm` (+`clang` split member with
-compiler-rt runtimes inside), `gmake`, `toybox` (+`gsed`),
+compiler-rt runtimes inside), `gmake`, the userland floor (`uutils`/`dash`/`mawk`/`gsed`/`ggrep`),
 `toolchain-wrappers`) from source on every supported target. macOS aarch64 closed the
 dogfood loop 2026-06-12 (full chain through rust 1.96 and grimoire itself). All six remaining
 targets are supported by official Rust host tools (Tier 2 with host tools via rustup), so the
@@ -56,17 +56,17 @@ compiler boundary — is a core package; the host compiler seeds bootstrap only 
 ambient userland.
 
 The host *userland* link is shadowed, never severed: `/usr/bin` + `/bin` are
-unconditionally appended to managed build PATH (`posix_ambient_dirs`), so anything toybox
+unconditionally appended to managed build PATH (`posix_ambient_dirs`), so anything the floor
 does not ship (perl, m4, bash-isms) falls through to the host silently — an unhashed
 build input. Path to severance is empirical: a
 hermetic build mode that drops the ambient tail, run per rune to enumerate what actually
-leaks; passing runes are certified toybox-ambient, failures name what stage 2 must package.
+leaks; passing runes are certified floor-ambient, failures name what stage 2 must package.
 The `grm tome build --hermetic` diagnostic has shipped: it drops the ambient tail so a build
 that reaches for an unpackaged tool fails and names the leak. The remaining stage-2 work is
 empirical — run it per rune to enumerate what actually leaks, certify the passing runes as
-toybox-ambient, and package the failures. One deferred deliverable:
+floor-ambient, and package the failures. One deferred deliverable:
 
-- **Fold a toybox-ambient marker into `build_env_id` (deferred; needs a decision).** The
+- **Fold a floor-ambient marker into `build_env_id` (deferred; needs a decision).** The
   cheap interim fix if prebuilts ever come from heterogeneous builders, but blocked by an
   architecture mismatch: `build_env_id` is a process-global cached pure fn with no per-build
   inputs while `--hermetic` is per-build, and the marker must reach all three address

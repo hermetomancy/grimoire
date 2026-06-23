@@ -136,7 +136,7 @@ deps: {
   `bin/` dirs join the managed build PATH and their prefixes are layered into discovery
   variables (`CMAKE_PREFIX_PATH`, `PKG_CONFIG_PATH`, `CPATH`, `LIBRARY_PATH`, `ACLOCAL_PATH`,
   `<DEP>_PREFIX`). Declare every non-POSIX tool the build invokes — and remember the
-  self-hosted ambient userland is toybox, which ships no `make`. Out-of-core packages can
+  self-hosted userland floor (uutils/dash/mawk/gsed/ggrep) ships no `make`. Out-of-core packages can
   declare `build-env` instead of enumerating the toolchain.
 - **`deps.runtime`** — packages required at execution time; resolved by the solver and
   installed into the active generation.
@@ -191,7 +191,7 @@ packaged under its **implementation name**, and ships **both** command names:
 
 The generic name (`make`, `sed`, `awk`) is then a **capability** with potentially many
 providers — never assume what the platform floor provides (GNU on glibc distros, busybox
-on Alpine, toybox once the managed userland is bootstrapped):
+on Alpine, the managed floor (uutils/dash/mawk/gsed/ggrep) once bootstrapped):
 
 - **Consumers** depend on and invoke the *generic* name when any implementation serves,
   and the *implementation* name when specific semantics are required (`gsed` for GNU `T`

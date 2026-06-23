@@ -26,8 +26,12 @@ const CORE_USERLAND_TOOLS_LINUX: &[&str] = &[
     "cmake",
     "python3-minimal",
     "gmake",
-    "toybox",
     "toolchain-wrappers",
+    "dash",
+    "mawk",
+    "uutils",
+    "gsed",
+    "ggrep",
 ];
 
 const CORE_USERLAND_TOOLS_NON_LINUX: &[&str] = &[
@@ -36,8 +40,12 @@ const CORE_USERLAND_TOOLS_NON_LINUX: &[&str] = &[
     "cmake",
     "python3-minimal",
     "gmake",
-    "toybox",
     "toolchain-wrappers",
+    "dash",
+    "mawk",
+    "uutils",
+    "gsed",
+    "ggrep",
 ];
 
 fn core_userland_tools() -> &'static [&'static str] {
