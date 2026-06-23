@@ -272,6 +272,31 @@ fn backtracks_across_independent_roots() {
 
 #[test]
 fn reuses_installed_version_without_emitting_step() {
+    // Reuse applies only when the installed version is the newest candidate.
+    let src = source(&[("lib", vec![cand("1.0.0", &[]), cand("1.1.0", &[])])]);
+    let mut installed = BTreeMap::new();
+    installed.insert("lib".to_owned(), parse_version_relaxed("1.1.0").unwrap());
+    let linked = HashSet::new();
+    let resolved = resolve_with(
+        &[dep("lib", ">=1.0")],
+        &installed,
+        &linked,
+        None,
+        &src,
+        &BTreeMap::new(),
+    )
+    .expect("plan");
+    assert!(
+        resolved.steps.is_empty(),
+        "installed newest version should produce no step"
+    );
+}
+
+#[test]
+fn rebuilds_when_installed_is_older_than_newest_candidate() {
+    // The closure walker addresses `lib` from its current rune (1.1.0), so a stale install (1.0.0)
+    // must be rebuilt to the newest rather than reused — otherwise a dependent's planned address
+    // folds 1.0.0 while the build recomputes 1.1.0 (the §9.8 store-hash-mismatch abort).
     let src = source(&[("lib", vec![cand("1.0.0", &[]), cand("1.1.0", &[])])]);
     let mut installed = BTreeMap::new();
     installed.insert("lib".to_owned(), parse_version_relaxed("1.0.0").unwrap());
@@ -285,10 +310,12 @@ fn reuses_installed_version_without_emitting_step() {
         &BTreeMap::new(),
     )
     .expect("plan");
-    assert!(
-        resolved.steps.is_empty(),
-        "installed satisfying version should produce no step"
-    );
+    let steps: Vec<_> = resolved
+        .steps
+        .into_iter()
+        .map(|step| (step.name, step.version.to_string()))
+        .collect();
+    assert_eq!(steps, vec![("lib".to_owned(), "1.1.0".to_owned())], "{steps:?}");
 }
 
 #[test]

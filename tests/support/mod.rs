@@ -18,6 +18,9 @@ pub use fixtures::*;
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_grm");
 
+// Keep in sync with `CORE_USERLAND_TOOLS_{LINUX,NON_LINUX}` in src/cmd/doctor.rs — the readiness
+// check counts installed packages against those lists, and `make_fake_core_tome` stocks its index
+// from this one.
 pub fn core_readiness_packages() -> &'static [&'static str] {
     if std::env::consts::OS == "linux" {
         &[
@@ -28,8 +31,12 @@ pub fn core_readiness_packages() -> &'static [&'static str] {
             "cmake",
             "python3-minimal",
             "gmake",
-            "toybox",
             "toolchain-wrappers",
+            "dash",
+            "mawk",
+            "uutils",
+            "gsed",
+            "ggrep",
         ]
     } else {
         &[
@@ -38,8 +45,12 @@ pub fn core_readiness_packages() -> &'static [&'static str] {
             "cmake",
             "python3-minimal",
             "gmake",
-            "toybox",
             "toolchain-wrappers",
+            "dash",
+            "mawk",
+            "uutils",
+            "gsed",
+            "ggrep",
         ]
     }
 }

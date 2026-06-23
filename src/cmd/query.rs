@@ -172,7 +172,7 @@ pub fn upgrade(args: UpgradeArgs) -> Result<()> {
     }
 
     if args.dry_run {
-        print_upgrade_plan(&to_upgrade);
+        print_dry_run_plan(&targets, &to_upgrade)?;
         for (old, new) in &renames {
             output::plan_item('~', &format!("{old} → {new} (replaced)"));
         }
@@ -266,6 +266,7 @@ fn collect_upgrades(
     }
 
     let mut to_upgrade: Vec<(String, Version, Version)> = Vec::new();
+    let mut up_to_date: Vec<(String, Version)> = Vec::new();
     for name in targets {
         let Some(current) = installed.get(name) else {
             bail!("package `{name}` is not installed");
@@ -299,25 +300,62 @@ fn collect_upgrades(
                 }
                 to_upgrade.push((name.clone(), current.clone(), current.clone()));
             }
-            _ => output::report(&format!(
+            _ => up_to_date.push((name.clone(), current.clone())),
+        }
+    }
+    // A handful of "up to date" lines is reassuring; a long wall of them is noise. Past a
+    // threshold, collapse to a single count.
+    if up_to_date.len() > 10 {
+        output::report(&format!("{} packages are up to date", up_to_date.len()));
+    } else {
+        for (name, current) in &up_to_date {
+            output::report(&format!(
                 "{} {}",
                 output::accent(name),
                 output::faint(&format!("is up to date ({current})"))
-            )),
+            ));
         }
     }
     Ok(to_upgrade)
 }
 
-fn print_upgrade_plan(to_upgrade: &[(String, Version, Version)]) {
+/// A dry-run plan shows the full resolved closure — not just the named targets but every
+/// dependency the upgrade would pull in or rebuild — so it matches what a real run would do.
+/// Mirrors the upgrade resolve (`estimate_extra_realizations`): drop the targets so they
+/// re-resolve to the newest, keep the rest of the current world.
+fn print_dry_run_plan(
+    targets: &[String],
+    to_upgrade: &[(String, Version, Version)],
+) -> Result<()> {
+    let world = install::InstalledWorld::load_default()?;
+    let installed_now = world.installed_versions();
+    let mut installed = world.installed_versions_current()?;
+    // Only the genuinely-changing roots re-resolve; unchanged targets stay reused so they don't
+    // show up as spurious rebuilds. Their outdated/drifted deps still surface as steps via the
+    // resolver's newest-candidate rule.
+    for (name, _, _) in to_upgrade {
+        installed.remove(name);
+    }
+    let deps: Vec<crate::model::Dependency> = targets
+        .iter()
+        .map(|name| crate::model::Dependency::any(name.clone()))
+        .collect();
+    let linked = world.linked_immut();
+    let plan = solve::resolve(&deps, &installed, &linked, None)?;
     output::line("plan:");
-    for (name, current, newest) in to_upgrade {
-        if current == newest {
-            output::plan_item('~', &format!("{name} {current} (rebuild: address drifted)"));
-        } else {
-            output::plan_item('~', &format!("{name} {current} → {newest}"));
+    for step in &plan.steps {
+        match installed_now.get(&step.name) {
+            None => output::plan_item('+', &format!("{} {} (new)", step.name, step.version)),
+            Some(current) if *current == step.version => output::plan_item(
+                '~',
+                &format!("{} {} (rebuild: address drifted)", step.name, step.version),
+            ),
+            Some(current) => {
+                output::plan_item('~', &format!("{} {current} → {}", step.name, step.version))
+            }
         }
     }
+    Ok(())
 }
 
 pub(crate) fn tome_packages() -> Result<Vec<TomePackage>> {

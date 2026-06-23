@@ -203,11 +203,27 @@ impl Resolver<'_> {
             );
         }
 
-        // Prefer reusing an already-installed satisfying version: it emits no step and its deps
-        // are already present (so they are not expanded). If reuse leads to a dead end further
-        // down the worklist, fall through and try fresh candidates instead.
+        let candidates = self.candidates_for(name)?;
+        let target = paths::target_triple();
+
+        // Prefer reusing an already-installed satisfying version: it emits no step and its deps are
+        // already present (so they are not expanded). But the closure walker addresses every
+        // dependency from its current rune — i.e. the newest candidate — so reusing an *older*
+        // installed version makes the dependent's planned address fold a different dep hash than the
+        // build recomputes: the §9.8 divergence behind a "computed store hash does not match the
+        // planned" abort. Reuse only when the installed version is the newest satisfying candidate
+        // (or nothing is published for it — a local-only install the walker folds by recorded hash).
+        // If reuse leads to a dead end further down the worklist, fall through to fresh candidates.
+        let newest_satisfying = candidates
+            .iter()
+            .filter(|c| crate::model::req_matches(req, &c.version))
+            .map(|c| c.version.clone())
+            .max();
         if let Some(version) = self.installed.get(name)
             && crate::model::req_matches(req, version)
+            && newest_satisfying
+                .as_ref()
+                .is_none_or(|newest| version == newest)
         {
             let (conflicts, replaces) = self.installed_metadata(name, version);
             if self
@@ -231,9 +247,6 @@ impl Resolver<'_> {
                 }
             }
         }
-
-        let candidates = self.candidates_for(name)?;
-        let target = paths::target_triple();
         let mut last_err = None;
         for candidate in candidates {
             if !crate::model::req_matches(req, &candidate.version) {
