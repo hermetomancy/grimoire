@@ -115,7 +115,9 @@ const LIBC_FLOOR: &[&str] = &[
 
 /// Absolute Mach-O install-name prefixes that are the macOS platform floor (dyld shared cache
 /// and SDK), allowed without a declared dependency. Deliberately narrow: arbitrary `/usr/lib`
-/// libraries (zlib, ncurses, …) are *not* the floor — §5 requires those from the store.
+/// libraries (zlib, ncurses, libedit, libiconv, …) are *not* the floor — §5 requires those packaged
+/// in the store or eliminated at the source. Adding a `/usr/lib` library here is an exception, and
+/// per the prime directive an exception is a last resort, never a shortcut around packaging work.
 const MACOS_SYSTEM_PREFIXES: &[&str] = &[
     "/usr/lib/libSystem",
     "/usr/lib/system/",
@@ -257,7 +259,11 @@ mod tests {
         assert!(!off("/usr/lib/libc++.1.dylib"), "libc++ is the floor");
         assert!(
             off("/usr/lib/libz.dylib"),
-            "host /usr/lib zlib must be a store dep (§5)"
+            "host /usr/lib zlib must be a store dep (§5); it packages cleanly"
+        );
+        assert!(
+            off("/usr/lib/libedit.3.dylib"),
+            "host libedit must be packaged, not allowlisted"
         );
         assert!(
             off("/opt/homebrew/lib/libpng.dylib"),
