@@ -3,6 +3,15 @@
 Binding engineering rules for the Grimoire codebase. When a rule and convenience conflict,
 rule wins. When two rules conflict, prefer correctness and safety, then clarity, then brevity.
 
+**Correctness over expediency — the prime directive.** Never choose the easiest or fastest
+solution when a more correct one exists. The goal is *always* to advance Grimoire toward its end
+goal — a fully self-hosted, hermetic toolchain — never to make a local build pass sooner. Do not
+reach for an allowlist, an exception, or a "good enough" shortcut to skip work the end goal
+requires. A rebuild is an acceptable cost — even of LLVM or Rust, however many times — an unearned
+exception is not. When a host dependency can be packaged or eliminated, package or eliminate it;
+accept it as a platform given only after the correct path is genuinely exhausted, and say so
+explicitly when you do.
+
 ## 0. What Grimoire is
 
 A **Rust program that embeds Nushell**: the CLI, package-manager core, transaction logic, and
