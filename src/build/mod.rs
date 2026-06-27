@@ -250,9 +250,16 @@ pub fn build_env_for_target(
         // own build, which *provides* libc++ and compiles `-nostdinc++` against its own tree. It is
         // a floor (env, never a declared dep), so a C++ package like cmake does not cycle with
         // libcxx — whose own build deps include cmake.
-        if package_name != "libcxx"
-            && let Some(libcxx) = prefix("libcxx")
-        {
+        //
+        // Two injection paths must both be suppressed for libcxx's own build: the env-level one
+        // below, and the `c++`/`g++` wrappers, which *also* bake a `-isystem` to the installed libc++
+        // (toolchain-wrappers.rn). With both an installed and a fresh in-tree libc++ on the include
+        // path they share `<string.h>`'s include guard, so the installed tree shadows the fresh one's
+        // `#include_next` and musl's C declarations never resolve. This is the single place that
+        // knows the package name, so it sets the flag the wrapper reads (GRIMOIRE_SUPPRESS_LIBCXX).
+        if package_name == "libcxx" {
+            env.push(("GRIMOIRE_SUPPRESS_LIBCXX".to_string(), "1".to_string()));
+        } else if let Some(libcxx) = prefix("libcxx") {
             inject_libcxx_flags(&mut env, &libcxx);
         }
     }
@@ -949,5 +956,20 @@ mod tests {
         assert_eq!(get("LD"), Some("ld"));
         assert_eq!(get("CFLAGS"), Some("-static"));
         assert_eq!(get("LDFLAGS"), Some("-static"));
+    }
+
+    #[test]
+    fn libcxx_own_build_sets_the_wrapper_suppress_flag() {
+        // libcxx's own build must signal the wrapper to drop its baked libc++ -isystem, else the
+        // installed libc++ shadows the fresh in-tree headers' #include_next against musl.
+        let env =
+            build_env_for_target(Vec::new(), Vec::new(), "linux-x86_64-musl", "libcxx").unwrap();
+        let get =
+            |k: &str| env.extra_env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("GRIMOIRE_SUPPRESS_LIBCXX"), Some("1"));
+        // A normal C++ package on musl does not get the suppress flag.
+        let other =
+            build_env_for_target(Vec::new(), Vec::new(), "linux-x86_64-musl", "cmake").unwrap();
+        assert!(other.extra_env.iter().all(|(k, _)| k != "GRIMOIRE_SUPPRESS_LIBCXX"));
     }
 }
