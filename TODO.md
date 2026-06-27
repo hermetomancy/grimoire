@@ -74,6 +74,96 @@ floor-ambient, and package the failures. One deferred deliverable:
   identically or §9.8 breaks. Decide between a host-property marker and plumbing per-build
   env identity end-to-end before writing it.
 
+### Build-env review follow-ups (2026-06-24 bootstrap/ethos review)
+
+- **`toolchain-wrappers.rn:75` gnu crash (one-liner).** `driver_flags` is gated on `is_macos`;
+  its `else` dereferences `$env.MUSL_PREFIX`, which is unset for `-gnu` (musl is
+  `linux-*-musl`-filtered). Gate on `is_musl` (else `""`), matching line 82. Latent until gnu is a
+  built target.
+- **Musl floor-flip is not in the store address (§9.8 silent-correctness gap).** Pre-floor
+  (`-static`/host-glibc) and post-floor (`--sysroot=<musl>`) builds run under the same host-cc
+  banner → identical `build_env_id`, identical hash, different bytes. Same shape as the *boundary*
+  flip (host cc → managed clang), which **is** addressed via `managed_boundary_id`; this second
+  boundary is not. Fix: append installed musl+linux-headers store hashes to `build_env_id` on musl
+  targets, or gate `grm build`/`--index`/publish on floor presence and document the limit. Shares
+  the architecture blocker described in the deferred floor-ambient marker above (§ Bootstrap
+  stage 2): `build_env_id` is a process-global cached pure fn and the marker must reach all three
+  address consumers identically.
+- **Decide `-gnu`'s status; make the docs honest.** Managed clang is musl-defaulted on every
+  non-Darwin target (`llvm.rn:71`) and no floor/SDK analogue is injected for gnu, so it links host
+  glibc/libstdc++ unhashed and undeclared. AGENTS §11 says gnu is "supported"; this list / stage 1
+  say not-done. Either wire gnu (clang gnu arm + host-glibc fold into `build_env_id` + floor branch
+  in `build_env_for_target`) or soften §11 to "recognized cross-target, not self-hostable yet" and
+  drop gnu from rune `targets:` (or emit an early clear error instead of the MUSL_PREFIX crash).
+- **Doctor macOS SDK probe.** Once the managed boundary is installed, `doctor` never checks the SDK
+  exists; a later Xcode removal → clean `health: ok` then a cryptic `stdio.h not found`. Add a
+  macOS-only `macos_sdk_path()` line to `check_source_build_readiness`, mirroring the host-compiler
+  field.
+- **Cross-host substitution caveat (`host_libc` not in the address).** A glibc-cross host and a
+  musl-native host compute the same `rust`/`grimoire` address for different bits (rust-stage0 is
+  host-keyed but it is a *build* dep, which does not fold into the closure). Fine for today's
+  single-host reality; needs a written caveat in AGENTS §9.8 / multi-os-bootstrap.md. Ties into the
+  `host_libc` test line under "In progress / next".
+- **`musl.rn:39` clang-host assumption.** The `LIBCC` pin runs `cc --rtlib=compiler-rt …` at the
+  floor bottom, where `cc` is still the host compiler; a gcc host fails cryptically. Document the
+  clang-host requirement in multi-os-bootstrap.md §1, or probe and only add `--rtlib` when `cc` is
+  clang.
+
+### Doc drift (2026-06-24 review)
+
+- **toybox → uutils/dash/mawk/gsed/ggrep** in `README.md:134`, `tome-core/README.md:26` & `:74`,
+  `CHANGELOG.md:17` ("toybox's coreutils" present-tense inside the section documenting its removal).
+  Authoritative sources (CORE_PACKAGES, build-env.rn, rune-authoring.md) are already correct.
+- **`multi-os-bootstrap.md:98`** credits `grimoire.rn` with an `if $is_musl` branch it lacks
+  (comment only).
+- **AGENTS §1.3** lists only `cc`/`xcrun` but the discovery path also `--version`-probes
+  `ld`/`as`/`install_name_tool`/`lipo` and execs `xcrun --show-sdk-path` for provisioning — widen
+  the wording; the code is compliant.
+
+### Second-pass review follow-ups (2026-06-24 subsystem review)
+
+Pass 2 (solver / splits / transactions / security / runes / FreeBSD + design premises) found no trust
+bypass, no crash on a supported path, and no data-loss path. It corroborated the **`build_env_id` musl
+floor-flip above as the single highest-priority item** — the process-global `OnceLock` cache is the
+shared structural root of the floor-flip, hermetic-marker, and host_libc address gaps, and the
+musl floor-hash interim is the cheapest correct fix. New items:
+
+- **doctor is blind to interrupted-restore artifacts.** A torn-rename kill in `restore_state_snapshot`
+  leaves `state/.packages-old` / `.packages-staging`; `check_stale_backups` only scans the store +
+  cache for `*.grimoire-old`, never `state/`. Recovery is correct (next `grm switch` deletes them) but
+  they sit silently and doctor reports clean. The comment at `generations.rs:258` falsely claims
+  `.packages-old` is "detectable by grm doctor" — it is not. Fix: add the two dirs to the stale scan
+  (or clean unconditionally at activation start) and fix the comment.
+- **split `check_symlinks` misses directory-target dangling symlinks.** `pre_partition` records only
+  files (`split.rs:282-297`), so a relative symlink to a directory whose contents were partitioned into
+  another member ships dangling with no error (`split.rs:324-356`). Latent today (clang's hazard is a
+  file target, which is caught). Fix: also record pre-partition dir paths and bail when a resolved
+  target matches one.
+- **python3-minimal bare `patch` (hygiene).** `python3-minimal.rn:36` runs ambient host `patch` on the
+  musl branch — undeclared, no `patch` rune, an unhashed *tool* (the patch file is content-addressed).
+  Add a one-line ambient-tool comment, mirroring openssl.rn's perl note.
+- **Unbounded decompression + ungated local install (post-trust DoS).** `archive/unpack.rs` /
+  `validate.rs` have no decompressed-size / member-count cap and an unbounded `read_to_string` on the
+  captured `package.nuon`; gated behind index checksum trust EXCEPT `install_local_root` with
+  `sha256: None` (`steps.rs:67`), which decompresses with zero gating. Document the "archives here are
+  checksum-trusted" assumption now; wrap the decoder in a byte-counting reader if untrusted/local
+  archives ever become first-class.
+- **FreeBSD: the middle is missing — fail loudly.** `build_env_for_target` has no freebsd branch (no
+  sysroot/SDK/floor) and `llvm.rn`'s host_triple match hard-errors with no freebsd row, so freebsd
+  lands one step *before* the gnu MUSL_PREFIX crash (no toolchain at all). All documented-deferred, but
+  add an early "freebsd build env not yet wired" bail so the eventual failure is not a cryptic link
+  error. Soften AGENTS §11 to mark freebsd (esp. `freebsd-aarch64`, which no rune row satisfies) as
+  anticipated, matching multi-os-bootstrap.md.
+- **Resolver lost-conflict edge (low).** A linked installed package whose candidate has disappeared
+  returns empty `installed_metadata` (`resolver.rs:315`), dropping a conflict it declares toward the
+  new install at resolve time. The `refuse_plan_conflicts` gate (`install/mod.rs`) catches it before any
+  fetch/build, so safety impact is nil — just note the lost edge.
+
+Test gaps (cheap, named): the torn directory-level rename window (rename `state/packages` → aside,
+assert doctor flags divergence and `grm switch` reconstructs from the snapshot); the resolver
+lost-conflict edge; a split directory-target dangling-symlink rejection (after the fix above); an
+https-only index e2e (non-loopback `http://` repo → resolve fails on the scheme, not a timeout).
+
 ## Expansion projects (spec before code)
 
 - **Scoped profiles and dev shells (`grm profile` / `grm shell`).** Named, imperative
