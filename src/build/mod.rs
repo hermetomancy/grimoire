@@ -41,7 +41,7 @@ const CORE_PACKAGES: &[&str] = &[
     "llvm",
     "clang",
     "cmake",
-    "python3-minimal",
+    "python3",
     "gmake",
     "toolchain-wrappers",
     // Userland floor (replaces toybox, which was too thin for configure — no awk/sh/tr/expr/…).
@@ -256,10 +256,15 @@ pub fn build_env_for_target(
             inject_libcxx_flags(&mut env, &libcxx);
         }
     }
-    if target.starts_with("macos-")
-        && let Some(sdk) = toolchain::macos_sdk_path()
-    {
-        env.push(("SDKROOT".to_string(), sdk));
+    if target.starts_with("macos-") {
+        if let Some(sdk) = toolchain::macos_sdk_path() {
+            env.push(("SDKROOT".to_string(), sdk));
+        }
+        // Pin the deployment target so configure scripts (CPython's, autotools') don't shell out to
+        // host `sw_vers` to guess it — gone under --hermetic, and on a host it bakes the builder's
+        // own OS version in as the minimum. 11.0 is the Apple-Silicon baseline. Like SDKROOT, this
+        // is injected as env and so never enters the content address.
+        env.push(("MACOSX_DEPLOYMENT_TARGET".to_string(), "11.0".to_string()));
     }
 
     if managed_boundary {
