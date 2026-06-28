@@ -22,9 +22,9 @@ pub struct BuildEnv {
     /// Target triple the build is being performed for.
     pub target: String,
     /// When set, the POSIX ambient tail (`/usr/bin`, `/bin`) is dropped from build PATH so the
-    /// build sees only declared deps and the managed core floor — the `--hermetic` enumeration
-    /// mode that surfaces silent host-userland leaks. Folded into compiled store hashes so a
-    /// floor-clean build never shares an address with a build that could see the host tail.
+    /// build sees only declared deps and the managed core floor. Managed builds default to this;
+    /// `--impure` opts back into the host tail. Folded into compiled store hashes so a floor-clean
+    /// build never shares an address with a build that could see the host tail.
     pub hermetic: bool,
 }
 
@@ -61,7 +61,7 @@ impl BuildEnv {
             inherit_host_path: false,
             extra_env,
             target: paths::target_triple(),
-            hermetic: false,
+            hermetic: true,
         }
     }
 }
@@ -222,8 +222,7 @@ pub(crate) const SCRUBBED_DISCOVERY_ENV: &[&str] = &[
 /// Renders a string as a NUON string literal so it can be safely interpolated into the
 /// generated Nushell build runner. Routed through `nuon_io` per the single-NUON-layer rule.
 /// Directories containing POSIX-mandated utilities that the host OS provides.
-/// These are always included in managed build PATH so runes don't need to declare
-/// ambient POSIX tools as managed build dependencies.
+/// These are included only for bootstrap or explicit impure managed builds.
 pub(crate) fn posix_ambient_dirs() -> Vec<PathBuf> {
     vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")]
 }
@@ -235,7 +234,7 @@ pub(crate) fn build_path_entries(env: &BuildEnv, host_tool_dir: Option<&Path>) -
     }
     // The host POSIX ambient tail (/usr/bin, /bin), appended as a shrinking fallback for tools the
     // managed floor does not yet ship (perl, m4, …) now that the floor covers sh/awk/coreutils/sed/
-    // grep. `--hermetic` drops it to enumerate which runes still reach for the host (stage-2 work).
+    // grep. `--impure` restores it when debugging or bootstrapping a missing floor tool.
     if !env.hermetic {
         for dir in posix_ambient_dirs() {
             if dir.is_dir() && !entries.contains(&dir) {
@@ -367,29 +366,27 @@ mod tests {
     }
 
     #[test]
-    fn hermetic_drops_posix_ambient_tail() {
-        // A managed (non-bootstrap) build appends the ambient POSIX dirs so runes can reach
-        // sed/grep/awk/… without declaring them; `--hermetic` drops that tail to surface which
-        // runes silently reach for host tools the core floor does not ship.
+    fn managed_builds_are_hermetic_unless_impure() {
         let ambient = posix_ambient_dirs();
         let existing: Vec<_> = ambient.iter().filter(|dir| dir.is_dir()).cloned().collect();
 
-        let mut env = BuildEnv::managed(Vec::new(), Vec::new(), Vec::new());
-        let with_ambient = build_path_entries(&env, None);
-        for dir in &existing {
-            assert!(
-                with_ambient.contains(dir),
-                "non-hermetic build must include ambient {}",
-                dir.display()
-            );
-        }
-
-        env.hermetic = true;
+        let env = BuildEnv::managed(Vec::new(), Vec::new(), Vec::new());
         let hermetic = build_path_entries(&env, None);
         for dir in &ambient {
             assert!(
                 !hermetic.contains(dir),
-                "hermetic build must drop ambient {}",
+                "managed build must drop ambient {} by default",
+                dir.display()
+            );
+        }
+
+        let mut env = BuildEnv::managed(Vec::new(), Vec::new(), Vec::new());
+        env.hermetic = false;
+        let impure = build_path_entries(&env, None);
+        for dir in &existing {
+            assert!(
+                impure.contains(dir),
+                "impure build must include ambient {}",
                 dir.display()
             );
         }

@@ -155,6 +155,14 @@ fn scan_members(runes_dir: &Path, parent: &str) -> Result<Vec<GroupMember>> {
         if metadata.split_from.as_deref() != Some(parent) {
             continue;
         }
+        let source =
+            fs::read(&path).with_context(|| format!("read split member {}", path.display()))?;
+        if exports_build_function(&source) {
+            bail!(
+                "split member `{}` must not declare a `build` function; split members only claim files from `{parent}`",
+                metadata.name
+            );
+        }
         let metadata = crate::build::read_rune_metadata(&path, tome_name(&path)?.as_deref())?;
         members.push(GroupMember {
             name: metadata.name.clone(),
@@ -164,6 +172,64 @@ fn scan_members(runes_dir: &Path, parent: &str) -> Result<Vec<GroupMember>> {
     }
     members.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(members)
+}
+
+fn exports_build_function(source: &[u8]) -> bool {
+    use nu_parser::TokenContents;
+
+    let (tokens, _) = nu_parser::lex(source, 0, &[], &[], true);
+    let mut at_command_start = true;
+    let mut saw_export = false;
+    let mut saw_def = false;
+    for token in tokens {
+        match token.contents {
+            TokenContents::Pipe
+            | TokenContents::PipePipe
+            | TokenContents::Semicolon
+            | TokenContents::Eol => {
+                at_command_start = true;
+                saw_export = false;
+                saw_def = false;
+            }
+            TokenContents::Item => {
+                let word = std::str::from_utf8(
+                    source
+                        .get(token.span.start..token.span.end)
+                        .unwrap_or_default(),
+                )
+                .unwrap_or_default();
+                if at_command_start {
+                    saw_export = word == "export";
+                    saw_def = false;
+                    at_command_start = false;
+                    continue;
+                }
+                if saw_export && !saw_def {
+                    if word == "def" || word == "def-env" {
+                        saw_def = true;
+                    } else if !word.starts_with('-') {
+                        saw_export = false;
+                    }
+                    continue;
+                }
+                if saw_export && saw_def {
+                    if word == "build" {
+                        return true;
+                    }
+                    if !word.starts_with('-') {
+                        saw_export = false;
+                        saw_def = false;
+                    }
+                }
+            }
+            _ => {
+                if at_command_start {
+                    at_command_start = false;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn tome_name(rune: &Path) -> Result<Option<String>> {
@@ -190,6 +256,7 @@ pub fn partition_payload(
 ) -> Result<BTreeMap<String, PathBuf>> {
     let patterns = compile_patterns(splits)?;
     let entries = relative_entries(payload_dir)?;
+    let pre_partition = relative_paths(payload_dir)?;
 
     let mut claims: BTreeMap<PathBuf, &str> = BTreeMap::new();
     let mut claimed_by: BTreeMap<&str, usize> = BTreeMap::new();
@@ -247,7 +314,6 @@ pub fn partition_payload(
     }
 
     prune_empty_dirs(payload_dir)?;
-    let pre_partition: BTreeSet<PathBuf> = entries.into_iter().collect();
     check_symlinks(payload_dir, &pre_partition, "the parent package")?;
     for (member, dir) in &dirs {
         check_symlinks(dir, &pre_partition, member)?;
@@ -277,8 +343,8 @@ fn compile_patterns(splits: &[GroupMember]) -> Result<Vec<(String, Vec<Pattern>)
         .collect()
 }
 
-/// Every file and symlink under `root` as a sorted list of relative paths. Directories are
-/// not claimable; they materialize on each side as needed.
+/// Every file and symlink under `root` as a sorted list of relative paths. Directories are not
+/// claimable; they materialize on each side as needed.
 fn relative_entries(root: &Path) -> Result<Vec<PathBuf>> {
     let mut entries = Vec::new();
     for entry in walkdir::WalkDir::new(root).sort_by_file_name() {
@@ -292,6 +358,26 @@ fn relative_entries(root: &Path) -> Result<Vec<PathBuf>> {
             .with_context(|| format!("strip payload prefix from {}", entry.path().display()))?
             .to_path_buf();
         entries.push(rel);
+    }
+    Ok(entries)
+}
+
+/// Every path that existed before partitioning, including directories. Symlink validation uses
+/// this broader set because a relative symlink to a directory can dangle after that directory's
+/// contents are claimed by another member.
+fn relative_paths(root: &Path) -> Result<BTreeSet<PathBuf>> {
+    let mut entries = BTreeSet::new();
+    for entry in walkdir::WalkDir::new(root).sort_by_file_name() {
+        let entry = entry?;
+        if entry.path() == root {
+            continue;
+        }
+        let rel = entry
+            .path()
+            .strip_prefix(root)
+            .with_context(|| format!("strip payload prefix from {}", entry.path().display()))?
+            .to_path_buf();
+        entries.insert(rel);
     }
     Ok(entries)
 }
@@ -552,6 +638,25 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn partition_that_separates_a_symlink_from_its_directory_target_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let payload = temp.path().join("payload");
+        let staging = temp.path().join("staging");
+        write(&payload, "lib/extra/data.txt", "data");
+        fs::create_dir_all(payload.join("share")).unwrap();
+        std::os::unix::fs::symlink("../lib/extra", payload.join("share").join("extra")).unwrap();
+
+        // The member claims the directory contents; the parent keeps the symlink to that directory.
+        let members = [split_member("extra", &["lib/extra/**"])];
+        let err = partition_payload(&payload, &members, &staging).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("broke symlink"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn symlink_claimed_together_with_its_target_is_fine() {
         let temp = tempfile::tempdir().unwrap();
         let payload = temp.path().join("payload");
@@ -564,5 +669,21 @@ mod tests {
         let link = dirs["extra"].join("bin/extra-alias");
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
         assert!(dirs["extra"].join("bin/extra").exists());
+    }
+
+    #[test]
+    fn split_member_build_export_is_detected() {
+        assert!(exports_build_function(
+            b"export const package = { name: extra }\nexport def build [ctx] {}\n"
+        ));
+        assert!(exports_build_function(
+            b"export def --env build [ctx] { cd $ctx.package_dir }\n"
+        ));
+        assert!(!exports_build_function(
+            b"# export def build [] {}\nexport const package = { name: extra }\n"
+        ));
+        assert!(!exports_build_function(
+            b"export const package = { name: extra, summary: 'export def build [] {}' }\n"
+        ));
     }
 }

@@ -50,7 +50,7 @@ pub fn source_archive_is_extracted_into_build_context(
     );
     assert_success(&build, "build from extracted source archive");
     let archive = out.join(format!("extractor-0.1.0-{}.tar.zst", target_triple()));
-    let install = run(root, &["install", archive.to_str().unwrap()]);
+    let install = run(root, &["install", archive.to_str().unwrap(), "--force"]);
     assert_success(&install, "install extracted source package");
 
     let output = run_shim(root, "extractor");

@@ -8,7 +8,11 @@ use std::{
     path::PathBuf,
 };
 
-use crate::{model::Dependency, model::preferences::Preferences, util::output, util::paths};
+use crate::{
+    model::{Dependency, PackageState, preferences::Preferences},
+    util::output,
+    util::paths,
+};
 
 use super::*;
 
@@ -33,13 +37,34 @@ pub fn resolve(
         target: paths::target_triple(),
     };
     let preferences = Preferences::load().unwrap_or_default();
-    resolve_with(
+    resolve_with_state(
         roots,
         installed,
+        &BTreeMap::new(),
         linked,
         pins,
         &source,
         &preferences.providers,
+    )
+}
+
+pub(crate) fn resolve_with_state(
+    roots: &[Dependency],
+    installed: &BTreeMap<String, Version>,
+    installed_state: &BTreeMap<String, PackageState>,
+    linked: &HashSet<String>,
+    pins: Option<&Pins>,
+    source: &dyn CandidateSource,
+    preferences: &BTreeMap<String, String>,
+) -> Result<Plan> {
+    resolve_inner(
+        roots,
+        installed,
+        installed_state,
+        linked,
+        pins,
+        source,
+        preferences,
     )
 }
 
@@ -48,9 +73,30 @@ pub fn resolve(
 /// When `pins` is `Some`, candidate sets are filtered to the recorded version/hash, reproducing a
 /// locked install (and a package missing from the map is an error). `linked` names the installed
 /// packages currently linked into the active profile.
+#[cfg(test)]
 pub(crate) fn resolve_with(
     roots: &[Dependency],
     installed: &BTreeMap<String, Version>,
+    linked: &HashSet<String>,
+    pins: Option<&Pins>,
+    source: &dyn CandidateSource,
+    preferences: &BTreeMap<String, String>,
+) -> Result<Plan> {
+    resolve_inner(
+        roots,
+        installed,
+        &BTreeMap::new(),
+        linked,
+        pins,
+        source,
+        preferences,
+    )
+}
+
+fn resolve_inner(
+    roots: &[Dependency],
+    installed: &BTreeMap<String, Version>,
+    installed_state: &BTreeMap<String, PackageState>,
     linked: &HashSet<String>,
     pins: Option<&Pins>,
     source: &dyn CandidateSource,
@@ -63,6 +109,7 @@ pub(crate) fn resolve_with(
     let capabilities = CapabilityIndex::build().context("build capability index")?;
     let mut resolver = Resolver {
         installed,
+        installed_state,
         linked,
         pins,
         source,
@@ -107,6 +154,7 @@ pub(crate) struct ChosenNode {
 
 pub(crate) struct Resolver<'a> {
     installed: &'a BTreeMap<String, Version>,
+    installed_state: &'a BTreeMap<String, PackageState>,
     /// Installed packages currently linked into the active profile. Only these participate in
     /// conflict detection; store-only packages may coexist with anything.
     linked: &'a HashSet<String>,
@@ -312,10 +360,13 @@ impl Resolver<'_> {
         }
     }
 
-    /// Returns the conflicts/replaces metadata for an installed package by matching it against the
-    /// candidate list. If the installed version has no candidate (local archive, orphaned metadata),
-    /// the empty lists are returned and the plan-time conflict gate remains the safety net.
+    /// Returns the conflicts/replaces metadata for an installed package. Prefer the live state file:
+    /// local archives and packages whose tome candidate disappeared still carry their own contract.
+    /// Fall back to the candidate list for test fixtures and older state records.
     fn installed_metadata(&mut self, name: &str, version: &Version) -> (Vec<String>, Vec<String>) {
+        if let Some(state) = self.installed_state.get(name) {
+            return (state.conflicts.clone(), state.replaces.clone());
+        }
         if let Ok(candidates) = self.candidates_for(name)
             && let Some(candidate) = candidates.iter().find(|c| &c.version == version)
         {

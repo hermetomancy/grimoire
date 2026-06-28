@@ -82,12 +82,22 @@ pub struct Source {
 impl PackageMetadata {
     pub fn from_value(value: Value, require_target: bool) -> Result<Self> {
         let record = expect_record(value, "package metadata")?;
+        let allowed = if require_target {
+            ARCHIVE_PACKAGE_FIELDS
+        } else {
+            AUTHORED_PACKAGE_FIELDS
+        };
+        reject_unknown_fields(&record, "package metadata", allowed)?;
+        validate_meta_field(&record)?;
         let name = required_field_string(&record, "package metadata", "name")?;
         let version = required_field_string(&record, "package metadata", "version")?;
         validate_package_name(&name)?;
         validate_package_version(&version)?;
 
         let target = optional_string(&record, "target")?;
+        if let Some(target) = &target {
+            crate::util::paths::validate_target_triple(target)?;
+        }
         if require_target && target.is_none() {
             bail!("package metadata is missing required field `target`");
         }
@@ -115,7 +125,13 @@ impl PackageMetadata {
             Some(value) => expect_string_map(value, "package field `build_flags`")?,
         };
         let targets = optional_string_list(&record, "targets")?;
+        for target in &targets {
+            crate::util::paths::validate_target_triple(target)?;
+        }
         let provides = optional_string_list(&record, "provides")?;
+        for provide in &provides {
+            validate_bin_name(provide)?;
+        }
         let libs = optional_string_list(&record, "libs")?;
         let notes = optional_string_list(&record, "notes")?;
         let upstream_version = optional_string(&record, "upstream_version")?;
@@ -133,6 +149,9 @@ impl PackageMetadata {
             &targets,
             fixed_output,
         )?;
+        if !require_target {
+            validate_fixed_output(&name, fixed_output, &sources, &deps)?;
+        }
 
         Ok(Self {
             name,
@@ -305,6 +324,64 @@ impl PackageMetadata {
     }
 }
 
+const COMMON_PACKAGE_FIELDS: &[&str] = &[
+    "name",
+    "version",
+    "targets",
+    "fixed_output",
+    "build_only",
+    "summary",
+    "meta",
+    "bins",
+    "sources",
+    "deps",
+    "build_flags",
+    "provides",
+    "libs",
+    "notes",
+    "upstream_version",
+    "conflicts",
+    "replaces",
+    "split_from",
+    "files",
+];
+
+const AUTHORED_PACKAGE_FIELDS: &[&str] = COMMON_PACKAGE_FIELDS;
+
+const ARCHIVE_PACKAGE_FIELDS: &[&str] = &[
+    "format",
+    "target",
+    "store_path",
+    "name",
+    "version",
+    "targets",
+    "fixed_output",
+    "build_only",
+    "summary",
+    "meta",
+    "bins",
+    "sources",
+    "deps",
+    "build_flags",
+    "provides",
+    "libs",
+    "notes",
+    "upstream_version",
+    "conflicts",
+    "replaces",
+    "split_from",
+    "files",
+];
+
+fn validate_meta_field(record: &nu_protocol::Record) -> Result<()> {
+    if let Some(value) = record.get("meta")
+        && !matches!(value, Value::Record { .. } | Value::Nothing { .. })
+    {
+        bail!("package field `meta` must be a record");
+    }
+    Ok(())
+}
+
 /// A manifest returned by a rune's `build` function describing what was actually produced.
 /// Grimoire merges this with the static `package.bins` declaration so the build is the
 /// ground truth for what gets validated and installed.
@@ -359,6 +436,37 @@ pub fn validate_target(metadata: &PackageMetadata, current: &str) -> Result<()> 
     }
 
     Ok(())
+}
+
+/// Extracts the content-address hash embedded in an archive's `store_path` basename.
+///
+/// Archives store only the portable basename (`<hash>-<name>-<version>`), not the local store
+/// root. Publishing and installing both validate against this same parser so an archive cannot be
+/// indexed under one content address and later install into another.
+pub fn embedded_store_hash(metadata: &PackageMetadata) -> Result<String> {
+    let Some(basename) = metadata.store_path.as_deref() else {
+        bail!(
+            "package `{}` metadata is missing its store_path basename",
+            metadata.name
+        );
+    };
+    validate_relative_package_path(basename, "metadata store_path")?;
+    let suffix = format!("-{}-{}", metadata.name, metadata.version);
+    let Some(hash) = basename.strip_suffix(&suffix) else {
+        bail!(
+            "package `{}` metadata store_path `{basename}` is not `<hash>-{}-{}`",
+            metadata.name,
+            metadata.name,
+            metadata.version
+        );
+    };
+    if hash.is_empty() || hash.contains('/') {
+        bail!(
+            "package `{}` metadata store_path `{basename}` has an invalid hash component",
+            metadata.name
+        );
+    }
+    Ok(hash.to_owned())
 }
 
 /// Validates that the current target is supported by a rune's declared `targets` list.
@@ -440,6 +548,7 @@ pub(crate) fn parse_target_conditional_bins(
 
     let mut out = BTreeMap::new();
     for (target_key, inner) in val.iter() {
+        crate::util::paths::validate_target_key(target_key, label)?;
         let inner_map = expect_string_map(inner, &format!("{label} target `{target_key}`"))?;
         for (name, path) in &inner_map {
             validate_bin_name(name)?;
@@ -448,6 +557,24 @@ pub(crate) fn parse_target_conditional_bins(
         out.insert(target_key.clone(), inner_map);
     }
     Ok(out)
+}
+
+fn validate_fixed_output(
+    name: &str,
+    fixed_output: bool,
+    sources: &BTreeMap<String, Source>,
+    deps: &Deps,
+) -> Result<()> {
+    if !fixed_output {
+        return Ok(());
+    }
+    if sources.is_empty() {
+        bail!("fixed-output package `{name}` must declare at least one source");
+    }
+    if !deps.build.is_empty() {
+        bail!("fixed-output package `{name}` must not declare build deps");
+    }
+    Ok(())
 }
 
 pub(crate) fn parse_sources(value: &Value) -> Result<BTreeMap<String, Source>> {
@@ -481,6 +608,86 @@ pub(crate) fn parse_sources(value: &Value) -> Result<BTreeMap<String, Source>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_package(contents: &str) -> Result<PackageMetadata> {
+        PackageMetadata::from_value(crate::nu::nuon_io::parse_nuon(contents)?, false)
+    }
+
+    fn assert_parse_err(contents: &str, needle: &str) {
+        let err = parse_package(contents).unwrap_err();
+        assert!(
+            format!("{err:#}").contains(needle),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_package_fields_but_allows_meta() {
+        let metadata = parse_package(
+            "{ name: 'pkg', version: '1.0.0', meta: { homepage: 'https://example.com', license: 'MIT' } }",
+        )
+        .expect("meta record is inert and allowed");
+        assert_eq!(metadata.name, "pkg");
+
+        assert_parse_err(
+            "{ name: 'pkg', version: '1.0.0', licence: 'MIT' }",
+            "unknown field `licence`",
+        );
+    }
+
+    #[test]
+    fn authored_metadata_rejects_archive_only_fields_and_non_record_meta() {
+        assert_parse_err(
+            "{ name: 'pkg', version: '1.0.0', target: 'linux-x86_64-musl' }",
+            "unknown field `target`",
+        );
+        assert_parse_err(
+            "{ name: 'pkg', version: '1.0.0', store_path: 'deadbeef-pkg-1.0.0' }",
+            "unknown field `store_path`",
+        );
+        assert_parse_err(
+            "{ name: 'pkg', version: '1.0.0', format: 1 }",
+            "unknown field `format`",
+        );
+        assert_parse_err(
+            "{ name: 'pkg', version: '1.0.0', meta: 'MIT' }",
+            "package field `meta` must be a record",
+        );
+    }
+
+    #[test]
+    fn archive_metadata_accepts_archive_fields() {
+        let value = crate::nu::nuon_io::parse_nuon(
+            "{ format: 1, name: 'pkg', version: '1.0.0', target: 'linux-x86_64-musl', store_path: 'aaaaaaaaaaaaaaaa-pkg-1.0.0' }",
+        )
+        .unwrap();
+        let metadata = PackageMetadata::from_value(value, true).unwrap();
+        assert_eq!(metadata.target.as_deref(), Some("linux-x86_64-musl"));
+        assert_eq!(
+            metadata.store_path.as_deref(),
+            Some("aaaaaaaaaaaaaaaa-pkg-1.0.0")
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_bins_target_key() {
+        assert_parse_err(
+            "{ name: 'pkg', version: '1.0.0', bins: { linxu: { pkg: 'bin/pkg' } } }",
+            "target key `linxu`",
+        );
+    }
+
+    #[test]
+    fn fixed_output_requires_sources_and_no_build_deps() {
+        assert_parse_err(
+            "{ name: 'pkg', version: '1.0.0', fixed_output: true }",
+            "must declare at least one source",
+        );
+        assert_parse_err(
+            "{ name: 'pkg', version: '1.0.0', fixed_output: true, sources: { main: { url: 'payload.tar.zst', sha256: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } }, deps: { build: { default: ['cmake'] }, runtime: [] } }",
+            "must not declare build deps",
+        );
+    }
 
     #[test]
     fn sources_for_filters_by_platform_glob() {

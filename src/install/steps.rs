@@ -20,13 +20,20 @@ impl Installer {
     /// version for every package in the graph and orders the plan so dependencies install first.
     pub(super) fn install_named(&mut self, name: &str) -> Result<String> {
         let linked = self.world.linked_immut();
-        let mut plan = solve::resolve(
+        let source = solve::TomeCandidates {
+            target: paths::target_triple(),
+        };
+        let preferences = crate::model::preferences::Preferences::load().unwrap_or_default();
+        let mut plan = solve::resolve_with_state(
             &[Dependency::any(name)],
             &self.installed,
+            self.world.states(),
             &linked,
             self.pins.as_ref(),
+            &source,
+            &preferences.providers,
         )?;
-        plan.compute_store_hashes()
+        plan.compute_store_hashes_with_mode(self.hermetic)
             .with_context(|| format!("compute store hashes for `{name}`"))?;
         if self.dry_run {
             // Print the full picture first — steps, migrations, build-dep closure — then
@@ -67,7 +74,9 @@ impl Installer {
             .with_context(|| format!("install build dependencies for source root `{package}`"))?;
         let resolved = self.world.store_hashes();
         let build_env = build::toolchain::store_build_env_id_for_target_with_resolved(
-            false, &target, &resolved,
+            self.hermetic,
+            &target,
+            &resolved,
         );
         let store_hash = crate::store::closure::store_hash_for_rune_with_target_and_env(
             &rune, &target, &build_env, &resolved,
@@ -87,10 +96,16 @@ impl Installer {
         &mut self,
         package: &str,
         sha256: Option<String>,
+        force: bool,
     ) -> Result<String> {
         if self.dry_run {
             self.dry_run_local_root(package)?;
             return Ok(package.to_owned());
+        }
+        if sha256.is_none() && !force {
+            bail!(
+                "local archive `{package}` is not verified; pass --sha256 <hash> or --force to trust this file"
+            );
         }
         let installed = install_archive(
             &mut self.world,
@@ -140,7 +155,7 @@ impl Installer {
         }
         let linked = self.world.linked_immut();
         let mut plan = solve::resolve(&combined, &self.installed, &linked, self.pins.as_ref())?;
-        plan.compute_store_hashes()
+        plan.compute_store_hashes_with_mode(self.hermetic)
             .with_context(|| format!("compute store hashes for source rune `{}`", metadata.name))?;
         print_plan_body(&plan);
         print_plan_consequences(&plan, &self.installed)?;
@@ -184,7 +199,7 @@ impl Installer {
         }
         let linked = self.world.linked_immut();
         let mut plan = solve::resolve(deps, &self.installed, &linked, self.pins.as_ref())?;
-        plan.compute_store_hashes()
+        plan.compute_store_hashes_with_mode(self.hermetic)
             .with_context(|| "compute store hashes for build dependencies")?;
         self.execute_plan(plan)
     }
@@ -417,12 +432,13 @@ impl Installer {
             let build_deps = build::effective_build_deps(rune, &metadata, &paths::target_triple())?;
             self.install_deps(&build_deps)
                 .with_context(|| format!("install build dependencies for `{}`", metadata.name))?;
-            let env = build::build_env_for_target(
+            let mut env = build::build_env_for_target(
                 build_dep_bin_dirs(&build_deps)?,
                 build_dep_env_vars(&build_deps)?,
                 &paths::target_triple(),
                 &metadata.name,
             )?;
+            env.hermetic = self.hermetic;
             let result = build::build_package_with_env(
                 &rune.to_string_lossy(),
                 &paths::build_output_dir()?,

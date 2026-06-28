@@ -37,6 +37,8 @@ flate2 = "1"
 gix = { version = "0.84.0", default-features = false, features = ["blocking-network-client", "blocking-http-transport-reqwest-rust-tls", "worktree-mutation", "sha1"] }
 indicatif = "0.17"
 libc = "0.2"
+# `grm tome sign` signs in-process; verification uses the lighter minisign-verify.
+minisign = "0.9"
 minisign-verify = "0.2"
 owo-colors = "4"
 os_pipe = "1.2"
@@ -66,7 +68,6 @@ bzip2 = "0.6.1"
 
 [dev-dependencies]
 fs4 = "0.13"
-minisign = "0.9"
 sha2 = "0.10"
 tar = "0.4"
 tempfile = "3"

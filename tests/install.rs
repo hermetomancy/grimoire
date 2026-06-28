@@ -185,7 +185,10 @@ fn built_archive_installs_under_a_different_root() {
         "built archive should record a portable root-relative store basename: {metadata}"
     );
 
-    let install = run(install_root, &["install", archive.to_str().unwrap()]);
+    let install = run(
+        install_root,
+        &["install", archive.to_str().unwrap(), "--force"],
+    );
     assert_success(&install, "install built archive into second root");
     assert_success(&run_shim(install_root, "hello"), "run portable install");
 }
@@ -218,7 +221,7 @@ fn install_rejects_archive_with_wrong_store_path() {
     );
     finish_archive(builder);
 
-    let install = run(root, &["install", archive.to_str().unwrap()]);
+    let install = run(root, &["install", archive.to_str().unwrap(), "--force"]);
     assert_failure_contains(
         &install,
         "metadata store_path",
@@ -249,6 +252,19 @@ fn install_verifies_archive_hash() {
     assert_success(&build, "build hello");
     let archive = out.join(format!("hello-0.1.0-{}.tar.zst", target_triple()));
     let actual = sha256_file(&archive);
+
+    // A local archive without a hash is refused unless the user explicitly trusts it.
+    let unverified = run(root, &["install", archive.to_str().unwrap()]);
+    assert_failure_contains(
+        &unverified,
+        "pass --sha256 <hash> or --force",
+        "local archive requires verification or force",
+    );
+
+    let forced = run(root, &["install", archive.to_str().unwrap(), "--force"]);
+    assert_success(&forced, "install forced local archive");
+    let remove = run(root, &["remove", "hello"]);
+    assert_success(&remove, "remove after forced install");
 
     // A correct expected hash installs cleanly.
     let ok = run(
@@ -653,7 +669,7 @@ fn local_archive_install_rejects_a_directory_clearly() {
     let archive = dir.path().join("not-an-archive.tar.zst");
     fs::create_dir(&archive).unwrap();
 
-    let install = run(root, &["install", archive.to_str().unwrap()]);
+    let install = run(root, &["install", archive.to_str().unwrap(), "--force"]);
     assert_failure_contains(
         &install,
         "is a directory, not a `.tar.zst` archive",

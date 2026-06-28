@@ -100,6 +100,9 @@ grm clean                             # prune old generations, unreferenced stor
 
 Run `grm --help` for the full command tree.
 
+Local archives are trusted only when verified: use `grm install ./pkg.tar.zst --sha256 <hash>`.
+Passing `--force` installs an unverified local archive by explicit choice.
+
 ## Authoring Tomes
 
 ```sh
@@ -196,12 +199,19 @@ Trust is **per artifact**, not per index: each published archive carries a detac
 signed — its archive hashes are authenticated by each archive's own signature plus its checksum.
 
 ```sh
-minisign -G                                    # generate a keypair
+minisign -G                                    # generate a keypair (once)
+grm tome lint --path ./mytome                  # catch rune/manifest problems before publishing
 grm tome build --all --path ./mytome           # build archives into dist/
-# sign each published artifact against your secret key:
-minisign -S -m ./mytome/runes-manifest.nuon    # source distribution
-for a in ./mytome/dist/*.tar.zst; do minisign -S -m "$a"; done   # binary distribution
+grm tome sign --path ./mytome                  # write & sign runes-manifest.nuon + every dist/ archive
 ```
+
+`grm tome sign` generates `runes-manifest.nuon` from the current `runes/` tree (hashing each
+rune), then signs it and every `dist/*.tar.zst` with your minisign secret key — defaulting to
+`~/.minisign/minisign.key`, or pass `--seckey`. An encrypted key prompts for its password. It
+runs `tome lint` first and refuses to sign a tome with problems, so a broken rune can't be hashed
+into the manifest and shipped with a valid signature. Commit `runes-manifest.nuon` and its
+`.minisig` to the tome repo; upload the signed `dist/` to your host. (You can still sign by hand
+with `minisign -S -m <file>` if you prefer.)
 
 Declare the public key at the manifest's **top level** (a `signer` nested under `packages` is
 rejected as an unknown field, so a misplaced key fails loudly instead of shipping unsigned):
@@ -220,6 +230,9 @@ export const tome = {
 
 Grimoire pins the key set on first sync and refuses later syncs with a missing, invalid, or
 rotated key.
+
+Unsigned tomes remain valid for local/private catalogs, but remote unsigned tomes warn on add and
+sync because their runes and archives are not signature-verified.
 
 ## Addenda
 

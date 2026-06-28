@@ -230,6 +230,24 @@ fn doctor_flags_state_generation_divergence() {
     );
 }
 
+#[test]
+fn doctor_flags_state_transaction_leftovers() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    setup_two_generations(root);
+
+    fs::create_dir_all(root.join("state").join(".packages-old")).unwrap();
+    fs::create_dir_all(root.join("state").join(".packages-staging")).unwrap();
+
+    let doctor = run(root, &["doctor"]);
+    assert_success(&doctor, "doctor runs with stale state transaction dirs");
+    let err = stderr(&doctor);
+    assert!(
+        err.contains(".packages-old") && err.contains(".packages-staging"),
+        "doctor must report stale state transaction dirs: {err}"
+    );
+}
+
 /// An install whose generation build *refuses* (a contested bin with no preference) commits
 /// its package transactions first, leaving state saying "installed" while the environment
 /// still shows the old generation. The re-run must converge — retry the link, not report

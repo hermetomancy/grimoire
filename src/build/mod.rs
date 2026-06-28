@@ -101,11 +101,12 @@ fn build_log_path(name: &str, version: &str, target: &str, store_hash: &str) -> 
 }
 
 pub fn build(args: BuildArgs) -> Result<()> {
+    let hermetic = !args.bootstrap && !args.impure;
     let result = build_package(
         &args.package,
         &args.output,
         args.bootstrap,
-        args.hermetic,
+        hermetic,
         args.target.as_deref(),
     )?;
     for product in result.products() {
@@ -128,7 +129,7 @@ pub fn build_package(
     let build_deps = effective_build_deps(&rune, &metadata, &target)?;
 
     if !bootstrap {
-        install::ensure_build_deps_installed(&build_deps)
+        install::ensure_build_deps_installed_with_mode(&build_deps, hermetic)
             .with_context(|| format!("install build dependencies for `{package}`"))?;
     }
 
@@ -152,22 +153,14 @@ pub fn build_package(
     // `tome build` and `tome build --index` would key the same archive differently and a clean
     // consumer would miss the substitute (AGENTS §9.8). The install paths own a resolved closure
     // and pass it explicitly through `build_package_with_env`; here it is empty. The build env id
-    // is taken from the actual env so `--hermetic` has a distinct address.
-    let store_hash = if env.hermetic {
-        let build_env_id = toolchain::store_build_env_id_for_target(true, &env.target);
-        crate::store::closure::store_hash_for_rune_with_target_and_env(
-            &rune,
-            &env.target,
-            &build_env_id,
-            &BTreeMap::new(),
-        )?
-    } else {
-        crate::store::closure::store_hash_for_rune_with_target(
-            &rune,
-            &env.target,
-            &BTreeMap::new(),
-        )?
-    };
+    // is taken from the actual env so `--impure` has a distinct address.
+    let build_env_id = toolchain::store_build_env_id_for_target(env.hermetic, &env.target);
+    let store_hash = crate::store::closure::store_hash_for_rune_with_target_and_env(
+        &rune,
+        &env.target,
+        &build_env_id,
+        &BTreeMap::new(),
+    )?;
     build_package_with_env(package, output, &env, &store_hash, &BTreeMap::new())
 }
 
@@ -513,11 +506,16 @@ fn apply_discovery(metadata: &mut crate::model::PackageMetadata, payload_dir: &P
             merged.insert(name, path);
         }
     }
-    let libs = discover_libs(payload_dir);
+    let mut libs = metadata.libs.clone();
+    libs.extend(discover_libs(payload_dir));
+    libs.sort();
+    libs.dedup();
     if !merged.is_empty() {
         metadata.bins.insert("default".to_string(), merged.clone());
     }
-    metadata.provides = merged.keys().cloned().collect();
+    metadata.provides.extend(merged.into_keys());
+    metadata.provides.sort();
+    metadata.provides.dedup();
     metadata.libs = libs;
 }
 
@@ -589,4 +587,76 @@ pub fn find_rune(package: &str) -> Result<Option<PathBuf>> {
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn metadata_with_provides(provides: &[&str]) -> crate::model::PackageMetadata {
+        crate::model::PackageMetadata {
+            name: "toolpkg".to_owned(),
+            version: "1.0.0".to_owned(),
+            target: None,
+            store_path: None,
+            targets: Vec::new(),
+            fixed_output: false,
+            build_only: false,
+            summary: None,
+            bins: BTreeMap::new(),
+            sources: BTreeMap::new(),
+            deps: Default::default(),
+            build_flags: BTreeMap::new(),
+            provides: provides.iter().map(|p| (*p).to_owned()).collect(),
+            libs: Vec::new(),
+            notes: Vec::new(),
+            upstream_version: None,
+            conflicts: Vec::new(),
+            replaces: Vec::new(),
+            split_from: None,
+            files: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn discovery_preserves_declared_non_bin_provides() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let tool = bin.join("tool");
+        std::fs::write(&tool, b"#!/usr/bin/env sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&tool).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&tool, perms).unwrap();
+        }
+
+        let mut metadata = metadata_with_provides(&["text-processor"]);
+
+        apply_discovery(&mut metadata, temp.path(), "linux-x86_64-musl");
+        assert_eq!(
+            metadata.provides,
+            vec!["text-processor".to_owned(), "tool".to_owned()]
+        );
+    }
+
+    #[test]
+    fn discovery_preserves_declared_non_file_libs() {
+        let temp = tempfile::tempdir().unwrap();
+        let lib = temp.path().join("lib");
+        std::fs::create_dir(&lib).unwrap();
+        std::fs::write(lib.join("libreal.a"), b"archive").unwrap();
+
+        let mut metadata = metadata_with_provides(&[]);
+        metadata.libs = vec!["virtual-lib".to_owned()];
+
+        apply_discovery(&mut metadata, temp.path(), "linux-x86_64-musl");
+        assert_eq!(
+            metadata.libs,
+            vec!["real".to_owned(), "virtual-lib".to_owned()]
+        );
+    }
 }

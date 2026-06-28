@@ -17,15 +17,19 @@ use super::*;
 /// Ensures every build dependency in `deps` is installed store-only (no lockfile, no generation).
 /// Missing deps are resolved through the solver and installed from substitutes or built from source.
 /// Already-installed packages are reused.
-pub(crate) fn ensure_build_deps_installed(deps: &[Dependency]) -> Result<()> {
+pub(crate) fn ensure_build_deps_installed_with_mode(
+    deps: &[Dependency],
+    hermetic: bool,
+) -> Result<()> {
     let mut world = InstalledWorld::load_default()?;
     let mut building = HashSet::new();
-    ensure_build_deps_installed_inner(&mut world, deps, &mut building)
+    ensure_build_deps_installed_inner(&mut world, deps, hermetic, &mut building)
 }
 
 pub(crate) fn ensure_build_deps_installed_inner(
     world: &mut InstalledWorld,
     deps: &[Dependency],
+    hermetic: bool,
     building: &mut HashSet<String>,
 ) -> Result<()> {
     if deps.is_empty() {
@@ -77,7 +81,7 @@ pub(crate) fn ensure_build_deps_installed_inner(
     }
 
     let mut plan = solve::resolve(&missing, &installed, &HashSet::new(), None)?;
-    plan.compute_store_hashes()
+    plan.compute_store_hashes_with_mode(hermetic)
         .with_context(|| "compute store hashes for build dependencies")?;
 
     for step in plan.steps {
@@ -133,14 +137,15 @@ pub(crate) fn ensure_build_deps_installed_inner(
                 continue;
             }
             let build_deps = build::effective_build_deps(rune, &metadata, &paths::target_triple())?;
-            ensure_build_deps_installed_inner(world, &build_deps, building)
+            ensure_build_deps_installed_inner(world, &build_deps, hermetic, building)
                 .with_context(|| format!("install build dependencies for `{}`", step.name))?;
-            let env = build::build_env_for_target(
+            let mut env = build::build_env_for_target(
                 build_dep_bin_dirs(&build_deps)?,
                 build_dep_env_vars(&build_deps)?,
                 &paths::target_triple(),
                 &metadata.name,
             )?;
+            env.hermetic = hermetic;
             let result = build::build_package_with_env(
                 &rune.to_string_lossy(),
                 &paths::build_output_dir()?,

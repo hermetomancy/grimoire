@@ -2,7 +2,7 @@
 //! backtracking, pins, and preference-aware capability expansion.
 
 use super::*;
-use crate::model::parse_version_relaxed;
+use crate::model::{PackageState, parse_version_relaxed};
 use semver::VersionReq;
 
 /// In-memory candidate source so the resolver can be exercised without tomes on disk.
@@ -43,6 +43,37 @@ fn cand_with_meta(
     }
 }
 
+fn state_with_meta(
+    name: &str,
+    version: &str,
+    conflicts: &[&str],
+    replaces: &[&str],
+) -> PackageState {
+    PackageState {
+        name: name.to_owned(),
+        version: version.to_owned(),
+        target: None,
+        archive_hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            .to_owned(),
+        store_hash: format!("hash-{name}"),
+        store_path: format!("/grm/store/hash-{name}-{name}-{version}"),
+        bins: BTreeMap::new(),
+        runtime_deps: Vec::new(),
+        build_deps: Vec::new(),
+        source_hashes: BTreeMap::new(),
+        held: false,
+        requested: true,
+        provides: Vec::new(),
+        libs: Vec::new(),
+        notes: Vec::new(),
+        upstream_version: None,
+        conflicts: conflicts.iter().map(|s| s.to_string()).collect(),
+        replaces: replaces.iter().map(|s| s.to_string()).collect(),
+        build_env: None,
+        build_only: false,
+    }
+}
+
 fn source(entries: &[(&str, Vec<Candidate>)]) -> FakeCandidates {
     let mut map = HashMap::new();
     for (name, mut cands) in entries.iter().cloned() {
@@ -79,8 +110,10 @@ fn expand(
         )]),
     };
     let linked = HashSet::new();
+    let installed_state = BTreeMap::new();
     let mut resolver = Resolver {
         installed,
+        installed_state: &installed_state,
         linked: &linked,
         pins: None,
         source: &src,
@@ -114,10 +147,12 @@ fn pathological_backtracking_aborts_within_budget() {
         ("sink", vec![cand("1.0.0", &[])]),
     ]);
     let installed = BTreeMap::new();
+    let installed_state = BTreeMap::new();
     let preferences = BTreeMap::new();
     let linked = HashSet::new();
     let mut resolver = Resolver {
         installed: &installed,
+        installed_state: &installed_state,
         linked: &linked,
         pins: None,
         source: &src,
@@ -622,6 +657,42 @@ fn installed_reuse_falls_back_when_conflicts_with_resolution() {
     assert!(
         steps.contains(&("app".to_owned(), "1.0.0".to_owned())),
         "app should backtrack to the version that does not conflict with installed legacy: {steps:?}"
+    );
+}
+
+#[test]
+fn installed_conflict_uses_state_when_candidate_disappeared() {
+    // `legacy` is linked and has no candidate in the current tomes, but its installed state still
+    // declares a conflict with `app`. The resolver should use that state metadata and report the
+    // conflict instead of dropping the edge.
+    let src = source(&[(
+        "app",
+        vec![cand("2.0.0", &[]), cand_with_meta("1.0.0", &[], &[], &[])],
+    )]);
+    let mut installed = BTreeMap::new();
+    installed.insert("legacy".to_owned(), Version::new(1, 0, 0));
+    let mut installed_state = BTreeMap::new();
+    installed_state.insert(
+        "legacy".to_owned(),
+        state_with_meta("legacy", "1.0.0", &["app"], &[]),
+    );
+    let linked: HashSet<String> = HashSet::from(["legacy".to_owned()]);
+    let err = match resolve_with_state(
+        &[dep("app", ">=1.0")],
+        &installed,
+        &installed_state,
+        &linked,
+        None,
+        &src,
+        &BTreeMap::new(),
+    ) {
+        Ok(_) => panic!("installed conflict should block app"),
+        Err(err) => err,
+    };
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("conflicts with chosen `legacy`"),
+        "expected installed-state conflict, got: {msg}"
     );
 }
 

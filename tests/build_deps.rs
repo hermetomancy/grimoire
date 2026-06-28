@@ -327,6 +327,7 @@ fn platform_conditional_build_deps_only_set_matching_prefix() {
             runes.join("consumer.rn").to_str().unwrap(),
             "--output",
             out.to_str().unwrap(),
+            "--impure",
         ],
     );
     assert_success(&build, "build consumer");

@@ -42,7 +42,7 @@ pub fn stale_installed(world: &InstalledWorld) -> Vec<StaleInstall> {
         .map(|state| (state.name.clone(), state.store_hash.clone()))
         .collect();
     let current_env =
-        toolchain::store_build_env_id_for_target(false, &crate::util::paths::target_triple());
+        toolchain::store_build_env_id_for_target(true, &crate::util::paths::target_triple());
     let mut stale = Vec::new();
     for state in world.iter() {
         // A hold pins the installed bits, not just the version: a held package is never

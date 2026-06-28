@@ -55,23 +55,9 @@ pub fn store_hash(name: &str) -> Result<String> {
 }
 
 /// Computes the content address for a specific rune file and explicit target triple, so the exact
-/// rune given is hashed rather than whatever `find_rune` would resolve for its name.
-pub fn store_hash_for_rune_with_target(
-    rune: &Path,
-    target: &str,
-    resolved: &BTreeMap<String, String>,
-) -> Result<String> {
-    store_hash_for_rune_with_target_and_env(
-        rune,
-        target,
-        &toolchain::store_build_env_id_for_target(false, target),
-        resolved,
-    )
-}
-
-/// Like [`store_hash_for_rune_with_target`], but with the exact build-environment identity the
-/// caller will use. Standalone `--hermetic` builds pass a distinct identity so their archives never
-/// share a store path with a build that could see the ambient POSIX PATH tail.
+/// rune given is hashed rather than whatever `find_rune` would resolve for its name. The caller
+/// passes the exact build-environment identity it will use; impure builds therefore never share a
+/// store path with the default hermetic build.
 pub fn store_hash_for_rune_with_target_and_env(
     rune: &Path,
     target: &str,
@@ -87,14 +73,15 @@ pub fn store_hash_for_rune_with_target_and_env(
 
 /// Computes the store hash from already-read rune bytes and metadata for an explicit target
 /// triple, avoiding a temporary file when the bytes are already in memory. The re-index path
-/// (`grm tome build --index`) addresses an archive against the target it was built for — read from
-/// the archive's own metadata — not the indexing host's, so a cross-target build keeps the address
-/// a consumer on that target reproduces (AGENTS §9.8). Split group members cannot be addressed
-/// from a single rune; use [`split_member_hashes_with_target`], which takes the whole group.
-pub fn store_hash_for_rune_bytes_with_target(
+/// (`grm tome build --index`) addresses an archive against the target and build mode it was built
+/// for, not the indexing host's, so a cross-target build keeps the address a consumer on that
+/// target reproduces (AGENTS §9.8). Split group members cannot be addressed from a single rune;
+/// use [`split_member_hashes_with_target_and_env`], which takes the whole group.
+pub fn store_hash_for_rune_bytes_with_target_and_env(
     rune_bytes: &[u8],
     metadata: &crate::model::PackageMetadata,
     target: &str,
+    build_env: &str,
 ) -> Result<String> {
     if metadata.is_split_member() {
         bail!(
@@ -103,29 +90,16 @@ pub fn store_hash_for_rune_bytes_with_target(
         );
     }
     let mut walker = Walker::with_target(target)?;
+    walker.build_env = build_env.to_string();
     walker.of_rune_with_bytes(&metadata.name, metadata, rune_bytes)
 }
 
 /// The store hashes of every member of a split group, keyed by package name, for an explicit
-/// target triple. `group` carries each member's metadata and raw rune bytes (parent included), as
-/// read from disk or from a member archive's embedded `.grimoire/group/` copies. External deps
-/// address against `resolved` (see [`installed_resolved`]) so the build reproduces the resolver's
-/// expected address; pass an empty map to re-derive externals from runes (the re-index path).
-pub fn split_member_hashes_with_target(
-    group: &[(crate::model::PackageMetadata, Vec<u8>)],
-    target: &str,
-    resolved: &BTreeMap<String, String>,
-) -> Result<BTreeMap<String, String>> {
-    split_member_hashes_with_target_and_env(
-        group,
-        target,
-        &toolchain::store_build_env_id_for_target(false, target),
-        resolved,
-    )
-}
-
-/// Like [`split_member_hashes_with_target`], but with the exact build-environment identity the
-/// caller will use for the shared group build.
+/// target triple and build-environment identity. `group` carries each member's metadata and raw
+/// rune bytes (parent included), as read from disk or from a member archive's embedded
+/// `.grimoire/group/` copies. External deps address against `resolved` (see
+/// [`installed_resolved`]) so the build reproduces the resolver's expected address; pass an empty
+/// map to re-derive externals from runes (the re-index path).
 pub fn split_member_hashes_with_target_and_env(
     group: &[(crate::model::PackageMetadata, Vec<u8>)],
     target: &str,
@@ -237,7 +211,7 @@ impl Walker {
             target: target.to_string(),
             // Compiled packages fold the host toolchain identity and PATH mode into their hash;
             // fixed-output packages ignore it.
-            build_env: toolchain::store_build_env_id_for_target(false, target),
+            build_env: toolchain::store_build_env_id_for_target(true, target),
             cache: HashMap::new(),
             stack: Vec::new(),
             resolved: BTreeMap::new(),

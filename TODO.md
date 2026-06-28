@@ -50,70 +50,23 @@ Unblocked (native build + per-rune debugging):
 
 ### Bootstrap stage 2: full self-hosting
 
-The toolchain is already self-hosted (every build driver — cmake, python3, gmake, the
-compiler boundary — is a core package; the host compiler seeds bootstrap only and
-`host_tool_dirs()` drops out once toolchain-wrappers exists). What remains is the
-ambient userland.
+The toolchain is already self-hosted (every build driver — cmake, python3, gmake, the compiler
+boundary — is a core package; the host compiler seeds bootstrap only and `host_tool_dirs()` drops
+out once toolchain-wrappers exists). Managed source builds now drop `/usr/bin` + `/bin` by default;
+`--impure` restores that ambient tail only as an explicit escape hatch while packaging a missing
+floor tool. The remaining stage-2 work is empirical: rebuild the core/world runes without
+`--impure`, package every missing utility they expose, and delete each temporary impure need once
+its floor package exists.
 
-The host *userland* link is shadowed, never severed: `/usr/bin` + `/bin` are
-unconditionally appended to managed build PATH (`posix_ambient_dirs`), so anything the floor
-does not ship (perl, m4, bash-isms) falls through to the host silently — an unhashed
-build input. Path to severance is empirical: a
-hermetic build mode that drops the ambient tail, run per rune to enumerate what actually
-leaks; passing runes are certified floor-ambient, failures name what stage 2 must package.
-The `grm tome build --hermetic` diagnostic has shipped: it drops the ambient tail so a build
-that reaches for an unpackaged tool fails and names the leak. The remaining stage-2 work is
-empirical — run it per rune to enumerate what actually leaks, certify the passing runes as
-floor-ambient, and package the failures.
-
-### Build-env review follow-ups (2026-06-24 bootstrap/ethos review)
-
-- **Decide `-gnu`'s status; make the docs honest.** Managed clang is musl-defaulted on every
-  non-Darwin target (`llvm.rn:71`) and no floor/SDK analogue is injected for gnu, so it links host
-  glibc/libstdc++ unhashed and undeclared. AGENTS §11 says gnu is "supported"; this list / stage 1
-  say not-done. Either wire gnu (clang gnu arm + host-glibc fold into `build_env_id` + floor branch
-  in `build_env_for_target`) or soften §11 to "recognized cross-target, not self-hostable yet" and
-  drop gnu from rune `targets:` (or emit an early clear error instead of the MUSL_PREFIX crash).
 ### Second-pass review follow-ups (2026-06-24 subsystem review)
 
-Pass 2 (solver / splits / transactions / security / runes / FreeBSD + design premises) found no trust
-bypass, no crash on a supported path, and no data-loss path. Remaining items:
+- **Wire the glibc and FreeBSD build floors.** `linux-*-gnu` and FreeBSD triples are recognized in
+  metadata/indexes but source builds now fail early because no managed floor/sysroot is wired. Landing
+  them means adding the target-specific build env, folding the floor identity into store hashes, and
+  closing the corresponding core-rune bootstrap loop.
 
-- **doctor is blind to interrupted-restore artifacts.** A torn-rename kill in `restore_state_snapshot`
-  leaves `state/.packages-old` / `.packages-staging`; `check_stale_backups` only scans the store +
-  cache for `*.grimoire-old`, never `state/`. Recovery is correct (next `grm switch` deletes them) but
-  they sit silently and doctor reports clean. The comment at `generations.rs:258` falsely claims
-  `.packages-old` is "detectable by grm doctor" — it is not. Fix: add the two dirs to the stale scan
-  (or clean unconditionally at activation start) and fix the comment.
-- **split `check_symlinks` misses directory-target dangling symlinks.** `pre_partition` records only
-  files (`split.rs:282-297`), so a relative symlink to a directory whose contents were partitioned into
-  another member ships dangling with no error (`split.rs:324-356`). Latent today (clang's hazard is a
-  file target, which is caught). Fix: also record pre-partition dir paths and bail when a resolved
-  target matches one.
-- **python3-minimal bare `patch` (hygiene).** `python3-minimal.rn:36` runs ambient host `patch` on the
-  musl branch — undeclared, no `patch` rune, an unhashed *tool* (the patch file is content-addressed).
-  Add a one-line ambient-tool comment, mirroring openssl.rn's perl note.
-- **Unbounded decompression + ungated local install (post-trust DoS).** `archive/unpack.rs` /
-  `validate.rs` have no decompressed-size / member-count cap and an unbounded `read_to_string` on the
-  captured `package.nuon`; gated behind index checksum trust EXCEPT `install_local_root` with
-  `sha256: None` (`steps.rs:67`), which decompresses with zero gating. Document the "archives here are
-  checksum-trusted" assumption now; wrap the decoder in a byte-counting reader if untrusted/local
-  archives ever become first-class.
-- **FreeBSD: the middle is missing — fail loudly.** `build_env_for_target` has no freebsd branch (no
-  sysroot/SDK/floor) and `llvm.rn`'s host_triple match hard-errors with no freebsd row, so freebsd
-  lands one step *before* the gnu MUSL_PREFIX crash (no toolchain at all). All documented-deferred, but
-  add an early "freebsd build env not yet wired" bail so the eventual failure is not a cryptic link
-  error. Soften AGENTS §11 to mark freebsd (esp. `freebsd-aarch64`, which no rune row satisfies) as
-  anticipated, matching multi-os-bootstrap.md.
-- **Resolver lost-conflict edge (low).** A linked installed package whose candidate has disappeared
-  returns empty `installed_metadata` (`resolver.rs:315`), dropping a conflict it declares toward the
-  new install at resolve time. The `refuse_plan_conflicts` gate (`install/mod.rs`) catches it before any
-  fetch/build, so safety impact is nil — just note the lost edge.
-
-Test gaps (cheap, named): the torn directory-level rename window (rename `state/packages` → aside,
-assert doctor flags divergence and `grm switch` reconstructs from the snapshot); the resolver
-lost-conflict edge; a split directory-target dangling-symlink rejection (after the fix above); an
-https-only index e2e (non-loopback `http://` repo → resolve fails on the scheme, not a timeout).
+Test gaps (cheap, named): an https-only index e2e (non-loopback `http://` repo → resolve fails on
+the scheme, not a timeout).
 
 ## Expansion projects (spec before code)
 

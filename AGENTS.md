@@ -72,11 +72,13 @@ in-process and reads/writes NUON data.
 
 ## 5. Build environment
 
-Managed builds get a controlled `PATH`, in priority order: declared build-dep `bin/` dirs →
-core package `bin/` dirs → host compiler boundary symlinks (bootstrap only; skipped once
-`toolchain-wrappers` is installed) → POSIX ambient `/usr/bin` and `/bin`. Declared deps
-outrank the core floor deliberately: declaration is specificity, so a rune's explicitly declared
-build dep wins over the same command from the floor.
+Managed builds get a controlled, hermetic `PATH`, in priority order: declared build-dep `bin/`
+dirs → core package `bin/` dirs → host compiler boundary symlinks (bootstrap only; skipped once
+`toolchain-wrappers` is installed). `--impure` appends the POSIX ambient `/usr/bin` and `/bin`
+tail as an explicit escape hatch while packaging a missing floor tool; bootstrap may also use the
+host tail until the managed floor exists. Declared deps outrank the core floor deliberately:
+declaration is specificity, so a rune's explicitly declared build dep wins over the same command
+from the floor.
 
 The environment is sandboxed: host discovery variables (`CMAKE_PREFIX_PATH`,
 `PKG_CONFIG_PATH`, `CPATH`, `LIBRARY_PATH`, language package-manager roots, Homebrew prefixes,
@@ -90,11 +92,12 @@ inherited host env vars unless Grimoire deliberately sets them.
 1. Declare every non-POSIX tool and every discoverable dependency the build needs in
    `deps.build`. Never rely on host env vars, Homebrew/MacPorts prefixes, language
    package-manager state, or the user's shell configuration.
-2. Do not declare *generic* POSIX utilities (`sed`, `grep`, `awk`, `find`, …) as build deps —
-   the ambient directories (or the managed floor once bootstrapped) always provide them. Declaring
-   a specific *implementation* (`gsed` when GNU sed semantics are required) is correct and
-   different: the declared dep outranks the floor, so plain `sed` then means GNU sed for
-   that build.
+2. Do not declare *generic* POSIX utilities (`sed`, `grep`, `awk`, `find`, …) as build deps once
+   they are part of the managed floor. During bootstrap or a deliberate `--impure` build the host
+   ambient tail may provide missing utilities, but that is a temporary packaging aid, not a
+   package contract. Declaring a specific *implementation* (`gsed` when GNU sed semantics are
+   required) is correct and different: the declared dep outranks the floor, so plain `sed` then
+   means GNU sed for that build.
 3. The only *library* floor is libc and, on macOS, the platform SDK. Everything else a
    build links (zlib, bzip2, ncurses, readline, …) must be a declared dep from the store
    or explicitly disabled at configure time — never auto-detected from the host.
@@ -207,8 +210,10 @@ Grimoire is **POSIX-only**: Linux, macOS, FreeBSD — no `#[cfg(windows)]` code.
 supported POSIX targets is allowed where necessary (platform-specific paths, SDK discovery). The bootstrap
 depends on a POSIX userland at `/usr/bin` and `/bin`. Default target triples:
 `linux-{x86_64,aarch64}-musl`, `macos-{x86_64,aarch64}-darwin`,
-`freebsd-{x86_64,aarch64}-unknown`; the Linux `-gnu` variants remain supported via explicit
-`--target`.
+`freebsd-{x86_64,aarch64}-unknown`; the Linux `-gnu` variants remain recognized via explicit
+`--target`. Source-build environments are wired only for `linux-*-musl` and
+`macos-*-darwin` until the glibc and FreeBSD floors land; recognized-but-unwired targets fail
+early with a clear build-env error.
 
 ## 12. CLI and user-facing output
 

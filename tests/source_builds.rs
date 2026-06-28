@@ -45,6 +45,26 @@ fn build_respects_musl_target() {
 }
 
 #[test]
+fn build_rejects_invalid_rune_targets() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let rune = root.join("badtarget.rn");
+    fs::write(
+        &rune,
+        "export const package = {\n  name: 'badtarget'\n  version: '0.1.0'\n  targets: ['linux']\n}\n\nexport def build [ctx] {}\n",
+    )
+    .unwrap();
+
+    let build = run(root, &["build", rune.to_str().unwrap()]);
+    assert_failure_contains(
+        &build,
+        "target `linux` is not a supported triple",
+        "invalid rune target",
+    );
+}
+
+#[test]
 fn source_root_dry_run_refuses_linked_conflicts() {
     let root = TempDir::new().unwrap();
     let root = root.path();
@@ -60,7 +80,7 @@ fn source_root_dry_run_refuses_linked_conflicts() {
         "#!/usr/bin/env sh\nprintf 'old\\n'\n",
     );
     assert_success(
-        &run(root, &["install", archive.to_str().unwrap()]),
+        &run(root, &["install", archive.to_str().unwrap(), "--force"]),
         "install conflicting package",
     );
 
@@ -327,7 +347,7 @@ fn build_install_list_remove() {
     let archive = out.join(format!("hello-0.1.0-{}.tar.zst", target_triple()));
     assert!(archive.exists(), "built archive should exist");
 
-    let install = run(root, &["install", archive.to_str().unwrap()]);
+    let install = run(root, &["install", archive.to_str().unwrap(), "--force"]);
     assert_success(&install, "install built archive");
 
     let state = fs::read_to_string(root.join("state").join("packages").join("hello.nuon")).unwrap();

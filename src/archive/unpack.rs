@@ -4,12 +4,19 @@
 use anyhow::{Context, Result};
 use std::{fs, fs::File, path::Path};
 
+use super::{BoundedReader, MAX_ARCHIVE_DECOMPRESSED_BYTES};
+
 /// Extracts a `.tar.zst` archive into `destination`. Callers must have validated the
 /// archive first ([`super::validate_archive_paths`]); extraction itself then sanitizes
 /// permissions on everything it wrote.
 pub(crate) fn extract_archive(path: &Path, destination: &Path) -> Result<()> {
     let file = File::open(path)?;
     let decoder = zstd::stream::read::Decoder::new(file)?;
+    let decoder = BoundedReader::new(
+        decoder,
+        MAX_ARCHIVE_DECOMPRESSED_BYTES,
+        "archive decompressed stream",
+    );
     let mut archive = tar::Archive::new(decoder);
     archive.unpack(destination)?;
     sanitize_permissions(destination)

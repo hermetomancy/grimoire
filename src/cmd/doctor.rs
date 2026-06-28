@@ -231,6 +231,17 @@ fn check_stale_backups() -> Result<usize> {
             }
         }
     }
+    let state_root = paths::install_root()?.join("state");
+    for name in [".packages-old", ".packages-staging"] {
+        let path = state_root.join(name);
+        if path.exists() {
+            problems += 1;
+            problem(&format!(
+                "stale state transaction directory `{}` (run `grm generation switch <id>` to repair or delete it if no switch is in progress)",
+                path.display()
+            ));
+        }
+    }
     Ok(problems)
 }
 

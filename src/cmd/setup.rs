@@ -186,8 +186,10 @@ fn bootstrap_core() -> Result<()> {
     crate::install::install(crate::cli::InstallArgs {
         packages: vec!["grimoire".to_owned()],
         from_source: false,
+        impure: false,
         locked: false,
         sha256: None,
+        force: false,
         dry_run: false,
     })
     .context("install grimoire through itself")?;

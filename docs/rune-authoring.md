@@ -15,8 +15,10 @@ export const package = {
   name: "example"
   version: "1.0.0"
   summary: "One-line description"
-  homepage: "https://example.com/"
-  license: "MIT"
+  meta: {
+    homepage: "https://example.com/"
+    license: "MIT"
+  }
   targets: ["linux-x86_64-musl" "macos-aarch64-darwin"]
 
   sources: {
@@ -52,28 +54,30 @@ export def build [ctx] {
 
 ## The `package` record
 
-Every field Grimoire parses. Unknown keys are ignored, so informational conventions like
-`homepage` and `license` are welcome but carry no behavior (yet).
+Every field Grimoire parses. Unknown top-level keys are errors: put informational conventions
+such as homepage/license under `meta`, which is inert data and carries no behavior yet.
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
 | `name` | string | yes | Package identifier: letters, digits, `_.+-`, starting with a letter or digit. No paths, no spaces. |
 | `version` | string | yes | Semver, leniently parsed (`1.2` normalizes to `1.2.0`). Non-semver upstream versions must be normalized here; keep the real version string in the source `url`. |
 | `summary` | string | no | One-line description shown by `grm search`/`info`. |
-| `targets` | list\<string\> | no | Supported target triples. Non-empty + current triple absent ⇒ the rune is skipped by `grm tome build --all` and refuses to build. Empty/absent ⇒ builds everywhere. |
-| `fixed_output` | bool | no (default `false`) | Declares that the output is fully determined by the sources — the build only fetches/repackages, never compiles. Switches the package to output addressing: its store hash covers name + version + (platform-filtered) sources + target only, excluding the build environment and dependency closures. Use for repackaged prebuilts (see `rust.rn`); never for anything that invokes a compiler. Grimoire trusts the declaration — do not lie. |
+| `meta` | record | no | Inert informational metadata ignored by Grimoire for now. Use for conventions like `homepage` and `license` instead of adding unknown top-level fields. |
+| `targets` | list\<string\> | no | Recognized exact target triples (`linux-{x86_64,aarch64}-{musl,gnu}`, `macos-{x86_64,aarch64}-darwin`, `freebsd-{x86_64,aarch64}-unknown`). Non-empty + current triple absent ⇒ the rune is skipped by `grm tome build --all` and refuses to build. Empty/absent ⇒ builds everywhere. Source-build environments are wired today for `linux-*-musl` and `macos-*-darwin`; `linux-*-gnu` and FreeBSD are metadata/index targets until their managed floors land. |
+| `fixed_output` | bool | no (default `false`) | Declares that the output is fully determined by declared sources — the build only fetches/repackages, never compiles. Requires at least one source and no build deps. Switches the package to output addressing: its store hash covers name + version + (platform-filtered) sources + target only, excluding the build environment and dependency closures. Use for repackaged prebuilts (see `rust-stage0.rn`); never for anything that invokes a compiler. |
 | `sources` | record | no | Verified inputs; see [Sources](#sources). `sources: {}` is valid for generated-output packages. |
 | `deps` | record | no | Build and runtime dependencies; see [Dependencies](#dependencies). |
 | `bins` | record | no | Target-keyed executable declarations; see [Bins and capabilities](#bins-and-capabilities). |
 | `build_flags` | record\<string, string\> | no | Free-form feature toggles surfaced to the build as `ctx.build_flags`. Addenda may patch them; they are part of a compiled package's store hash. |
-| `provides` | list\<string\> | no | Capability names this package supplies beyond its bins. Used by the solver pre-build; **replaced at pack time by the merged bin-name set** (discovered executables plus surviving declared aliases — see below), so declare it for capabilities the solver must know before any build exists. |
-| `libs` | list\<string\> | no | Library base names (`foo` for `libfoo.so`). Like `provides`, replaced by discovery at pack time. |
+| `provides` | list\<string\> | no | Capability names this package supplies beyond its bins. Used by the solver pre-build and preserved at pack time alongside discovered executable names and declared bin aliases. |
+| `libs` | list\<string\> | no | Library base names (`foo` for `libfoo.so`). Like `provides`, merged with post-build discovery at pack time, so declared non-file capabilities survive while discovered library files are added. |
 | `notes` | list\<string\> | no | User-facing post-install notes, printed once after install commits and replayed by `grm info`. |
 | `upstream_version` | string | no | The real upstream version string when `version` had to be normalized to semver (see [Version policy](#version-policy)). Display only — shown by `grm info`, never ordered. |
 | `conflicts` | list\<string\> | no | Installed packages this one cannot coexist with (bare names). Only *linked* coexistence conflicts, symmetrically — store-only packages on either side are cache, not environment, so a package may conflict with its own store-only build dep (`rust` vs `rust-stage0`). Checked when a linked install lands *and* when a store-only package is promoted into the linked set; the conflicting package must be removed first (or be replaced in the same command). |
 | `replaces` | list\<string\> | no | Package names this one supersedes. Installing this package removes them in the same transaction and migrates their requested/held intent. A bare `grm upgrade` treats an available replacer as the upgrade for the replaced name — this is how renames work. |
 | `split_from` | string | no | Declares this rune a **split member** of the named parent rune in the same `runes/` directory; see [Split packages](#split-packages). A split member must not declare `sources`, build deps, `build_flags`, `targets`, `fixed_output`, or a `build` function. |
 | `files` | list\<string\> | with `split_from` | Glob patterns claiming this member's files from the parent build's output, relative to the payload root. `*`/`?` stay within one path component; `**` crosses directories. Required (non-empty) exactly when `split_from` is set. |
+| `format` | int | (archives only) | Archive metadata format version. Written by Grimoire into packed archives; not authored in runes. |
 | `target` | string | (archives only) | The concrete triple an archive was built for. Written by `grm tome build` into archive metadata; not authored in runes. |
 | `store_path` | string | (archives only) | The content-addressed store basename embedded in archives. Not authored in runes. |
 
@@ -109,7 +113,7 @@ sources: {
 |---|---|---|
 | `url` | yes | `https://` (or `http://`), or a path relative to the rune's directory (vendored files under the tome's `sources/`). |
 | `sha256` | yes | 64 hex digits, optional `sha256:` prefix. Every source is verified before the build can read it; a mismatch is fatal. |
-| `platform` | no | Target glob (dependency-bracket syntax: `macos-*`, `linux-x86_64-musl`). Non-matching sources are neither fetched nor folded into the store hash — how a fixed-output package pins a different artifact per platform (`rust.rn` is the canonical example). |
+| `platform` | no | Target glob (dependency-bracket syntax: `macos-*`, `linux-x86_64-musl`). Unlike `targets`, this is a selector and may be an OS shorthand or glob. Non-matching sources are neither fetched nor folded into the store hash — how a fixed-output package pins a different artifact per platform (`rust.rn` is the canonical example). |
 | `host_libc` | no | Build-host libc selector (`glibc` or `musl`) for bootstrap sources that must execute on the build host. Non-matching sources are neither fetched nor folded into the store hash. Omit for ordinary target-selected sources. |
 
 Archive sources (`.tar.zst`/`.tar.gz`/`.tar.xz`) are extracted automatically (path-validated
@@ -133,11 +137,13 @@ deps: {
 ```
 
 - **`deps.build`** — tools needed during the build. Target-keyed: `default` applies
-  everywhere, an OS key (`linux`) merges over it, an exact triple merges over both. Their
+  everywhere, an OS key (`linux`, `macos`, `freebsd`) merges over it, an exact supported
+  triple merges over both. Typos and globs are rejected here; use bracket/platform selectors
+  on individual dependencies when you need glob matching. Their
   `bin/` dirs join the managed build PATH and their prefixes are layered into discovery
   variables (`CMAKE_PREFIX_PATH`, `PKG_CONFIG_PATH`, `CPATH`, `LIBRARY_PATH`, `ACLOCAL_PATH`,
   `<DEP>_PREFIX`). Declare every non-POSIX tool the build invokes — and remember the
-  self-hosted userland floor (uutils/dash/mawk/gsed/ggrep) ships no `make`. Out-of-core packages can
+  self-hosted userland floor (uutils/dash/mawk/gsed/ggrep/gtar) ships no `make`. Out-of-core packages can
   declare `build-env` instead of enumerating the toolchain. The resolved build-dependency closure
   is part of a compiled package's store hash, so changing a build tool's recipe or version moves
   every package built with it to a new address.
@@ -157,9 +163,9 @@ deps: {
 
 ## Bins and capabilities
 
-`bins` is **target-keyed** like `deps.build`: `default` → OS key → exact triple, each level
-merging over the previous. Each inner record maps a command name to a path relative to
-`package_dir`:
+`bins` is **target-keyed** like `deps.build`: `default` → OS key → exact supported triple,
+each level merging over the previous. Typos and globs are rejected here. Each inner record
+maps a command name to a path relative to `package_dir`:
 
 ```rn
 bins: {
@@ -174,10 +180,11 @@ bins: {
 - **Discovery merges with declaration at pack time.** After a successful build, every
   executable staged under `bin/` is discovered; discovered names win on collision, but a
   declared *alias* — a second command name whose path is a real file, like
-  `awk: "bin/gawk"` — survives into the packed metadata. `provides` becomes the merged
-  name set, `libs` the discovered libraries. Static declarations still matter *before* a
-  build exists: they tell the solver (and `grm tome build --all`'s ordering) what the rune
-  will provide. Keep them accurate.
+  `awk: "bin/gawk"` — survives into the packed metadata. `provides` becomes the union of
+  declared non-bin capabilities and the merged executable name set; `libs` becomes the
+  discovered libraries. Static declarations still matter *before* a build exists: they tell
+  the solver (and `grm tome build --all`'s ordering) what the rune will provide. Keep them
+  accurate.
 - Only declare commands end users or other runes invoke; internal helper scripts need no
   entries.
 
@@ -191,10 +198,11 @@ packaged under its **implementation name**, and ships **both** command names:
 | `gmake` | `gmake`, `make` | a package named `make` — *which* make? |
 | `gsed`  | `gsed`, `sed`   | `gnu-sed` — the package name should match the primary bin |
 | `gawk`  | `gawk`, `awk`   | |
+| `gtar`  | `gtar`, `tar`   | |
 
 The generic name (`make`, `sed`, `awk`) is then a **capability** with potentially many
 providers — never assume what the platform floor provides (GNU on glibc distros, busybox
-on Alpine, the managed floor (uutils/dash/mawk/gsed/ggrep) once bootstrapped):
+on Alpine, the managed floor (uutils/dash/mawk/gsed/ggrep/gtar) once bootstrapped):
 
 - **Consumers** depend on and invoke the *generic* name when any implementation serves,
   and the *implementation* name when specific semantics are required (`gsed` for GNU `T`
@@ -226,6 +234,7 @@ directory) must also be a runtime dep so GC keeps it alive.
 | `ctx.prefix` | string | Final install prefix (e.g. `/grm/store/<hash>-example-1.0.0`). Bake this into configure-time metadata so the package knows where it will live. |
 | `ctx.work_dir` | string | Scratch directory for build artifacts. Use for out-of-tree builds. `HOME`, temp, and XDG dirs all point inside it. |
 | `ctx.target` | string | Target triple (e.g. `linux-x86_64-musl`). |
+| `ctx.host_libc` | string | Build-host libc selector: `glibc`, `musl`, or `none`. This is distinct from the target ABI and exists for bootstrap runes that must choose a seed executable for the build host. |
 | `ctx.nproc` | int | Host parallelism for `-j`/`--parallel` flags (falls back to 4 when undetectable). |
 | `ctx.sources.<name>.dir` | string | Extracted directory for an archive source — use this for tarballs. `null` for non-archive sources (patches, single files). |
 | `ctx.sources.<name>.path` | string | The raw verified file in the cache. Use for non-archive sources (e.g. `patch -p1 -i ($ctx.sources.fix.path)`). |
@@ -279,7 +288,7 @@ registers exactly these commands (`src/nu/commands/`):
 | system | external invocation (bare or `^cmd`), `complete` |
 | filesystem | `mkdir`, `save` (verbatim; `--force`/`--append`), `open` (always raw), `rm` (`-r`/`-f`), `cp` (`-r`), `ls` (name/type/size), `cd` |
 | path | `path join`, `path exists`, `path type`, `path basename`, `path dirname` |
-| strings | `str starts-with`, `str ends-with`, `str trim`, `str replace` (`-r` regex, `-a` all) |
+| strings | `str starts-with`, `str ends-with`, `str contains`, `str trim`, `str replace` (`-r` regex, `-a` all) |
 | filters | `get`, `merge`, `columns`, `lines`, `first`, `is-empty` |
 
 Anything not listed does not exist in the rune engine — `from json`, `http get`, `where`,
@@ -302,11 +311,11 @@ obscures the build logic; decompose complex steps instead of hiding them in a sh
 
 **External commands must be owned by the build environment.** Invoking upstream build tools
 (`make`, `cmake`, `cargo`, `cc`) is expected when those tools come from declared build deps or
-the package's own source tree. Generic POSIX utilities may come from the managed floor (or the
-documented ambient tail during bootstrap), but a rune must not use an arbitrary host utility to
-stand in for missing Nushell functionality. Prefer the native rune commands above for filesystem
-work (`cp`, `rm`, `path`, string transforms); when a generic external utility is genuinely
-required, make sure the providing package/floor contract is explicit.
+the package's own source tree. Generic POSIX utilities may come from the managed floor (or, during
+bootstrap/`--impure`, the documented ambient tail), but a rune must not use an arbitrary host
+utility to stand in for missing Nushell functionality. Prefer the native rune commands above for
+filesystem work (`cp`, `rm`, `path`, string transforms); when a generic external utility is
+genuinely required, make sure the providing package/floor contract is explicit.
 
 **Use explicit parentheses for variable interpolation in external commands.** Bare
 record-field access like `$ctx.prefix` or `$env.VAR` in external command position can be

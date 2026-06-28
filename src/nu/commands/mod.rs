@@ -46,6 +46,7 @@ pub(crate) fn add_rune_command_context(mut engine_state: EngineState) -> EngineS
             values::StrSelf,
             values::StrStartsWith,
             values::StrEndsWith,
+            values::StrContains,
             values::StrTrim,
             values::StrReplace,
             // filters

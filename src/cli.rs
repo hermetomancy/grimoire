@@ -211,13 +211,12 @@ pub struct BuildArgs {
     /// This is useful for bootstrapping before the managed core userland is installed.
     #[arg(long)]
     pub bootstrap: bool,
-    /// Drop the POSIX ambient PATH tail (`/usr/bin`, `/bin`) so the build sees only declared
-    /// deps and the managed core floor. Diagnostic for stage-2 self-hosting: a build that fails
-    /// for a missing tool names a host-userland leak to package. Affects the store hash.
-    #[arg(long, conflicts_with = "bootstrap")]
-    pub hermetic: bool,
+    /// Append the POSIX ambient PATH tail (`/usr/bin`, `/bin`) to managed builds. This is an
+    /// explicit escape hatch while packaging a missing floor tool. Affects the store hash.
+    #[arg(long)]
+    pub impure: bool,
     /// Target triple to build for (defaults to the host target).
-    #[arg(short, long)]
+    #[arg(short, long, value_parser = crate::util::paths::parse_target_arg)]
     pub target: Option<String>,
 }
 
@@ -232,11 +231,19 @@ pub struct InstallArgs {
     /// dependencies are installed first.
     #[arg(short = 's', long)]
     pub from_source: bool,
+    /// Append the POSIX ambient PATH tail (`/usr/bin`, `/bin`) to source builds performed by this
+    /// install. Binary installs are unaffected. Affects the store hash.
+    #[arg(long)]
+    pub impure: bool,
     /// Expected archive hash (`sha256:<hex>` or bare hex). When set, the archive is verified
     /// against it before being read or extracted; a mismatch is a hard failure. Only valid
     /// when installing a single local archive.
     #[arg(long = "sha256")]
     pub sha256: Option<String>,
+    /// Allow installing a local archive without `--sha256`. This trusts the file by path and is
+    /// rejected by default because local archives otherwise skip the verify-before-read hash gate.
+    #[arg(long)]
+    pub force: bool,
     /// Reproduce the install recorded in `grimoire.lock.nuon`: every package in the resolved
     /// graph must match a locked version and archive hash, and nothing outside the lockfile may
     /// be pulled in. Fails if no lockfile exists. Ignored for a local-archive install.
@@ -393,12 +400,38 @@ pub enum TomeCommand {
     News(TomeNewsArgs),
     /// Show a tome's details: URL, tracked ref, pinned commit, description, and signer keys.
     Info(TomeInfoArgs),
+    /// Validate a local tome: parse every rune and check its package metadata, plus the
+    /// `tome.rn` manifest and `packages` config. Reports every problem at once rather than
+    /// stopping at the first, so authors catch issues before committing or signing.
+    Lint(TomeLintArgs),
+    /// Write and sign the tome's `runes-manifest.nuon` (the content hash of every rune) and
+    /// sign every built archive in `dist/`, using a minisign secret key. Runs `tome lint`
+    /// first and refuses to sign a tome with problems.
+    Sign(TomeSignArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct TomeInfoArgs {
     /// Tome to show.
     pub name: String,
+}
+
+#[derive(Debug, Args)]
+pub struct TomeLintArgs {
+    /// Tome directory to lint (must contain `tome.rn`). Defaults to the current directory.
+    #[arg(short, long, default_value = ".")]
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct TomeSignArgs {
+    /// Tome directory to sign (must contain `tome.rn`). Defaults to the current directory.
+    #[arg(short, long, default_value = ".")]
+    pub path: PathBuf,
+    /// Minisign secret key file. Defaults to `~/.minisign/minisign.key` (the minisign default).
+    /// An encrypted key prompts for its password.
+    #[arg(short = 'k', long)]
+    pub seckey: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -452,13 +485,12 @@ pub struct TomeBuildArgs {
     /// Allow host build-tool discovery instead of using only the grimoire-managed toolchain.
     #[arg(long)]
     pub bootstrap: bool,
-    /// Drop the POSIX ambient PATH tail (`/usr/bin`, `/bin`) so each rune builds against only
-    /// declared deps and the managed core floor. Diagnostic for stage-2 self-hosting: a rune
-    /// that fails for a missing tool names a host-userland leak to package. Affects the store hash.
-    #[arg(long, conflicts_with = "bootstrap")]
-    pub hermetic: bool,
+    /// Append the POSIX ambient PATH tail (`/usr/bin`, `/bin`) to managed builds. This is an
+    /// explicit escape hatch while packaging a missing floor tool. Affects the store hash.
+    #[arg(long)]
+    pub impure: bool,
     /// Target triple to build for (defaults to the host target).
-    #[arg(short, long)]
+    #[arg(short, long, value_parser = crate::util::paths::parse_target_arg)]
     pub target: Option<String>,
     /// Rebuild the binary package index (`index.nuon`) from existing archives in `dist/`
     /// without building any packages.

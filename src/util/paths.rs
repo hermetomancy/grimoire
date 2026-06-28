@@ -2,7 +2,7 @@
 //! (state, packages, profiles, caches, build output), plus the current target triple. `GRIMOIRE_ROOT`
 //! overrides the root, which otherwise is `~/.grimoire` — never a system path.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::{env, ffi::OsString, path::PathBuf};
 
 /// Resolves the user-local install root. `GRIMOIRE_ROOT` overrides everything (used by tests and
@@ -153,6 +153,53 @@ pub fn target_triple() -> String {
     resolve_target_triple(env::consts::OS, env::consts::ARCH)
 }
 
+/// Parses a CLI target argument, accepting only Grimoire's supported POSIX target triples.
+/// Dependency/platform filters may use globs and OS shorthands; an actual build/archive target
+/// must be an exact triple.
+pub fn parse_target_arg(target: &str) -> std::result::Result<String, String> {
+    validate_target_triple(target)
+        .map(|()| target.to_owned())
+        .map_err(|err| err.to_string())
+}
+
+pub fn validate_target_triple(target: &str) -> Result<()> {
+    let mut parts = target.split('-');
+    let (Some(os), Some(arch), Some(abi), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        bail!(
+            "target `{target}` is not a supported triple; expected <os>-<arch>-<abi>, e.g. linux-aarch64-musl"
+        );
+    };
+    if !matches!(arch, "x86_64" | "aarch64") {
+        bail!(
+            "target `{target}` uses unsupported architecture `{arch}`; expected x86_64 or aarch64"
+        );
+    }
+    let valid = matches!(
+        (os, abi),
+        ("linux", "musl" | "gnu") | ("macos", "darwin") | ("freebsd", "unknown")
+    );
+    if !valid {
+        bail!(
+            "target `{target}` is unsupported; expected linux-*-musl, linux-*-gnu, macos-*-darwin, or freebsd-*-unknown"
+        );
+    }
+    Ok(())
+}
+
+/// Validates a target-keyed metadata map key (`deps.build`, `bins`, build-manifest `bins`).
+///
+/// These keys select one concrete target layer: `default`, an OS shorthand, or a supported exact
+/// triple. Globs belong on dependency/source platform selectors, not on target-keyed maps.
+pub fn validate_target_key(key: &str, label: &str) -> Result<()> {
+    if key == "default" || matches!(key, "linux" | "macos" | "freebsd") {
+        return Ok(());
+    }
+    validate_target_triple(key)
+        .with_context(|| format!("{label} target key `{key}` is not `default`, a supported OS key, or a supported exact target triple"))
+}
+
 fn resolve_target_triple(os: &str, arch: &str) -> String {
     let abi = match os {
         "macos" => "darwin",
@@ -250,5 +297,46 @@ mod tests {
             resolve_target_triple("freebsd", "aarch64"),
             "freebsd-aarch64-unknown"
         );
+    }
+
+    #[test]
+    fn validate_target_triple_accepts_supported_targets() {
+        for target in [
+            "linux-x86_64-musl",
+            "linux-aarch64-gnu",
+            "macos-aarch64-darwin",
+            "freebsd-x86_64-unknown",
+        ] {
+            validate_target_triple(target).unwrap();
+        }
+    }
+
+    #[test]
+    fn validate_target_triple_rejects_patterns_and_unknown_targets() {
+        for target in [
+            "linux",
+            "linux-*",
+            "windows-x86_64-msvc",
+            "linux-riscv64-musl",
+        ] {
+            assert!(validate_target_triple(target).is_err(), "{target}");
+        }
+    }
+
+    #[test]
+    fn validate_target_key_accepts_map_layers_not_globs() {
+        for key in [
+            "default",
+            "linux",
+            "macos",
+            "freebsd",
+            "linux-x86_64-musl",
+            "macos-aarch64-darwin",
+        ] {
+            validate_target_key(key, "test map").unwrap();
+        }
+        for key in ["linux-*", "linxu", "x86_64-unknown-linux-gnu"] {
+            assert!(validate_target_key(key, "test map").is_err(), "{key}");
+        }
     }
 }

@@ -1,13 +1,14 @@
 //! Managed build environment construction.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use std::path::PathBuf;
 
 use crate::{install, nu::runtime::BuildEnv, util::paths};
 
 /// Core packages whose `bin/` directories are always prepended to build PATH — the managed build
 /// floor. The toolchain (compiler, cmake, gmake, python3) plus the userland: a POSIX shell, awk,
-/// coreutils, sed, and grep, enough for autotools `configure` without the host `/usr/bin` tail.
+/// coreutils, sed, grep, and tar, enough for autotools/Makefile builds without the host
+/// `/usr/bin` tail.
 const CORE_PACKAGES: &[&str] = &[
     "linux-headers",
     "musl",
@@ -23,11 +24,20 @@ const CORE_PACKAGES: &[&str] = &[
     "uutils",
     "gsed",
     "ggrep",
+    "gtar",
+    // find/cmp: the base POSIX tools the generated configure/Makefile contract assumes (uutils
+    // ships neither), e.g. git's build and the autotools move-if-change idiom.
+    "findutils",
+    "diffutils",
 ];
 
 /// Returns `true` when `target` is a Linux musl triple.
 pub fn is_musl_target(target: &str) -> bool {
     target.starts_with("linux-") && target.ends_with("-musl")
+}
+
+fn target_has_build_env(target: &str) -> bool {
+    is_musl_target(target) || target.starts_with("macos-")
 }
 
 /// Merges `additions` into `env` at the path-segment level: each colon-separated segment of a
@@ -158,6 +168,11 @@ pub fn build_env_for_target(
     target: &str,
     package_name: &str,
 ) -> Result<BuildEnv> {
+    if !target_has_build_env(target) {
+        bail!(
+            "target `{target}` is recognized but its managed build environment is not wired yet; supported source-build targets today are linux-*-musl and macos-*-darwin"
+        );
+    }
     let mut all_path_dirs = path_dirs;
     all_path_dirs.extend(core_bin_dirs()?);
 
@@ -226,7 +241,7 @@ pub fn build_env_for_target(
             env.push(("SDKROOT".to_string(), sdk));
         }
         // Pin the deployment target so configure scripts (CPython's, autotools') don't shell out to
-        // host `sw_vers` to guess it — gone under --hermetic, and on a host it bakes the builder's
+        // host `sw_vers` to guess it — unavailable in hermetic builds, and on a host it bakes the builder's
         // own OS version in as the minimum. 11.0 is the Apple-Silicon baseline. Like SDKROOT, this
         // is injected as env and so never enters the content address.
         env.push(("MACOSX_DEPLOYMENT_TARGET".to_string(), "11.0".to_string()));
@@ -406,6 +421,18 @@ mod tests {
         assert_eq!(get("LD"), Some("ld"));
         assert_eq!(get("CFLAGS"), Some("-static"));
         assert_eq!(get("LDFLAGS"), Some("-static"));
+    }
+
+    #[test]
+    fn unwired_targets_fail_before_build_env_construction() {
+        for target in ["linux-x86_64-gnu", "freebsd-x86_64-unknown"] {
+            let err = build_env_for_target(Vec::new(), Vec::new(), target, "pkg").unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("managed build environment is not wired yet"),
+                "unexpected error for {target}: {err:#}"
+            );
+        }
     }
 
     #[test]

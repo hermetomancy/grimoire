@@ -64,6 +64,21 @@ fn command_parsing() {
         "unexpected value 'true' for '--quiet'",
         "reject bool option value",
     );
+
+    let bad_target = run(
+        root,
+        &[
+            "build",
+            "./tome-example/runes/hello.rn",
+            "--target",
+            "linux",
+        ],
+    );
+    assert_failure_contains(
+        &bad_target,
+        "target `linux` is not a supported triple",
+        "reject malformed target",
+    );
 }
 
 #[test]
@@ -101,7 +116,7 @@ fn doctor_reports_health_and_problems() {
     );
     assert_success(&build, "build hello");
     let archive = out.join(format!("hello-0.1.0-{}.tar.zst", target_triple()));
-    let install = run(root, &["install", archive.to_str().unwrap()]);
+    let install = run(root, &["install", archive.to_str().unwrap(), "--force"]);
     assert_success(&install, "install built archive");
 
     let healthy = run(root, &["doctor"]);

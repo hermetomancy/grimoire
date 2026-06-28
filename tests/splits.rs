@@ -332,6 +332,87 @@ fn split_group_with_external_dep_installs_and_addresses_consistently() {
 }
 
 #[test]
+fn split_group_built_as_build_dep_tolerates_a_drifted_member_dep_rebuilt_mid_transaction() {
+    // The llvm/libedit regression, reproduced minimally. `libdep` is a *member*'s external runtime
+    // dep (it folds into the group's address) but the *parent*'s build dep — and crucially not in
+    // the parent's runtime closure. When the group is built as a build dependency, resolution sees
+    // only the parent, so `libdep` is never a plan step: it is seeded at its installed address.
+    // If `libdep` has drifted, the group's own build-dep install re-realizes it at a fresh address
+    // *after* the group's hash was planned — so a planner that folded the stale seed disagrees with
+    // the build that folds the rebuilt one, and `build_group_with_env`'s cross-check aborts with
+    // "inputs changed between resolution and build". A clean build of the consumer is the proof the
+    // planner skipped the drifted seed and folded the post-rebuild address instead.
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let tome = TempDir::new().unwrap();
+    let runes = tome.path().join("runes");
+    fs::create_dir_all(&runes).unwrap();
+    fs::create_dir_all(tome.path().join("dist")).unwrap();
+    fs::write(
+        tome.path().join("tome.rn"),
+        "export const tome = {\n  name: 'splitdrift'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    // `libdep` ships a build tool and drifts when its payload changes (same version, new address).
+    let libdep_rune = |payload: &str| {
+        format!(
+            "export const package = {{\n  name: 'libdep'\n  version: '0.1.0'\n \n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf '{payload}\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'libtool')\n}}\n"
+        )
+    };
+    fs::write(runes.join("libdep.rn"), libdep_rune("one")).unwrap();
+    // Parent: `libdep` is a *build* dep (invokes `libtool`), not a runtime dep — so resolving the
+    // parent alone never makes `libdep` a step.
+    fs::write(
+        runes.join("core.rn"),
+        "export const package = {\n  name: 'core'\n  version: '0.1.0'\n  deps: { build: { default: ['libdep'] } }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  (libtool | complete | ignore)\n  \"#!/usr/bin/env sh\\nprintf 'core\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'core')\n  \"#!/usr/bin/env sh\\nprintf 'extra\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'extra')\n}\n",
+    )
+    .unwrap();
+    // Member: runtime-depends on `libdep`, folding it into the *group's* address even though the
+    // parent does not.
+    fs::write(
+        runes.join("extra.rn"),
+        "export const package = {\n  name: 'extra'\n  version: '0.1.0'\n  split_from: 'core'\n  files: ['bin/extra*']\n  deps: { runtime: ['core' 'libdep'] }\n}\n",
+    )
+    .unwrap();
+    // Consumer: build-depends on the split *parent*, so building it triggers a build-dep install of
+    // the whole group while resolution only ever names `core`.
+    fs::write(
+        runes.join("top.rn"),
+        "export const package = {\n  name: 'top'\n  version: '0.1.0'\n  deps: { build: { default: ['core'] } }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'top\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'top')\n}\n",
+    )
+    .unwrap();
+
+    let add = run(
+        root,
+        &[
+            "tome",
+            "add",
+            tome.path().to_str().unwrap(),
+            "--ref",
+            "main",
+        ],
+    );
+    assert_success(&add, "add splitdrift tome");
+    // Installing the member lands libdep + the group at mutually consistent addresses.
+    assert_success(&run(root, &["install", "extra"]), "install split member");
+    assert!(store_has_package(root, "libdep") && store_has_package(root, "core"));
+
+    // Drift the member's dep / parent's build dep: same version, new content address.
+    fs::write(runes.join("libdep.rn"), libdep_rune("two")).unwrap();
+    assert_success(&run(root, &["tome", "update", "splitdrift"]), "tome update");
+
+    // Building `top` re-realizes libdep (drifted build dep) inside the group's build-dep install,
+    // then rebuilds the group against it. The group's planned address must already fold the rebuilt
+    // libdep, or the build-time cross-check aborts.
+    let install_top = run(root, &["install", "top"]);
+    assert_success(
+        &install_top,
+        "build consumer of a split group whose member dep drifted and was rebuilt mid-transaction",
+    );
+    assert_eq!(stdout(&run_shim(root, "top")).trim(), "top");
+}
+
+#[test]
 fn store_hash_accepts_member_rune_paths() {
     let root = TempDir::new().unwrap();
     let root = root.path();

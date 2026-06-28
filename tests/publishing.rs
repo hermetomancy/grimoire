@@ -477,3 +477,51 @@ fn tome_build_index_fails_on_bad_archive() {
     let rebuild = run(root, &["tome", "build", "--path", tome_path, "--index"]);
     assert_failure_contains(&rebuild, "index archive", "bad archive index rebuild");
 }
+
+#[test]
+fn tome_build_index_rejects_store_hash_mismatch() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let workspace = TempDir::new().unwrap();
+    let tome_dir = workspace.path().join("mismatchindex");
+    let tome_path = tome_dir.to_str().unwrap();
+    assert_success(
+        &run(
+            root,
+            &["tome", "init", "mismatchindex", "--path", tome_path],
+        ),
+        "tome init",
+    );
+    let dist = tome_dir.join("dist");
+    fs::create_dir_all(&dist).unwrap();
+
+    let target = target_triple();
+    let archive = dist.join(format!("mismatch-0.1.0-{target}.tar.zst"));
+    let mut builder = open_archive(&archive);
+    let package_nuon = format!(
+        "{{format: 1, name: \"mismatch\", version: \"0.1.0\", target: \"{target}\", store_path: \"deadbeef-mismatch-0.1.0\", bins: {{default: {{mismatch: \"bin/mismatch\"}}}}, deps: {{ runtime: [] }}}}\n"
+    );
+    let rune = "export const package = {\n  name: 'mismatch'\n  version: '0.1.0'\n  bins: {default: {mismatch: 'bin/mismatch'}}\n}\n\nexport def build [ctx] {}\n";
+    append_file(
+        &mut builder,
+        ".grimoire/package.nuon",
+        package_nuon.as_bytes(),
+        0o644,
+    );
+    append_file(&mut builder, ".grimoire/rune.rn", rune.as_bytes(), 0o644);
+    append_file(
+        &mut builder,
+        "bin/mismatch",
+        b"#!/usr/bin/env sh\nprintf 'mismatch\\n'\n",
+        0o755,
+    );
+    finish_archive(builder);
+
+    let rebuild = run(root, &["tome", "build", "--path", tome_path, "--index"]);
+    assert_failure_contains(
+        &rebuild,
+        "embeds store hash `deadbeef` but its inputs hash to",
+        "store hash mismatch index rebuild",
+    );
+}

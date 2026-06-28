@@ -190,7 +190,7 @@ simple_command!(
      -> Result<PipelineData, ShellError> {
         Err(ShellError::Generic(GenericError::new(
             "`str` requires a subcommand",
-            "use `str starts-with`, `str ends-with`, `str trim`, or `str replace`",
+            "use `str starts-with`, `str ends-with`, `str contains`, `str trim`, or `str replace`",
             call.head,
         )))
     }
@@ -231,6 +231,25 @@ simple_command!(
         let suffix: String = call.req(engine_state, stack, 0)?;
         let (text, _) = input_string(input, call.head)?;
         Ok(Value::bool(text.ends_with(&suffix), call.head).into_pipeline_data())
+    }
+);
+
+simple_command!(
+    StrContains,
+    "str contains",
+    "Whether the input string contains the given substring.",
+    Signature::build("str contains")
+        .input_output_types(vec![(Type::String, Type::Bool)])
+        .required("substring", SyntaxShape::String, "Substring to search for.")
+        .category(Category::Strings),
+    |engine_state: &EngineState,
+     stack: &mut Stack,
+     call: &Call,
+     input: PipelineData|
+     -> Result<PipelineData, ShellError> {
+        let substring: String = call.req(engine_state, stack, 0)?;
+        let (text, _) = input_string(input, call.head)?;
+        Ok(Value::bool(text.contains(&substring), call.head).into_pipeline_data())
     }
 );
 

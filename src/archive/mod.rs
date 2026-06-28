@@ -20,6 +20,63 @@ use std::{
     path::Path,
 };
 
+pub(crate) const MAX_ARCHIVE_DECOMPRESSED_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+pub(crate) const MAX_ARCHIVE_MEMBERS: usize = 100_000;
+/// Source archives carry far more members than any built package: the LLVM monorepo source ships
+/// ~185k files. Their trust boundary is the rune's pinned `sha256`, not this count — the maintainer
+/// already committed to that exact upstream tarball — so the cap here is only a sanity bound against
+/// a pathological inode-exhausting source, set well above the largest real one rather than at the
+/// strict package-archive limit.
+pub(crate) const MAX_SOURCE_ARCHIVE_MEMBERS: usize = 500_000;
+pub(crate) const MAX_CAPTURED_MEMBER_BYTES: u64 = 1024 * 1024;
+
+pub(crate) struct BoundedReader<R> {
+    inner: R,
+    limit: u64,
+    read: u64,
+    label: &'static str,
+}
+
+impl<R> BoundedReader<R> {
+    pub(crate) fn new(inner: R, limit: u64, label: &'static str) -> Self {
+        Self {
+            inner,
+            limit,
+            read: 0,
+            label,
+        }
+    }
+}
+
+impl<R: Read> Read for BoundedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let remaining = self.limit.saturating_sub(self.read);
+        if remaining == 0 {
+            let mut byte = [0_u8; 1];
+            return match self.inner.read(&mut byte)? {
+                0 => Ok(0),
+                _ => Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{} exceeds {} bytes", self.label, self.limit),
+                )),
+            };
+        }
+        let max = remaining.min(buf.len() as u64) as usize;
+        let read = self.inner.read(&mut buf[..max])?;
+        self.read += read as u64;
+        if self.read > self.limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{} exceeds {} bytes", self.label, self.limit),
+            ));
+        }
+        Ok(read)
+    }
+}
+
 /// Hard-fails unless `actual` matches `expected`. This is the single checkpoint for the
 /// "verify before trust" rule: callers verify an archive's integrity here *before* reading
 /// or extracting it. Both sides accept an optional `sha256:` prefix and are compared

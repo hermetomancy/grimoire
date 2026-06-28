@@ -59,6 +59,8 @@ struct Installer {
     /// When true, every install path stops after planning and prints the plan to stdout —
     /// no fetches, no builds, no state writes. Wired from `--dry-run` / `--explain`.
     dry_run: bool,
+    /// Whether source builds performed by this install run without the POSIX ambient PATH tail.
+    hermetic: bool,
     /// Authoritative in-memory installed state for this command. Mutations accumulate here and
     /// commit at the single transaction boundary in [`finalize`].
     world: InstalledWorld,
@@ -69,6 +71,7 @@ impl Installer {
         installed: BTreeMap<String, Version>,
         pins: Option<solve::Pins>,
         dry_run: bool,
+        hermetic: bool,
         world: InstalledWorld,
     ) -> Self {
         Self {
@@ -78,6 +81,7 @@ impl Installer {
             installed_now: Vec::new(),
             notes: Vec::new(),
             dry_run,
+            hermetic,
             world,
         }
     }
@@ -134,6 +138,15 @@ pub fn install(args: InstallArgs) -> Result<()> {
     if args.sha256.is_some() && args.packages.len() > 1 {
         bail!("--sha256 is only valid when installing a single local archive");
     }
+    if args.force && args.packages.len() != 1 {
+        bail!("--force is only valid when installing a single local archive");
+    }
+    if args.force && args.sha256.is_some() {
+        bail!("--force is unnecessary when --sha256 verifies the local archive");
+    }
+    if args.force && !is_local_archive_arg(&args.packages[0]) {
+        bail!("--force is only valid when installing a local archive");
+    }
 
     let world = InstalledWorld::load_default()?;
     let pins = if args.locked {
@@ -149,7 +162,7 @@ pub fn install(args: InstallArgs) -> Result<()> {
         installed.retain(|name, version| pins.get(name).is_some_and(|pin| &pin.version == version));
     }
 
-    let mut installer = Installer::new(installed, pins, args.dry_run, world);
+    let mut installer = Installer::new(installed, pins, args.dry_run, !args.impure, world);
 
     // Announce implied work before the first fetch: a one-line install can pull a long
     // tail of missing or drifted build deps, and the user deserves the count (and the
@@ -187,7 +200,7 @@ pub fn install(args: InstallArgs) -> Result<()> {
         let name = if args.from_source || package.ends_with(".rn") {
             installer.install_source_root(package)?
         } else if is_local_archive_arg(package) {
-            installer.install_local_root(package, args.sha256.clone())?
+            installer.install_local_root(package, args.sha256.clone(), args.force)?
         } else {
             settle_capability_intent(package, args.dry_run, args.locked)?;
             installer.install_named(package)?
@@ -303,7 +316,7 @@ pub fn restore(args: crate::cli::RestoreArgs) -> Result<()> {
     // Reuse an installed package only when it already matches its pin, like `--locked`.
     let mut installed = world.installed_versions_current()?;
     installed.retain(|name, version| pins.get(name).is_some_and(|pin| &pin.version == version));
-    let mut installer = Installer::new(installed, Some(pins), args.dry_run, world);
+    let mut installer = Installer::new(installed, Some(pins), args.dry_run, true, world);
     for name in &requested {
         installer
             .install_named(name)
@@ -421,7 +434,7 @@ pub fn upgrade_packages(names: &[String]) -> Result<()> {
     for name in names {
         installed.remove(name);
     }
-    let mut installer = Installer::new(installed, None, false, world);
+    let mut installer = Installer::new(installed, None, false, true, world);
     for name in names {
         installer
             .install_named(name)

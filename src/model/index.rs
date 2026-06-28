@@ -105,9 +105,8 @@ impl IndexEntry {
         validate_package_version(&version)?;
 
         let target = required_field_string(val, "index entry", "target")?;
-        if target.trim().is_empty() {
-            bail!("index entry `{name}` has an empty target");
-        }
+        crate::util::paths::validate_target_triple(&target)
+            .with_context(|| format!("index entry `{name}` target `{target}`"))?;
 
         let archive = required_field_string(val, "index entry", "archive")?;
         validate_archive_location(&archive)?;
@@ -209,11 +208,23 @@ mod tests {
     #[test]
     fn lookup_by_hash() {
         let index = parse_index(
-            "{\n  format: 2,\n  entries: {\n    \"aaa\": { name: \"a\", version: \"1.0.0\", target: \"t\", archive: \"a.tar.zst\", archive_hash: \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" }\n    \"bbb\": { name: \"b\", version: \"1.0.0\", target: \"t\", archive: \"b.tar.zst\", archive_hash: \"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\" }\n  }\n}\n",
+            "{\n  format: 2,\n  entries: {\n    \"aaa\": { name: \"a\", version: \"1.0.0\", target: \"linux-x86_64-musl\", archive: \"a.tar.zst\", archive_hash: \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" }\n    \"bbb\": { name: \"b\", version: \"1.0.0\", target: \"linux-x86_64-musl\", archive: \"b.tar.zst\", archive_hash: \"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\" }\n  }\n}\n",
         )
         .expect("parse index");
         assert!(index.entries.contains_key("aaa"));
         assert!(index.entries.contains_key("bbb"));
         assert!(!index.entries.contains_key("ccc"));
+    }
+
+    #[test]
+    fn rejects_invalid_target() {
+        let err = parse_index(
+            "{\n  format: 2,\n  entries: {\n    \"deadbeefdeadbeef\": { name: \"badtarget\", version: \"1.0.0\", target: \"linux\", archive: \"badtarget.tar.zst\", archive_hash: \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" }\n  }\n}\n",
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("target `linux` is not a supported triple"),
+            "unexpected error: {err:#}"
+        );
     }
 }

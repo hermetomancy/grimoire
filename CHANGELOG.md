@@ -8,10 +8,22 @@ heading when it is tagged.
 
 ### Added
 
-- Managed build-floor userland: `uutils` (Rust coreutils), `dash` (POSIX sh), `mawk` (awk), and
-  `ggrep` (GNU grep) join `gsed` on the build floor (`CORE_PACKAGES`), replacing `toybox` — whose
-  set was too thin for autotools `configure` (no awk/sh/tr/expr/…). The host `/usr/bin` tail stays
-  only as a shrinking fallback; `grm tome build --hermetic` enumerates what the floor still lacks.
+- `grm tome lint`: validates a local tome before publishing — parses every rune against the rune
+  command subset, runs full package-metadata validation, and checks the `tome.rn` manifest and
+  `packages` block, reporting *all* problems in one pass instead of stopping at the first (the
+  failure mode that previously only surfaced one-at-a-time during `tome update` against the remote).
+- `grm tome sign`: generates `runes-manifest.nuon` from the current `runes/` tree (no longer
+  hand-written) and signs it plus every `dist/*.tar.zst` with a minisign secret key
+  (`~/.minisign/minisign.key` by default, or `--seckey`; encrypted keys prompt for a password,
+  passwordless `-W` keys load silently). Runs `tome lint` first and refuses to sign a tome with
+  problems, and self-verifies each signature it writes. The `minisign` crate is now a runtime
+  dependency for the signing path; verification stays on the lighter `minisign-verify`. The
+  build-output purity/linkage lint module is renamed `output_lint` to free `lint` for the schema
+  linter.
+- Managed build-floor userland: `uutils` (Rust coreutils), `dash` (POSIX sh), `mawk` (awk),
+  `ggrep` (GNU grep), and `gtar` (GNU tar) join `gsed` on the build floor (`CORE_PACKAGES`), replacing `toybox` — whose
+  set was too thin for autotools `configure` (no awk/sh/tr/expr/…). Managed builds now drop the
+  host `/usr/bin` tail by default; `--impure` restores it only as an explicit shrinking fallback.
 - `build_only` rune metadata: a build-only package (the managed `build-env`, `clang`, and `llvm`)
   is pinned in the store and available to source builds, but its bins stay off the active profile —
   the managed toolchain/userland floor (dash, mawk, uutils, gsed, ggrep, clang, llvm, cmake,
@@ -36,11 +48,10 @@ heading when it is tagged.
   `LC_LOAD_DYLIB`) for dynamic references to host libraries that are neither a declared
   dependency nor the libc/platform floor — the host-link class the purity scan cannot see (a
   library bound without a baked path). Warns by default, `--strict` fails the build.
-- `grm tome build --hermetic` drops the POSIX ambient PATH tail (`/usr/bin`, `/bin`) so a
-  build sees only declared deps and the managed core floor — a self-hosting diagnostic that
-  surfaces silent host-userland leaks. Hermetic builds now have a distinct store hash from builds
-  that can see the ambient tail, so a host-userland leak cannot share an address with the clean
-  build.
+- Managed source builds are hermetic by default: `grm build`, `grm install` source fallback, and
+  `grm tome build` see only declared deps and the managed core floor. The new `--impure` flag
+  restores the POSIX ambient PATH tail (`/usr/bin`, `/bin`) as an explicit escape hatch while
+  packaging missing floor tools, and impure builds have distinct store hashes from hermetic builds.
 - Capability runtime deps are content-addressable: the closure walker resolves providers
   like the solver (preference → installed → first by name, deterministically).
 - Compiled package store hashes now fold in the resolved build-dependency closure, not only the
@@ -60,6 +71,32 @@ heading when it is tagged.
 - Rune authoring docs now make the external-command boundary explicit: missing structured
   Nushell operations should become curated rune commands, while external invocations must come
   from declared build deps, the package source tree, or the managed POSIX floor.
+- Explicit build/archive targets are now validated as supported POSIX triples. `--target`, rune
+  `targets`, and archive metadata `target` reject OS shorthands, globs, Windows triples, and
+  unsupported architectures; platform selectors for deps/sources remain glob-capable.
+- Package indexes now validate entry targets with the same supported-triple rules as archives, and
+  `grm tome build --index` rejects an archive whose embedded `store_path` hash disagrees with the
+  recomputed content address instead of publishing an index entry that fails later at install time.
+- Rune metadata is stricter: unknown top-level package fields are rejected, informational fields
+  live under inert `meta`, `deps.build`/`bins` target keys must be `default`, a supported OS key, or
+  an exact supported target triple, fixed-output packages must declare sources and no build deps,
+  authored runes reject archive-only `format`/`target`/`store_path` fields, and declared non-bin
+  `provides` plus non-file `libs` capabilities survive post-build discovery.
+- Source builds for recognized-but-unwired targets now fail early with a clear build-env error:
+  `linux-*-gnu` and FreeBSD remain metadata/index targets until their managed floors are wired,
+  while source-build environments are available for `linux-*-musl` and `macos-*-darwin`.
+- Archive validation/extraction now enforces resource caps: package archives have a bounded
+  decompressed stream, a bounded member count, and a separate cap for embedded
+  `.grimoire/package.nuon` metadata. `grm tome build --index` uses the same bounded archive
+  inspection path when indexing existing archives.
+- Local archive installs without `--sha256` are now refused unless `--force` is passed, making the
+  trust bypass explicit; `--sha256` remains the verified path.
+- Remote unsigned tomes now warn when added or synced, making the no-signature trust mode visible
+  at the point where package metadata is refreshed.
+- The resolver now uses installed package state as the fallback source of `conflicts`/`replaces`
+  metadata when a linked installed package no longer has a matching candidate in configured tomes.
+- `grm doctor` now reports stale `state/.packages-old` and `state/.packages-staging` directories
+  left by an interrupted generation-state restore.
 - Dry-run plans and generation diffs colorize their change markers — `+` add (green), `-` remove
   (red), `~` change (yellow) — on a terminal; piped output keeps the bare `  + name` form byte-for-
   byte. Routed through a new `util::output::plan_item` so every plan renders identically.
@@ -69,9 +106,8 @@ heading when it is tagged.
   `println!`/`eprintln!` are denied outside that module (clippy `disallowed-macros`). `info`,
   `doctor`, and `tome info` render as `key: value` fields under bold section headings; `doctor`
   health problems are now `✗` on stderr. Piped output stays plain and byte-stable.
-- The managed core userland references `python3-minimal` (the stdlib-only build interpreter) rather
-  than `python3`: the build-PATH floor and `grm doctor`'s readiness check are updated to match the
-  tome split. The full `python3` is no longer a core package.
+- The managed core userland references `python3`: the build-PATH floor and `grm doctor`'s readiness
+  check are updated to match the current core package set.
 - Linux musl C++ builds get the managed `libcxx` (libc++) as a floor: once it is installed, every
   musl-target C++ build is pointed at it (`-stdlib=libc++` + its headers/libs, `--unwindlib=libunwind`),
   except libcxx's own build. It is injected as environment, not a declared dep, so a C++ package like

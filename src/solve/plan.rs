@@ -4,7 +4,7 @@
 use anyhow::{Context, Result, bail};
 use semver::Version;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -67,18 +67,31 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// Computes the content-addressed store hash for every step in the plan.
-    /// Steps are already in topo-order (dependencies before dependents), so each
-    /// dependency's hash is available when its dependents need it.
-    pub fn compute_store_hashes(&mut self) -> Result<()> {
+    pub fn compute_store_hashes_with_mode(&mut self, hermetic: bool) -> Result<()> {
         let target = paths::target_triple();
         let mut computed: BTreeMap<String, String> = BTreeMap::new();
         let mut installed_versions: BTreeMap<String, Version> = BTreeMap::new();
 
-        // Pre-populate with already-installed packages so reused dependencies
-        // do not cause "missing computed hash" errors.
+        // Pre-populate with already-installed packages so reused dependencies do not cause
+        // "missing computed hash" errors — but skip *drifted* ones. A drifted package's recorded
+        // address no longer matches its rune, and every install path excludes it from the reuse set
+        // (`installed_versions_current`, and `ensure_build_deps_installed_inner`'s stale removal),
+        // so it will be re-realized at its canonical address before any dependent builds. Seeding
+        // the stale recorded address instead would let a dependent fold the pre-rebuild address
+        // while its own build folds the post-rebuild one, and the build-time cross-check would then
+        // reject the package it just built — the llvm/libxml2/libedit skew, where a split group's
+        // own build-dep install rebuilds two of its runtime deps first. Skipped names re-derive
+        // canonically here (the address the rebuild installs them at); any a step folds positionally
+        // are themselves steps, since they were dropped from `installed` before resolving.
         if let Ok(world) = crate::install::InstalledWorld::load_default() {
+            let drifted: HashSet<String> = closure::stale_installed(&world)
+                .into_iter()
+                .map(|stale| stale.name)
+                .collect();
             for state in world.iter() {
+                if drifted.contains(&state.name) {
+                    continue;
+                }
                 computed.insert(state.name.clone(), state.store_hash.clone());
                 if let Ok(version) = crate::model::parse_version_relaxed(&state.version) {
                     installed_versions.insert(state.name.clone(), version);
@@ -86,22 +99,25 @@ impl Plan {
             }
         }
 
-        self.compute_store_hashes_inner(&target, &mut computed, &mut installed_versions)
+        self.compute_store_hashes_inner(&target, hermetic, &mut computed, &mut installed_versions)
     }
 
     fn compute_store_hashes_inner(
         &mut self,
         target: &str,
+        hermetic: bool,
         computed: &mut BTreeMap<String, String>,
         installed_versions: &mut BTreeMap<String, Version>,
     ) -> Result<()> {
         for step in &mut self.steps {
             let hash = if let Some(rune) = &step.rune {
-                seed_build_dep_hashes(rune, target, computed, installed_versions).with_context(
-                    || format!("compute build dependency hashes for `{}`", step.name),
-                )?;
-                let build_env =
-                    toolchain::store_build_env_id_for_target_with_resolved(false, target, computed);
+                seed_build_dep_hashes(rune, target, hermetic, computed, installed_versions)
+                    .with_context(|| {
+                        format!("compute build dependency hashes for `{}`", step.name)
+                    })?;
+                let build_env = toolchain::store_build_env_id_for_target_with_resolved(
+                    hermetic, target, computed,
+                );
                 // `runtime_deps` carries the resolver's *expanded* names (capabilities already
                 // replaced by concrete providers) in the rune's declaration order, so the
                 // hashes are passed positionally rather than looked up by raw dep name.
@@ -147,6 +163,7 @@ impl Plan {
 fn seed_build_dep_hashes(
     rune: &Path,
     target: &str,
+    hermetic: bool,
     computed: &mut BTreeMap<String, String>,
     installed_versions: &mut BTreeMap<String, Version>,
 ) -> Result<()> {
@@ -159,5 +176,5 @@ fn seed_build_dep_hashes(
     let mut plan =
         crate::solve::resolve(&build_deps, installed_versions, &Default::default(), None)
             .with_context(|| format!("resolve build dependencies for `{}`", metadata.name))?;
-    plan.compute_store_hashes_inner(target, computed, installed_versions)
+    plan.compute_store_hashes_inner(target, hermetic, computed, installed_versions)
 }

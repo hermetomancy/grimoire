@@ -122,6 +122,7 @@ pub(crate) fn parse_deps(value: &Value) -> Result<Deps> {
         Some(Value::Record { val, .. }) => {
             let mut out = BTreeMap::new();
             for (target, deps) in val.iter() {
+                crate::util::paths::validate_target_key(target, "package field `deps.build`")?;
                 out.insert(
                     target.clone(),
                     parse_dependency_list(deps, &format!("build deps for `{target}`"))?,
@@ -257,7 +258,7 @@ mod tests {
         let mut build = BTreeMap::new();
         build.insert("default".to_owned(), vec![Dependency::any("cmake")]);
         build.insert(
-            "x86_64-unknown-linux-gnu".to_owned(),
+            "linux-x86_64-gnu".to_owned(),
             vec![Dependency::any("gcc"), Dependency::any("cmake")],
         );
         let deps = Deps {
@@ -271,14 +272,14 @@ mod tests {
                 .map(|dep| dep.name)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(names("x86_64-unknown-linux-gnu"), vec!["cmake", "gcc"]);
-        assert_eq!(names("aarch64-apple-darwin"), vec!["cmake"]);
+        assert_eq!(names("linux-x86_64-gnu"), vec!["cmake", "gcc"]);
+        assert_eq!(names("macos-aarch64-darwin"), vec!["cmake"]);
     }
 
     #[test]
     fn build_for_empty_when_nothing_matches() {
         let deps = Deps::default();
-        assert!(deps.build_for("x86_64-unknown-linux-gnu").is_empty());
+        assert!(deps.build_for("linux-x86_64-gnu").is_empty());
     }
 
     #[test]
@@ -392,6 +393,17 @@ mod tests {
                 .map(|d| d.name)
                 .collect::<Vec<_>>(),
             vec!["cmake"]
+        );
+    }
+
+    #[test]
+    fn parse_deps_rejects_invalid_build_target_key() {
+        let value =
+            crate::nu::nuon_io::parse_nuon("{ build: { linxu: ['cmake'] }, runtime: [] }").unwrap();
+        let err = parse_deps(&value).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("target key `linxu`"),
+            "unexpected error: {err:#}"
         );
     }
 }

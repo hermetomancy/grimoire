@@ -26,7 +26,7 @@ fn lockfile_tracks_installs_and_removals() {
     assert_success(&build, "build hello");
     let archive = out.join(format!("hello-0.1.0-{}.tar.zst", target_triple()));
 
-    let install = run(root, &["install", archive.to_str().unwrap()]);
+    let install = run(root, &["install", archive.to_str().unwrap(), "--force"]);
     assert_success(&install, "install built archive");
 
     let lock_path = root.join("state").join("grimoire.lock.nuon");
@@ -68,7 +68,7 @@ fn hold_and_unhold_refresh_lockfile_once() {
     let archive = out.join(format!("hello-0.1.0-{}.tar.zst", target_triple()));
 
     assert_success(
-        &run(root, &["install", archive.to_str().unwrap()]),
+        &run(root, &["install", archive.to_str().unwrap(), "--force"]),
         "install hello",
     );
 

@@ -109,6 +109,8 @@ fn run(cli: Cli) -> Result<()> {
             TomeCommand::List => tome::list(),
             TomeCommand::News(args) => tome::news::news_command(args.name, args.all),
             TomeCommand::Info(args) => tome::info(args),
+            TomeCommand::Lint(args) => tome::lint(args),
+            TomeCommand::Sign(args) => tome::sign(args),
         },
         Command::Addendum { command } => match command {
             cli::AddendumCommand::Add(args) => catalog::addendum::add(args),

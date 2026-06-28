@@ -79,6 +79,10 @@ impl InstalledWorld {
         self.states.values()
     }
 
+    pub(crate) fn states(&self) -> &BTreeMap<String, PackageState> {
+        &self.states
+    }
+
     pub fn contains(&self, name: &str) -> bool {
         self.states.contains_key(name)
     }

@@ -69,6 +69,7 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
         "added tome {}",
         crate::util::output::accent(&name)
     ));
+    warn_if_unsigned_remote(&state);
     Ok(())
 }
 
@@ -120,6 +121,7 @@ pub fn update(args: TomeUpdateArgs) -> Result<()> {
         }
         let line = sync_tome_cache(&tome)?;
         report(&line);
+        warn_if_unsigned_remote(&tome);
     }
     Ok(())
 }
@@ -128,8 +130,18 @@ pub fn update_all_configured() -> Result<()> {
     for tome in sync_common::load_catalogs::<TomeState>()? {
         let line = sync_tome_cache(&tome)?;
         report(&line);
+        warn_if_unsigned_remote(&tome);
     }
     Ok(())
+}
+
+fn warn_if_unsigned_remote(tome: &TomeState) {
+    if tome.signer_pubkeys.is_empty() && !sync_common::is_local_source(&tome.url, "tome.rn") {
+        warn(&format!(
+            "tome `{}` is unsigned; runes and archives from this remote are not signature-verified",
+            tome.name
+        ));
+    }
 }
 
 pub fn remove(args: TomeRemoveArgs) -> Result<()> {

@@ -1,275 +1,206 @@
-//! Build-output lints run by `grm tome build` on each produced archive: the purity lint
-//! (baked host path *strings*) and the linkage lint (dynamic references to host libraries).
-//! Both warn by default and become fatal under `--strict`. They are complementary — the
-//! purity lint catches a host path written into the output; the linkage lint catches a host
-//! library bound *without* a baked path (configure-time feature detection, the LLVM-22 /
-//! Homebrew-zstd class), which the purity scan cannot see.
+//! `grm tome lint`: validate a local tome before committing or publishing it.
+//!
+//! Unlike [`super::verify::validate_tome_cache`] — which runs against the *synced remote* cache
+//! during `tome update` and bails on the first error — this walks a local worktree and collects
+//! *every* problem in one pass: a rune that fails to parse (a command outside the rune subset),
+//! package metadata that fails validation (an unknown field, a fixed-output package with build
+//! deps), a duplicate package name, or a malformed `tome.rn`/`packages` block. The author sees
+//! the full list at once instead of fixing one, re-running, and hitting the next.
 
 use anyhow::{Result, bail};
-use std::collections::HashSet;
-use std::io::Read;
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
-use crate::build::output::{lib_base_name, needed_libraries};
-use crate::model::IndexEntry;
-use crate::util::output::warn;
-use crate::util::paths;
+use crate::{
+    cli::TomeLintArgs,
+    model::validate_tome_name,
+    nu::runtime::EmbeddedNuRuntime,
+    util::output::{problem, report},
+};
 
-/// Host path prefixes that must never appear in a store package's output: host
-/// package-manager trees and the build's own ephemeral staging dir.
-const IMPURE_PATTERNS: &[&str] = &[
-    "/usr/local/",
-    "/opt/homebrew/",
-    "/opt/local/",
-    "/nix/store/",
-    "/var/folders/",
-];
+use super::verify::{read_tome_manifest, validate_tome_packages};
 
-/// Every impure pattern `bytes` contains, in `IMPURE_PATTERNS` order. Returns *all*
-/// matches, not the first: a benign hit (a `/usr/local/` string baked into some default)
-/// must never shadow a real one (the build's own `/var/folders/` temp dir smeared through
-/// a binary) in the same file. First-match-then-break once hid exactly that.
-fn impure_patterns_in(bytes: &[u8]) -> Vec<&'static str> {
-    IMPURE_PATTERNS
-        .iter()
-        .filter(|pattern| {
-            bytes
-                .windows(pattern.len())
-                .any(|window| window == pattern.as_bytes())
-        })
-        .copied()
-        .collect()
-}
-
-/// Post-build purity lint: scans every archive member for absolute host paths that should
-/// never be baked into a store package — host package-manager prefixes and the build's own
-/// ephemeral staging tree. A hit usually means the build linked a host library, baked a
-/// host tool path, or embedded its own temp directory instead of the final store prefix.
-/// Warns by default; `--strict` makes it fatal. The `.grimoire/` members (embedded rune
-/// source) are exempt — comments legitimately mention such paths.
-pub(super) fn archive_purity(archive: &Path, strict: bool) -> Result<()> {
-    let file = std::fs::File::open(archive)?;
-    let decoder = zstd::stream::read::Decoder::new(file)?;
-    let mut tar = tar::Archive::new(decoder);
-    let mut hits: Vec<(String, &str)> = Vec::new();
-    for entry in tar.entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?.display().to_string();
-        if path.starts_with(".grimoire/") || path.starts_with("./.grimoire/") {
-            continue;
-        }
-        let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes)?;
-        for pattern in impure_patterns_in(&bytes) {
-            hits.push((path.clone(), pattern));
-        }
-        if hits.len() >= 8 {
-            break;
-        }
+pub fn lint(args: TomeLintArgs) -> Result<()> {
+    let root = &args.path;
+    if !root.join("tome.rn").exists() {
+        bail!("{} is not a tome (missing tome.rn)", root.display());
     }
-    if hits.is_empty() {
+
+    let problems = collect_problems(root)?;
+    if problems.is_empty() {
+        let runes = root.join("runes");
+        let count = rune_files(&runes).map(|v| v.len()).unwrap_or(0);
+        report(&format!(
+            "tome at {} is clean ({count} runes)",
+            root.display()
+        ));
         return Ok(());
     }
-    let listing: Vec<String> = hits
-        .iter()
-        .map(|(path, pattern)| format!("{path} contains `{pattern}`"))
-        .collect();
-    if strict {
-        bail!(
-            "impure build output ({}); the package bakes host paths that will not exist on \
-             other machines",
-            listing.join("; ")
-        );
+
+    for p in &problems {
+        problem(p);
     }
-    for line in &listing {
-        warn(&format!("impure build output: {line}"));
-    }
-    Ok(())
+    bail!("{} problem(s) found in {}", problems.len(), root.display());
 }
 
-/// Library base names every binary may link without a declared dependency: the libc floor
-/// (AGENTS §5) and the platform runtime. Matched against `lib_base_name` of a bare soname.
-const LIBC_FLOOR: &[&str] = &[
-    "c",
-    "m",
-    "pthread",
-    "dl",
-    "rt",
-    "util",
-    "resolv",
-    "nsl",
-    "crypt",
-    "anl",
-    "gcc_s",
-    "ld-linux",
-    "ld-linux-x86-64",
-    "ld-linux-aarch64",
-    "ld-musl-x86_64",
-    "ld-musl-aarch64",
-    "System",
-    "c++",
-    "c++abi",
-    "objc",
-    "dyld",
-];
+/// Collects every lint problem in the tome rooted at `root`, as human-readable lines. An empty
+/// vec means the tome is clean. Used by both `tome lint` (which prints them) and `tome sign`
+/// (which refuses to sign when any exist). Returns `Err` only for an I/O failure reading the
+/// tree, not for lint findings — those are the returned strings.
+pub(super) fn collect_problems(root: &Path) -> Result<Vec<String>> {
+    let mut problems = Vec::new();
 
-/// Absolute Mach-O install-name prefixes that are the macOS platform floor (dyld shared cache
-/// and SDK), allowed without a declared dependency. Deliberately narrow: arbitrary `/usr/lib`
-/// libraries (zlib, ncurses, libedit, libiconv, …) are *not* the floor — §5 requires those packaged
-/// in the store or eliminated at the source. Adding a `/usr/lib` library here is an exception, and
-/// per the prime directive an exception is a last resort, never a shortcut around packaging work.
-const MACOS_SYSTEM_PREFIXES: &[&str] = &[
-    "/usr/lib/libSystem",
-    "/usr/lib/system/",
-    "/usr/lib/libc++",
-    "/usr/lib/libobjc",
-    "/System/Library/",
-];
-
-/// Archive paths whose members are scanned for dynamic-library references.
-fn is_link_scanned(path: &str) -> bool {
-    let path = path.strip_prefix("./").unwrap_or(path);
-    ["bin/", "sbin/", "libexec/", "lib/", "lib64/"]
-        .iter()
-        .any(|dir| path.starts_with(dir))
-}
-
-/// Whether a dynamic-library reference `name` (a `DT_NEEDED` soname or `LC_LOAD_DYLIB` install
-/// name) will bind to a *host* library at runtime — the violation. A reference is fine when it
-/// is package-internal (`@rpath`/`@loader_path`), an absolute store path, a macOS platform-floor
-/// library, the libc floor, or provided by a managed (installed) package. Anything else resolves
-/// from the host loader, which is exactly the impurity the lint exists to catch.
-fn links_off_store(name: &str, store_root: Option<&Path>, managed: &HashSet<String>) -> bool {
-    if name.starts_with("@rpath")
-        || name.starts_with("@loader_path")
-        || name.starts_with("@executable_path")
-    {
-        return false;
-    }
-    if name.starts_with('/') {
-        if let Some(root) = store_root
-            && Path::new(name).starts_with(root)
-        {
-            return false;
-        }
-        return !MACOS_SYSTEM_PREFIXES
-            .iter()
-            .any(|prefix| name.starts_with(prefix));
-    }
-    match lib_base_name(name) {
-        Some(base) => !(LIBC_FLOOR.contains(&base.as_str()) || managed.contains(&base)),
-        None => false,
-    }
-}
-
-/// Post-build linkage lint: parses every Mach-O / ELF binary in the archive and flags dynamic
-/// references that will bind to a host library at runtime — a linked library that is neither the
-/// libc floor nor provided by any managed (installed) package, or an absolute host install name.
-/// This catches the class the purity scan misses: a host library linked *without* a baked path
-/// string. Warns by default; `--strict` makes it fatal. Static linkage leaves no dynamic
-/// reference, so this narrows the host-leak class rather than closing it.
-pub(super) fn archive_linkage(archive: &Path, entry: &IndexEntry, strict: bool) -> Result<()> {
-    let store_root = paths::store_root().ok();
-    // The managed library universe: every lib an installed package provides, plus this package's
-    // own libs (a binary may link a sibling lib in the same package). Anything a binary links that
-    // is outside this set and the libc floor is resolved from the host.
-    let world = crate::install::InstalledWorld::load_default().unwrap_or_default();
-    let mut managed: HashSet<String> = world.iter().flat_map(|state| state.libs.clone()).collect();
-    managed.extend(entry.libs.iter().cloned());
-
-    let file = std::fs::File::open(archive)?;
-    let decoder = zstd::stream::read::Decoder::new(file)?;
-    let mut tar = tar::Archive::new(decoder);
-    let mut hits: Vec<String> = Vec::new();
-    for member in tar.entries()? {
-        let mut member = member?;
-        let path = member.path()?.display().to_string();
-        if !is_link_scanned(&path) {
-            continue;
-        }
-        let mut bytes = Vec::new();
-        member.read_to_end(&mut bytes)?;
-        for lib in needed_libraries(&bytes) {
-            if links_off_store(&lib, store_root.as_deref(), &managed) {
-                hits.push(format!("{path} links `{lib}`"));
+    match read_tome_manifest(root) {
+        Ok(manifest) => {
+            if let Err(e) = validate_tome_name(&manifest.name) {
+                problems.push(format!("tome.rn: {e:#}"));
+            }
+            match &manifest.packages {
+                Some(packages) => {
+                    if let Err(e) = validate_tome_packages(packages) {
+                        problems.push(format!("tome.rn: {e:#}"));
+                    }
+                }
+                None => problems.push("tome.rn: missing required field `packages`".to_string()),
             }
         }
-        if hits.len() >= 8 {
-            break;
+        Err(e) => problems.push(format!("tome.rn: {e:#}")),
+    }
+
+    let runes_dir = root.join("runes");
+    if !runes_dir.is_dir() {
+        problems.push("missing runes/ directory".to_string());
+        return Ok(problems);
+    }
+
+    let runes = rune_files(&runes_dir)?;
+    if runes.is_empty() {
+        problems.push("runes/ contains no .rn definitions".to_string());
+        return Ok(problems);
+    }
+
+    // Map each declared package name to the first rune file that declared it, so a collision
+    // names both offenders.
+    let mut by_name: BTreeMap<String, String> = BTreeMap::new();
+    for path in &runes {
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .display()
+            .to_string();
+        match EmbeddedNuRuntime.package_metadata(path) {
+            Ok(meta) => {
+                if let Some(first) = by_name.insert(meta.name.clone(), rel.clone()) {
+                    problems.push(format!(
+                        "duplicate package name `{}` in {first} and {rel}",
+                        meta.name
+                    ));
+                }
+            }
+            Err(e) => problems.push(format!("{rel}: {e:#}")),
         }
     }
-    if hits.is_empty() {
-        return Ok(());
+
+    Ok(problems)
+}
+
+/// The `.rn` files directly under `runes_dir`, sorted by name for stable output and a
+/// deterministic manifest. Non-`.rn` files and subdirectories are ignored.
+pub(super) fn rune_files(runes_dir: &Path) -> Result<Vec<std::path::PathBuf>> {
+    if !runes_dir.is_dir() {
+        return Ok(Vec::new());
     }
-    if strict {
-        bail!(
-            "undeclared host linkage ({}); the package links libraries that are neither a \
-             declared dependency nor the libc floor and will bind to host libraries at runtime",
-            hits.join("; ")
-        );
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(runes_dir)? {
+        let path = entry?.path();
+        if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("rn") {
+            out.push(path);
+        }
     }
-    for hit in &hits {
-        warn(&format!("undeclared host linkage: {hit}"));
-    }
-    Ok(())
+    out.sort();
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn write(path: &Path, contents: &str) {
+        std::fs::write(path, contents).unwrap();
+    }
+
     #[test]
-    fn a_benign_match_does_not_shadow_a_real_one_in_the_same_file() {
-        // The exact shape that masked the bug: a nushell binary carrying both the benign
-        // XDG default string and the build's own temp dir.
-        let bytes = b"...XDG_DATA_DIRS /usr/local/share/:/usr/share/ ... \
-                      /var/folders/yk/T/.tmpLm8MUZ/work/.grimoire-home/.cargo/foo.rs ...";
-        let matched = impure_patterns_in(bytes);
-        assert!(matched.contains(&"/usr/local/"), "{matched:?}");
+    fn clean_tome_has_no_problems() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("runes")).unwrap();
+        write(
+            &root.join("tome.rn"),
+            &crate::tome::tome_manifest_template("scratch", "scratch tome"),
+        );
+        write(
+            &root.join("runes/hello.rn"),
+            &crate::tome::rune_template("hello", "1.0.0"),
+        );
+        assert!(collect_problems(root).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reports_parse_and_schema_problems_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("runes")).unwrap();
+        write(
+            &root.join("tome.rn"),
+            &crate::tome::tome_manifest_template("scratch", "scratch tome"),
+        );
+        // A command outside the rune subset: a parse error.
+        write(
+            &root.join("runes/bad_parse.rn"),
+            "export const package = { name: \"a\", version: \"1.0.0\", sources: {} }\n\
+             export def build [ctx] { ls | str join \",\" }\n",
+        );
+        // A field that belongs under `meta`: a metadata validation error.
+        write(
+            &root.join("runes/bad_field.rn"),
+            "export const package = { name: \"b\", version: \"1.0.0\", homepage: \"https://x\", sources: {} }\n",
+        );
+        let problems = collect_problems(root).unwrap();
+        assert_eq!(
+            problems.len(),
+            2,
+            "both problems reported at once: {problems:?}"
+        );
+        assert!(problems.iter().any(|p| p.contains("bad_parse.rn")));
         assert!(
-            matched.contains(&"/var/folders/"),
-            "the real leak must not be shadowed by the benign one: {matched:?}"
+            problems
+                .iter()
+                .any(|p| p.contains("bad_field.rn") && p.contains("homepage"))
         );
     }
 
     #[test]
-    fn a_remapped_clean_binary_reports_nothing() {
-        let bytes = b"/grimoire-build/.grimoire-home/.cargo/registry/src/foo-1.0/src/lib.rs";
-        assert!(impure_patterns_in(bytes).is_empty());
-    }
-
-    #[test]
-    fn linkage_flags_host_libs_not_in_the_managed_set() {
-        let store = Path::new("/grm/store");
-        let managed: HashSet<String> = ["zstd".to_string()].into_iter().collect();
-        let off = |name: &str| links_off_store(name, Some(store), &managed);
-
-        // libc floor and managed store libs are fine.
-        assert!(!off("libc.so.6"), "libc is the floor");
-        assert!(!off("libpthread.so.0"), "pthread is the floor");
-        assert!(!off("libzstd.so.1"), "zstd is a managed (installed) lib");
-        // A package-internal or store-resident reference is fine.
-        assert!(!off("@rpath/libfoo.dylib"), "@rpath is package-internal");
-        assert!(
-            !off("/grm/store/aaaa-zstd/lib/libzstd.1.dylib"),
-            "an absolute store install name is fine"
+    fn detects_duplicate_package_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("runes")).unwrap();
+        write(
+            &root.join("tome.rn"),
+            &crate::tome::tome_manifest_template("scratch", "scratch tome"),
         );
-        // macOS platform floor is fine; arbitrary host libraries are not.
-        assert!(!off("/usr/lib/libSystem.B.dylib"), "libSystem is the floor");
-        assert!(!off("/usr/lib/libc++.1.dylib"), "libc++ is the floor");
-        assert!(
-            off("/usr/lib/libz.dylib"),
-            "host /usr/lib zlib must be a store dep (§5); it packages cleanly"
+        write(
+            &root.join("runes/one.rn"),
+            "export const package = { name: \"dup\", version: \"1.0.0\", sources: {} }\n",
         );
-        assert!(
-            off("/usr/lib/libedit.3.dylib"),
-            "host libedit must be packaged, not allowlisted"
+        write(
+            &root.join("runes/two.rn"),
+            "export const package = { name: \"dup\", version: \"2.0.0\", sources: {} }\n",
         );
+        let problems = collect_problems(root).unwrap();
         assert!(
-            off("/opt/homebrew/lib/libpng.dylib"),
-            "homebrew lib is a host leak"
+            problems
+                .iter()
+                .any(|p| p.contains("duplicate package name `dup`")),
+            "{problems:?}"
         );
-        // An undeclared, unmanaged soname binds to the host loader cache.
-        assert!(off("libpng16.so.16"), "png is neither floor nor managed");
     }
 }

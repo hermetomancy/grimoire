@@ -52,7 +52,7 @@ fn reject_bad_archive_path() {
     let out = TempDir::new().unwrap();
 
     let archive = make_bad_path_archive(out.path());
-    let install = run(root, &["install", archive.to_str().unwrap()]);
+    let install = run(root, &["install", archive.to_str().unwrap(), "--force"]);
     assert_failure_contains(
         &install,
         "archive contains unsafe paths",
@@ -67,7 +67,7 @@ fn reject_hard_link_archive() {
     let out = TempDir::new().unwrap();
 
     let archive = make_hard_link_archive(out.path());
-    let install = run(root, &["install", archive.to_str().unwrap()]);
+    let install = run(root, &["install", archive.to_str().unwrap(), "--force"]);
     assert_failure_contains(&install, "hard link", "reject hard link archive");
 }
 
@@ -80,7 +80,7 @@ fn reject_symlink_archive_with_escaping_target() {
     // A symlink pointing outside the package (`bin/badlink -> /tmp`) must be refused: internal
     // symlinks are now preserved, but an escaping target could leak host paths into the install.
     let archive = make_symlink_archive(out.path());
-    let install = run(root, &["install", archive.to_str().unwrap()]);
+    let install = run(root, &["install", archive.to_str().unwrap(), "--force"]);
     assert_failure_contains(
         &install,
         "escapes the package",
@@ -101,11 +101,31 @@ fn reject_archive_member_nested_under_symlink() {
     // `lib -> sub` is an in-package (valid) symlink, but a member `lib/evil` underneath it would
     // be written *through* the link during extraction; that whole shape must be refused.
     let archive = make_nested_symlink_archive(out.path());
-    let install = run(root, &["install", archive.to_str().unwrap()]);
+    let install = run(root, &["install", archive.to_str().unwrap(), "--force"]);
     assert_failure_contains(
         &install,
         "nested under symlink",
         "reject member nested under symlink",
+    );
+}
+
+#[test]
+fn reject_archive_with_oversized_embedded_metadata() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let out = TempDir::new().unwrap();
+    let archive = out
+        .path()
+        .join(format!("hugemeta-0.1.0-{}.tar.zst", target_triple()));
+    let mut builder = open_archive(&archive);
+    let huge = vec![b'a'; 1024 * 1024 + 1];
+    append_file(&mut builder, ".grimoire/package.nuon", &huge, 0o644);
+    finish_archive(builder);
+
+    assert_failure_contains(
+        &run(root, &["install", archive.to_str().unwrap(), "--force"]),
+        "exceeds 1048576 bytes",
+        "reject oversized embedded package metadata",
     );
 }
 
@@ -139,7 +159,7 @@ fn source_build_preserves_internal_symlink() {
     assert_success(&build, "build package with internal symlink");
 
     let archive = out.join(format!("aliased-0.1.0-{}.tar.zst", target_triple()));
-    let install = run(root, &["install", archive.to_str().unwrap()]);
+    let install = run(root, &["install", archive.to_str().unwrap(), "--force"]);
     assert_success(&install, "install package with internal symlink");
 
     // The alias is preserved as a symlink in the installed package, not dereferenced into a copy.
@@ -166,7 +186,7 @@ fn install_safe_symlink_archive() {
     let out = TempDir::new().unwrap();
 
     let archive = make_safe_symlink_archive(out.path());
-    let install = run(root, &["install", archive.to_str().unwrap()]);
+    let install = run(root, &["install", archive.to_str().unwrap(), "--force"]);
     assert_success(&install, "install package with safe internal symlink");
 
     let alias = installed_store_dir(root, "safelink")
@@ -187,7 +207,7 @@ fn reject_unsafe_symlink_archive() {
     let out = TempDir::new().unwrap();
 
     let archive = make_unsafe_symlink_archive(out.path());
-    let install = run(root, &["install", archive.to_str().unwrap()]);
+    let install = run(root, &["install", archive.to_str().unwrap(), "--force"]);
     assert_failure_contains(
         &install,
         "escapes the package",
@@ -261,7 +281,7 @@ fn reject_bad_archive_metadata() {
         "{format: 1, name: \"notarget\", version: \"0.1.0\", bins: {default: {notarget: \"bin/notarget\"}}}\n",
     );
     assert_failure_contains(
-        &run(root, &["install", notarget.to_str().unwrap()]),
+        &run(root, &["install", notarget.to_str().unwrap(), "--force"]),
         "missing required field `target`",
         "reject archive missing target",
     );
@@ -272,8 +292,11 @@ fn reject_bad_archive_metadata() {
         "{format: 1, name: \"wrongtarget\", version: \"0.1.0\", target: \"wrong-target\", bins: {default: {wrongtarget: \"bin/wrongtarget\"}}}\n",
     );
     assert_failure_contains(
-        &run(root, &["install", wrong_target.to_str().unwrap()]),
-        "does not match current target",
+        &run(
+            root,
+            &["install", wrong_target.to_str().unwrap(), "--force"],
+        ),
+        "is not a supported triple",
         "reject wrong-target archive",
     );
 
@@ -285,7 +308,10 @@ fn reject_bad_archive_metadata() {
         ),
     );
     assert_failure_contains(
-        &run(root, &["install", bad_bin_path.to_str().unwrap()]),
+        &run(
+            root,
+            &["install", bad_bin_path.to_str().unwrap(), "--force"],
+        ),
         "must not contain empty or parent components",
         "reject bad bin path",
     );
@@ -298,7 +324,7 @@ fn reject_bad_archive_metadata() {
         ),
     );
     assert_failure_contains(
-        &run(root, &["install", bad_version.to_str().unwrap()]),
+        &run(root, &["install", bad_version.to_str().unwrap(), "--force"]),
         "package metadata field `version` must be a string",
         "reject non-string version",
     );
@@ -311,7 +337,7 @@ fn reject_bad_archive_metadata() {
         ),
     );
     assert_failure_contains(
-        &run(root, &["install", bad_bins.to_str().unwrap()]),
+        &run(root, &["install", bad_bins.to_str().unwrap(), "--force"]),
         "package field `bins` must be a record",
         "reject non-record bins",
     );

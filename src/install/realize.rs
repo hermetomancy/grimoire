@@ -4,8 +4,7 @@
 use anyhow::{Context, Result, bail};
 use semver::Version;
 use std::{
-    fs::{self, File},
-    io::Read,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -13,7 +12,7 @@ use crate::{
     archive,
     install::lock,
     model::{
-        Dependency, PackageMetadata, PackageState, parse_version_relaxed,
+        Dependency, PackageMetadata, PackageState, embedded_store_hash, parse_version_relaxed,
         validate_relative_package_path, validate_sha256, validate_target,
     },
     nu::nuon_io,
@@ -359,20 +358,9 @@ pub(crate) fn cached_build_archive(
 }
 
 pub(crate) fn inspect_archive(path: &Path) -> Result<PackageMetadata> {
-    let file = File::open(path)?;
-    let decoder = zstd::stream::read::Decoder::new(file)?;
-    let mut archive = tar::Archive::new(decoder);
-
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        if normalize_archive_path(&entry.path()?) == ".grimoire/package.nuon" {
-            let mut text = String::new();
-            entry.read_to_string(&mut text)?;
-            return PackageMetadata::from_value(nuon_io::parse_nuon(&text)?, true);
-        }
-    }
-
-    bail!("package archive is missing .grimoire/package.nuon");
+    let text = archive::validate_archive_paths_capturing(path, Some(".grimoire/package.nuon"))?
+        .context("package archive is missing .grimoire/package.nuon")?;
+    PackageMetadata::from_value(nuon_io::parse_nuon(&text)?, true)
 }
 
 /// Resolves the absolute store directory an archive installs into and its store hash.
@@ -386,36 +374,21 @@ pub(crate) fn resolve_store_dir(
     metadata: &PackageMetadata,
     expected_hash: Option<&str>,
 ) -> Result<(PathBuf, String)> {
-    let Some(basename) = metadata.store_path.as_deref() else {
-        bail!(
-            "package `{}` metadata is missing its store_path basename",
-            metadata.name
-        );
-    };
-    validate_relative_package_path(basename, "metadata store_path")?;
-    let suffix = format!("-{}-{}", metadata.name, metadata.version);
-    let Some(hash) = basename.strip_suffix(&suffix) else {
-        bail!(
-            "package `{}` metadata store_path `{basename}` is not `<hash>-{}-{}`",
-            metadata.name,
-            metadata.name,
-            metadata.version
-        );
-    };
-    if hash.is_empty() || hash.contains('/') {
-        bail!(
-            "package `{}` metadata store_path `{basename}` has an invalid hash component",
-            metadata.name
-        );
-    }
+    let hash = embedded_store_hash(metadata)?;
     if let Some(expected) = expected_hash
-        && hash != expected
+        && hash.as_str() != expected
     {
         bail!(
             "package `{}` embeds store hash `{hash}` but its inputs hash to `{expected}`",
             metadata.name
         );
     }
+    let basename = metadata.store_path.as_deref().with_context(|| {
+        format!(
+            "package `{}` metadata is missing its store_path basename",
+            metadata.name
+        )
+    })?;
     Ok((paths::store_root()?.join(basename), hash.to_string()))
 }
 
@@ -541,7 +514,7 @@ pub(crate) fn build_package_state(
         conflicts: metadata.conflicts.clone(),
         replaces: metadata.replaces.clone(),
         build_env: Some(crate::build::toolchain::store_build_env_id_for_target(
-            false, target,
+            true, target,
         )),
         build_only: metadata.build_only,
     }
@@ -566,11 +539,6 @@ pub(crate) fn rebuild_lock(tx: &mut Transaction, world: &InstalledWorld) -> Resu
         });
     }
     lock::rebuild(world)
-}
-
-pub(crate) fn normalize_archive_path(path: &Path) -> String {
-    let text = path.to_string_lossy();
-    text.strip_prefix("./").unwrap_or(&text).to_owned()
 }
 
 pub(crate) fn make_executable(path: &Path) -> Result<()> {

@@ -10,7 +10,10 @@ use std::{
 };
 
 use crate::{
-    archive,
+    archive::{
+        self, BoundedReader, MAX_ARCHIVE_DECOMPRESSED_BYTES, MAX_ARCHIVE_MEMBERS,
+        MAX_CAPTURED_MEMBER_BYTES,
+    },
     cli::TomeBuildArgs,
     install,
     model::{IndexEntry, PackageIndex, validate_package_name},
@@ -19,7 +22,7 @@ use crate::{
     util::paths,
 };
 
-use super::lint;
+use super::output_lint;
 
 /// Builds a tome's rune into a `.tar.zst` inside the tome's git-untracked publish directory
 /// (`dist/`) and registers (or replaces) its entry in the publish directory's `index.nuon`. The
@@ -44,8 +47,10 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
     fs::create_dir_all(&dist_dir)?;
     let index_path = dist_dir.join(&packages.index);
 
+    let hermetic = !args.bootstrap && !args.impure;
+
     if args.index {
-        let catalog = rebuild_index(&dist_dir)?;
+        let catalog = rebuild_index_with_mode(&dist_dir, hermetic)?;
         nuon_io::write_nuon(&index_path, &catalog.to_value())?;
         report(&format!(
             "rebuilt index with {} package(s) in {}",
@@ -87,7 +92,7 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
         &index_path,
         args.all,
         args.bootstrap,
-        args.hermetic,
+        hermetic,
         args.target.as_deref(),
         args.force,
         args.strict,
@@ -149,9 +154,9 @@ pub(crate) fn build_runes(
         for (store_hash, entry, archive) in
             build_rune_into(root, name, dist_dir, bootstrap, hermetic, target)?
         {
-            lint::archive_purity(&archive, strict)
+            output_lint::archive_purity(&archive, strict)
                 .with_context(|| format!("purity lint for `{}`", entry.name))?;
-            lint::archive_linkage(&archive, &entry, strict)
+            output_lint::archive_linkage(&archive, &entry, strict)
                 .with_context(|| format!("linkage lint for `{}`", entry.name))?;
             report(&format!(
                 "built {} {}",
@@ -261,8 +266,8 @@ pub(crate) fn build_rune_into(
 
 /// Rebuilds the package index from every `.tar.zst` archive already present in `dist_dir`.
 /// Each archive is inspected for its embedded metadata and rune so the index entry is identical
-/// to what a fresh build would produce.
-pub(crate) fn rebuild_index(dist_dir: &Path) -> Result<PackageIndex> {
+/// to what a fresh build would produce in the selected build mode.
+pub(crate) fn rebuild_index_with_mode(dist_dir: &Path, hermetic: bool) -> Result<PackageIndex> {
     let mut entries = std::collections::BTreeMap::new();
     for entry in fs::read_dir(dist_dir)
         .with_context(|| format!("read dist directory {}", dist_dir.display()))?
@@ -273,7 +278,7 @@ pub(crate) fn rebuild_index(dist_dir: &Path) -> Result<PackageIndex> {
         if !name.ends_with(".tar.zst") {
             continue;
         }
-        let (store_hash, index_entry) = read_archive_index_entry(&path)
+        let (store_hash, index_entry) = read_archive_index_entry_with_mode(&path, hermetic)
             .with_context(|| format!("index archive {}", path.display()))?;
         report(&format!(
             "indexed {} {}",
@@ -285,43 +290,54 @@ pub(crate) fn rebuild_index(dist_dir: &Path) -> Result<PackageIndex> {
     Ok(PackageIndex { entries })
 }
 
-/// Reads an existing archive and produces the `(store_hash, IndexEntry)` that would describe it.
-pub(crate) fn read_archive_index_entry(path: &Path) -> Result<(String, IndexEntry)> {
+/// Reads an existing archive and produces the `(store_hash, IndexEntry)` that would describe it
+/// in the selected build mode.
+pub(crate) fn read_archive_index_entry_with_mode(
+    path: &Path,
+    hermetic: bool,
+) -> Result<(String, IndexEntry)> {
     archive::validate_archive_paths(path)
         .with_context(|| format!("validate archive {}", path.display()))?;
 
     let file = fs::File::open(path).with_context(|| format!("open archive {}", path.display()))?;
     let decoder = zstd::stream::read::Decoder::new(file)
         .with_context(|| format!("decode archive {}", path.display()))?;
+    let decoder = BoundedReader::new(
+        decoder,
+        MAX_ARCHIVE_DECOMPRESSED_BYTES,
+        "archive decompressed stream",
+    );
     let mut archive = tar::Archive::new(decoder);
 
     let mut metadata = None;
     let mut rune_bytes = None;
     let mut group_runes: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
-    for entry in archive.entries().context("read archive entries")? {
-        let mut entry = entry?;
+    for (members, entry) in archive
+        .entries()
+        .context("read archive entries")?
+        .enumerate()
+    {
+        if members >= MAX_ARCHIVE_MEMBERS {
+            bail!("archive contains more than {MAX_ARCHIVE_MEMBERS} members");
+        }
+        let entry = entry?;
         let path_str = entry.path()?.to_string_lossy().to_string();
         let normalized = path_str.strip_prefix("./").unwrap_or(&path_str);
 
         if normalized == ".grimoire/package.nuon" {
-            let mut text = String::new();
-            entry.read_to_string(&mut text)?;
+            let text = read_limited_text(entry, ".grimoire/package.nuon")?;
             metadata = Some(
                 crate::model::PackageMetadata::from_value(nuon_io::parse_nuon(&text)?, true)
                     .with_context(|| format!("parse metadata in {}", path.display()))?,
             );
         } else if normalized == ".grimoire/rune.rn" {
-            let mut bytes = Vec::new();
-            entry.read_to_end(&mut bytes)?;
-            rune_bytes = Some(bytes);
+            rune_bytes = Some(read_limited_bytes(entry, ".grimoire/rune.rn")?);
         } else if let Some(member) = normalized
             .strip_prefix(".grimoire/group/")
             .and_then(|rest| rest.strip_suffix(".rn"))
         {
-            let mut bytes = Vec::new();
-            entry.read_to_end(&mut bytes)?;
-            group_runes.insert(member.to_owned(), bytes);
+            group_runes.insert(member.to_owned(), read_limited_bytes(entry, normalized)?);
         }
     }
 
@@ -343,10 +359,12 @@ pub(crate) fn read_archive_index_entry(path: &Path) -> Result<(String, IndexEntr
         .ok_or_else(|| anyhow::anyhow!("metadata in {} is missing target", path.display()))?;
 
     let store_hash = if group_runes.is_empty() {
-        crate::store::closure::store_hash_for_rune_bytes_with_target(
+        let build_env = crate::build::toolchain::store_build_env_id_for_target(hermetic, &target);
+        crate::store::closure::store_hash_for_rune_bytes_with_target_and_env(
             &rune_bytes,
             &metadata,
             &target,
+            &build_env,
         )
         .with_context(|| format!("compute store hash for {}", path.display()))?
     } else {
@@ -360,18 +378,32 @@ pub(crate) fn read_archive_index_entry(path: &Path) -> Result<(String, IndexEntr
                 Ok((member_metadata, bytes))
             })
             .collect::<Result<_>>()?;
-        crate::store::closure::split_member_hashes_with_target(&group, &target, &BTreeMap::new())
-            .with_context(|| format!("compute split group hashes for {}", path.display()))?
-            .get(&metadata.name)
-            .cloned()
-            .with_context(|| {
-                format!(
-                    "archive {} names `{}`, which is not a member of its embedded group",
-                    path.display(),
-                    metadata.name
-                )
-            })?
+        let build_env = crate::build::toolchain::store_build_env_id_for_target(hermetic, &target);
+        crate::store::closure::split_member_hashes_with_target_and_env(
+            &group,
+            &target,
+            &build_env,
+            &BTreeMap::new(),
+        )
+        .with_context(|| format!("compute split group hashes for {}", path.display()))?
+        .get(&metadata.name)
+        .cloned()
+        .with_context(|| {
+            format!(
+                "archive {} names `{}`, which is not a member of its embedded group",
+                path.display(),
+                metadata.name
+            )
+        })?
     };
+    let embedded_hash = crate::model::embedded_store_hash(&metadata)
+        .with_context(|| format!("validate embedded store path in {}", path.display()))?;
+    if embedded_hash != store_hash {
+        bail!(
+            "archive {} embeds store hash `{embedded_hash}` but its inputs hash to `{store_hash}`",
+            path.display()
+        );
+    }
 
     let archive_hash = crate::archive::archive_hash(path)
         .with_context(|| format!("hash archive {}", path.display()))?;
@@ -396,6 +428,23 @@ pub(crate) fn read_archive_index_entry(path: &Path) -> Result<(String, IndexEntr
             replaces: metadata.replaces,
         },
     ))
+}
+
+fn read_limited_text<R: Read>(entry: tar::Entry<'_, R>, label: &str) -> Result<String> {
+    let bytes = read_limited_bytes(entry, label)?;
+    String::from_utf8(bytes).with_context(|| format!("archive member `{label}` is not utf-8"))
+}
+
+fn read_limited_bytes<R: Read>(mut entry: tar::Entry<'_, R>, label: &str) -> Result<Vec<u8>> {
+    let mut limited = entry.by_ref().take(MAX_CAPTURED_MEMBER_BYTES + 1);
+    let mut bytes = Vec::new();
+    limited
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read archive member `{label}`"))?;
+    if bytes.len() as u64 > MAX_CAPTURED_MEMBER_BYTES {
+        bail!("archive member `{label}` exceeds {MAX_CAPTURED_MEMBER_BYTES} bytes");
+    }
+    Ok(bytes)
 }
 
 /// The rune base names (without the `.rn` extension) in a tome's `runes/` directory, sorted for
