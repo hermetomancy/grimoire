@@ -256,12 +256,15 @@ impl PackageMetadata {
         }
 
         let mut sources = Record::new();
-        for (name, source) in &self.sources {
+        for (name, source) in self.sources_for(target) {
             let mut entry = Record::new();
-            entry.push("url", Value::string(&source.url, Span::unknown()));
-            entry.push("sha256", Value::string(&source.sha256, Span::unknown()));
-            if let Some(platform) = &source.platform {
+            entry.push("url", Value::string(source.url, Span::unknown()));
+            entry.push("sha256", Value::string(source.sha256, Span::unknown()));
+            if let Some(platform) = source.platform {
                 entry.push("platform", Value::string(platform, Span::unknown()));
+            }
+            if let Some(host_libc) = source.host_libc {
+                entry.push("host_libc", Value::string(host_libc, Span::unknown()));
             }
             sources.push(name, Value::record(entry, Span::unknown()));
         }
@@ -574,5 +577,63 @@ mod tests {
 
         let resolved: Vec<_> = meta.bins_for("macos-aarch64-darwin").into_keys().collect();
         assert_eq!(resolved, vec!["sed"]);
+    }
+
+    #[test]
+    fn archive_metadata_writes_only_selected_sources() {
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            "linux".to_owned(),
+            Source {
+                url: "https://example.com/linux.tar.xz".to_owned(),
+                sha256: "sha256:".to_owned() + &"a".repeat(64),
+                platform: Some("linux-*".to_owned()),
+                host_libc: Some(crate::util::paths::host_libc().to_owned()),
+            },
+        );
+        sources.insert(
+            "mac".to_owned(),
+            Source {
+                url: "https://example.com/mac.tar.xz".to_owned(),
+                sha256: "sha256:".to_owned() + &"b".repeat(64),
+                platform: Some("macos-*".to_owned()),
+                host_libc: None,
+            },
+        );
+        let meta = PackageMetadata {
+            name: "pkg".to_owned(),
+            version: "1.0.0".to_owned(),
+            target: None,
+            store_path: None,
+            targets: Vec::new(),
+            fixed_output: false,
+            build_only: false,
+            summary: None,
+            bins: BTreeMap::new(),
+            sources,
+            deps: Deps::default(),
+            build_flags: BTreeMap::new(),
+            provides: Vec::new(),
+            libs: Vec::new(),
+            notes: Vec::new(),
+            upstream_version: None,
+            conflicts: Vec::new(),
+            replaces: Vec::new(),
+            split_from: None,
+            files: Vec::new(),
+        };
+
+        let Value::Record { val, .. } = meta.archive_value("linux-x86_64-musl", None) else {
+            panic!("archive metadata must be a record");
+        };
+        let Some(Value::Record { val: sources, .. }) = val.get("sources") else {
+            panic!("archive metadata must contain source records");
+        };
+        assert!(sources.get("linux").is_some());
+        assert!(sources.get("mac").is_none());
+        let Some(Value::Record { val: linux, .. }) = sources.get("linux") else {
+            panic!("linux source must be a record");
+        };
+        assert!(linux.get("host_libc").is_some());
     }
 }

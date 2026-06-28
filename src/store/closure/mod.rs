@@ -1,11 +1,11 @@
-//! Content-addressing a package over its dependency closure.
+//! Content-addressing a package over its dependency closures.
 //!
-//! A compiled package's store hash folds in the store hashes of its runtime dependencies, so the
-//! whole closure is captured transitively (Nix-style). Computing that address requires resolving
-//! each dependency to its rune and recursing — a pure walk over the rune graph, with no building or
-//! installing. This is what `grm tome build` records in the index and what tests predict via the
-//! `store-hash` seam. The installer derives the same address incrementally from the store hashes of
-//! the dependencies it has already installed.
+//! A compiled package's store hash folds in the store hashes of its runtime and build
+//! dependencies, so the whole closure is captured transitively (Nix-style). Computing that address
+//! requires resolving each dependency to its rune and recursing — a pure walk over the rune graph,
+//! with no building or installing. This is what `grm tome build` records in the index and what
+//! tests predict via the `store-hash` seam. The installer derives the same address incrementally
+//! from the store hashes of the dependencies it has already installed.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -49,29 +49,37 @@ fn disk_group_parts(group: &build::split::SplitGroup) -> Result<Vec<GroupPart>> 
 }
 
 /// Computes the content address (store hash) of the package named `name`, resolving its runtime
-/// dependency closure to store hashes.
+/// and build dependency closures to store hashes.
 pub fn store_hash(name: &str) -> Result<String> {
     Walker::new()?.of_name(name, &VersionReq::STAR)
 }
 
-/// Like [`store_hash`], but for a specific rune file (e.g. a `grm build <path>`), so the exact rune
-/// given is hashed rather than whatever `find_rune` would resolve for its name. `resolved` is the
-/// known dependency closure (see [`installed_resolved`]); it only affects split-member addressing
-/// and is ignored for ordinary packages, so callers without one pass an empty map.
-pub fn store_hash_for_rune(rune: &Path, resolved: &BTreeMap<String, String>) -> Result<String> {
-    let mut walker = Walker::new()?;
-    walker.resolved = resolved.clone();
-    let metadata = walker.metadata(rune)?;
-    walker.of_rune(&metadata.name, rune)
-}
-
-/// Like [`store_hash_for_rune`], but for an explicit target triple instead of the host default.
+/// Computes the content address for a specific rune file and explicit target triple, so the exact
+/// rune given is hashed rather than whatever `find_rune` would resolve for its name.
 pub fn store_hash_for_rune_with_target(
     rune: &Path,
     target: &str,
     resolved: &BTreeMap<String, String>,
 ) -> Result<String> {
+    store_hash_for_rune_with_target_and_env(
+        rune,
+        target,
+        &toolchain::store_build_env_id_for_target(false, target),
+        resolved,
+    )
+}
+
+/// Like [`store_hash_for_rune_with_target`], but with the exact build-environment identity the
+/// caller will use. Standalone `--hermetic` builds pass a distinct identity so their archives never
+/// share a store path with a build that could see the ambient POSIX PATH tail.
+pub fn store_hash_for_rune_with_target_and_env(
+    rune: &Path,
+    target: &str,
+    build_env: &str,
+    resolved: &BTreeMap<String, String>,
+) -> Result<String> {
     let mut walker = Walker::with_target(target)?;
+    walker.build_env = build_env.to_string();
     walker.resolved = resolved.clone();
     let metadata = walker.metadata(rune)?;
     walker.of_rune(&metadata.name, rune)
@@ -108,7 +116,24 @@ pub fn split_member_hashes_with_target(
     target: &str,
     resolved: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>> {
+    split_member_hashes_with_target_and_env(
+        group,
+        target,
+        &toolchain::store_build_env_id_for_target(false, target),
+        resolved,
+    )
+}
+
+/// Like [`split_member_hashes_with_target`], but with the exact build-environment identity the
+/// caller will use for the shared group build.
+pub fn split_member_hashes_with_target_and_env(
+    group: &[(crate::model::PackageMetadata, Vec<u8>)],
+    target: &str,
+    build_env: &str,
+    resolved: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
     let mut walker = Walker::with_target(target)?;
+    walker.build_env = build_env.to_string();
     walker.resolved = resolved.clone();
     walker.group_hashes(&group_parts(group))
 }
@@ -124,10 +149,11 @@ fn group_parts(group: &[(crate::model::PackageMetadata, Vec<u8>)]) -> Vec<GroupP
         .collect()
 }
 
-/// Computes the store hash for a rune whose dependency closure has already been resolved.
+/// Computes the store hash for a rune whose runtime dependency closure has already been resolved.
 /// `dep_hashes` are the store hashes of the rune's platform-filtered runtime deps **in
 /// declaration order** — the resolver may have expanded capability names to concrete
-/// providers, so a by-name lookup against the rune's raw dep names is impossible here.
+/// providers, so a by-name lookup against the rune's raw dep names is impossible here. Build deps
+/// are resolved by the closure walker because they are not part of the runtime solver plan.
 /// This is used by the solver after version resolution to compute hashes eagerly.
 pub fn store_hash_for_rune_with_deps(
     rune: &Path,
@@ -170,10 +196,15 @@ pub fn store_hash_for_rune_with_deps(
 
     let rune_bytes =
         std::fs::read(rune).with_context(|| format!("read rune {}", rune.display()))?;
+    let mut walker = Walker::with_target(target)?;
+    walker.build_env = build_env.to_string();
+    walker.resolved = resolved.clone();
+    let build_dep_hashes = walker.build_dep_hashes(&metadata)?;
     Ok(store::store_hash_for_metadata(
         &metadata,
         &rune_bytes,
         dep_hashes,
+        &build_dep_hashes,
         target,
         build_env,
     ))
@@ -204,10 +235,9 @@ impl Walker {
     fn with_target(target: &str) -> Result<Self> {
         Ok(Self {
             target: target.to_string(),
-            // Compiled packages fold the host toolchain identity into their hash; fixed-output
-            // packages ignore it. An absent toolchain hashes as empty (only fixed-output packages
-            // can be addressed without one).
-            build_env: toolchain::build_env_id().unwrap_or_default(),
+            // Compiled packages fold the host toolchain identity and PATH mode into their hash;
+            // fixed-output packages ignore it.
+            build_env: toolchain::store_build_env_id_for_target(false, target),
             cache: HashMap::new(),
             stack: Vec::new(),
             resolved: BTreeMap::new(),
@@ -319,8 +349,8 @@ impl Walker {
         for part in parts {
             self.stack.push(part.name.clone());
         }
-        let dep_hashes_result: Result<Vec<String>> = (|| {
-            let mut dep_hashes = Vec::new();
+        let input_hashes_result: Result<(Vec<String>, Vec<String>)> = (|| {
+            let mut runtime_dep_hashes = Vec::new();
             for part in parts {
                 for dep in &part.metadata.deps.runtime {
                     if !dep.matches_platform(&self.target) {
@@ -330,17 +360,18 @@ impl Walker {
                         continue;
                     }
                     let hash = self.external_hash(&dep.name, &dep.req)?;
-                    if !dep_hashes.contains(&hash) {
-                        dep_hashes.push(hash);
+                    if !runtime_dep_hashes.contains(&hash) {
+                        runtime_dep_hashes.push(hash);
                     }
                 }
             }
-            Ok(dep_hashes)
+            let build_dep_hashes = self.build_dep_hashes(&parent.metadata)?;
+            Ok((runtime_dep_hashes, build_dep_hashes))
         })();
         for _ in parts {
             self.stack.pop();
         }
-        let dep_hashes = dep_hashes_result?;
+        let (runtime_dep_hashes, build_dep_hashes) = input_hashes_result?;
 
         let rune_hashes: BTreeMap<String, String> = parts
             .iter()
@@ -349,7 +380,8 @@ impl Walker {
         let group_hash = store::split_group_hash(
             &parent.metadata,
             &rune_hashes,
-            &dep_hashes,
+            &runtime_dep_hashes,
+            &build_dep_hashes,
             &self.target,
             &self.build_env,
         );
@@ -380,28 +412,41 @@ impl Walker {
         self.stack.push(name.to_string());
         // Platform-filtered, declaration order — exactly the dep list the resolver hands to
         // `store_hash_for_rune_with_deps`, so both paths address identically.
-        let dep_hashes_result: Result<Vec<String>> = (|| {
-            let mut dep_hashes = Vec::with_capacity(metadata.deps.runtime.len());
+        let input_hashes_result: Result<(Vec<String>, Vec<String>)> = (|| {
+            let mut runtime_dep_hashes = Vec::with_capacity(metadata.deps.runtime.len());
             for dep in &metadata.deps.runtime {
                 if !dep.matches_platform(&self.target) {
                     continue;
                 }
-                dep_hashes.push(self.of_name(&dep.name, &dep.req)?);
+                runtime_dep_hashes.push(self.of_name(&dep.name, &dep.req)?);
             }
-            Ok(dep_hashes)
+            let build_dep_hashes = self.build_dep_hashes(metadata)?;
+            Ok((runtime_dep_hashes, build_dep_hashes))
         })();
         self.stack.pop();
-        let dep_hashes = dep_hashes_result?;
+        let (runtime_dep_hashes, build_dep_hashes) = input_hashes_result?;
 
         let hash = store::store_hash_for_metadata(
             metadata,
             rune_bytes,
-            &dep_hashes,
+            &runtime_dep_hashes,
+            &build_dep_hashes,
             &self.target,
             &self.build_env,
         );
         self.cache.insert(name.to_string(), hash.clone());
         Ok(hash)
+    }
+
+    fn build_dep_hashes(
+        &mut self,
+        metadata: &crate::model::PackageMetadata,
+    ) -> Result<Vec<String>> {
+        let mut hashes = Vec::new();
+        for dep in metadata.deps.build_for(&self.target) {
+            hashes.push(self.of_name(&dep.name, &dep.req)?);
+        }
+        Ok(hashes)
     }
 
     fn metadata(&self, rune: &Path) -> Result<crate::model::PackageMetadata> {
@@ -540,6 +585,7 @@ mod tests {
             &parent,
             &rune_hashes,
             &["DEPHASH".to_string()],
+            &[],
             "linux-x86_64-gnu",
             "env",
         );

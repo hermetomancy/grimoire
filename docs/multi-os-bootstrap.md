@@ -90,12 +90,13 @@ Do you build the compiler + C++ stdlib, or does the OS hand them to you?
 
 | Mechanism | File | What it does |
 |---|---|---|
-| Per-target build env | `src/build/mod.rs` `build_env_for_target` | Branches on `is_musl_target` (inject the musl floor) and `macos-` (inject `SDKROOT`). The single funnel for OS-specific env. |
+| Per-target build env | `src/build/env.rs` `build_env_for_target` | Branches on `is_musl_target` (inject the musl floor) and `macos-` (inject `SDKROOT`). The single funnel for OS-specific env. |
+| Store build-env identity | `src/build/toolchain.rs` `store_build_env_id_for_target` | Folds compiler/tool banners, PATH mode, and the realized musl floor hashes into compiled store addresses. |
 | musl compiler retarget | `musl_target_env_vars` | `--target`/`--sysroot`/`-isystem`/`-B` + `--rtlib=compiler-rt --unwindlib=none -static` on `CFLAGS`/`CXXFLAGS`/`LDFLAGS`. |
 | musl C++ floor | `inject_libcxx_flags` | `-stdlib=libc++ -nostdinc++ -isystem <libcxx>/…` for every musl C++ build except libcxx's own. |
 | Discovery vars | `install::build_dep_env_vars` | `CPATH`/`LIBRARY_PATH`/`CMAKE_PREFIX_PATH`/`PKG_CONFIG_PATH` for declared deps (and the musl/linux-headers floor). |
 | Toolchain boundary | `core_compiler_boundary_available` | Flips from host tools (bootstrap) to the managed clang once `toolchain-wrappers` is installed. |
-| Per-OS rune branches | `llvm.rn`, `rust.rn`, `grimoire.rn` | `if ($darwin_arch \| is-empty)` (llvm), `if $is_musl` (rust/grimoire). `libcxx.rn` is Linux-only via `targets`. |
+| Per-OS rune branches | `llvm.rn`, `rust.rn`, `libcxx.rn` | `if ($darwin_arch \| is-empty)` (llvm), `if $is_musl` (rust). `libcxx.rn` is Linux-only via `targets`; `grimoire.rn` relies on the managed wrappers instead of branching. |
 | macOS SDK in the wrappers | `toolchain-wrappers.rn` (driver wrappers) | `cc`/`c++`/`gcc`/`g++` set `SDKROOT` via `xcrun` when unset, so *bare* invocations find the SDK, not just grm-driven builds. The version banner is unchanged, so `build_env_id` is unaffected. |
 
 A recurring lesson: rust's bootstrap reads the **generic** `CFLAGS`/`CPATH` (not the per-triple
@@ -104,6 +105,11 @@ musl cross-build (`build=<gnu>`, `host=target=<musl>`) the floor's musl flags le
 build-host compiles; `rust.rn` therefore **re-scopes** the floor flags onto the musl target triple
 (`CFLAGS_<musl-triple>` …) and **clears** the generic vars so the gnu helpers fall back to clean host
 flags. A new-OS port that cross-compiles will hit the same generic-vs-per-triple split.
+
+On native musl hosts, the official `*-unknown-linux-musl` Rust stage0 is still GCC-linked and needs
+`libgcc_s.so.1`. Grimoire aliases the host's `/usr/lib/libunwind.so.1` as `libgcc_s` only for that
+transient stage0 run; the Rust package it builds uses in-tree LLVM libunwind and does not retain
+that host dependency.
 
 ## Porting to a new OS — checklist
 

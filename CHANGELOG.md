@@ -14,8 +14,9 @@ heading when it is tagged.
   only as a shrinking fallback; `grm tome build --hermetic` enumerates what the floor still lacks.
 - `build_only` rune metadata: a build-only package (the managed `build-env`, `clang`, and `llvm`)
   is pinned in the store and available to source builds, but its bins stay off the active profile —
-  the managed toolchain (toybox's coreutils, clang, llvm, cmake, python3, …) is build machinery, not
-  user commands, so it no longer floods `profiles/current/bin`. A build-only package is a PATH
+  the managed toolchain/userland floor (dash, mawk, uutils, gsed, ggrep, clang, llvm, cmake,
+  python3, …) is build machinery, not user commands, so it no longer floods `profiles/current/bin`.
+  A build-only package is a PATH
   barrier: its runtime closure is never linked through it. The one exception is an explicit request —
   `grm install clang` puts clang's own bins on PATH (you asked for it by name) without dragging its
   build-only closure along. Build-only packages stay GC roots (survive `grm clean`); `grm list` marks
@@ -37,12 +38,28 @@ heading when it is tagged.
   library bound without a baked path). Warns by default, `--strict` fails the build.
 - `grm tome build --hermetic` drops the POSIX ambient PATH tail (`/usr/bin`, `/bin`) so a
   build sees only declared deps and the managed core floor — a self-hosting diagnostic that
-  surfaces silent host-userland leaks. No effect on the store hash.
+  surfaces silent host-userland leaks. Hermetic builds now have a distinct store hash from builds
+  that can see the ambient tail, so a host-userland leak cannot share an address with the clean
+  build.
 - Capability runtime deps are content-addressable: the closure walker resolves providers
   like the solver (preference → installed → first by name, deterministically).
+- Compiled package store hashes now fold in the resolved build-dependency closure, not only the
+  runtime closure. Changing a build tool's recipe or version moves every package built with it to a
+  new address. This bumps the compiled hash namespace to `grimoire-store-v5`; old installed
+  packages are treated as drifted and re-realized on demand.
+- Musl-target compiled store hashes now fold in the implicit managed floor (`musl`,
+  `linux-headers`, and `libcxx` when installed) through the build-environment identity. A package
+  built before the musl floor exists no longer shares an address with one built against the managed
+  libc/header/C++ floor.
+- `grm setup --bootstrap` now gates the self-hosting tail of setup: plain `grm setup` prepares the
+  store and shell PATH, while the explicit bootstrap flag adds the core/world tomes and installs
+  grimoire through itself.
 
 ### Changed
 
+- Rune authoring docs now make the external-command boundary explicit: missing structured
+  Nushell operations should become curated rune commands, while external invocations must come
+  from declared build deps, the package source tree, or the managed POSIX floor.
 - Dry-run plans and generation diffs colorize their change markers — `+` add (green), `-` remove
   (red), `~` change (yellow) — on a terminal; piped output keeps the bare `  + name` form byte-for-
   byte. Routed through a new `util::output::plan_item` so every plan renders identically.
@@ -66,10 +83,10 @@ heading when it is tagged.
   made configure probes mis-detect glibc-only symbols (e.g. `sem_clockwait`) and final links pull
   the host glibc CRT. The installed `musl`/`linux-headers` prefixes are also exposed through the
   usual discovery vars (`CPATH`/`LIBRARY_PATH`/`CMAKE_PREFIX_PATH`/`<DEP>_PREFIX`) for cmake and
-  pkg-config. All of it is injected as environment — like the macOS `SDKROOT` — so it never enters
-  a package's content address; discovery vars are merged after declared-dep paths (segment-deduped)
-  so an explicitly declared library keeps priority. While the floor is itself bootstrapping (musl/
-  linux-headers not yet installed) the build falls back to the prior static flags.
+  pkg-config. The realized floor store hashes are folded into the build-environment identity;
+  discovery vars are merged after declared-dep paths (segment-deduped) so an explicitly declared
+  library keeps priority. While the floor is itself bootstrapping (musl/linux-headers not yet
+  installed) the build falls back to the prior static flags at a distinct address.
 - CLI consolidated: `autoremove`, `orphans`, `unrequest`, `delete-generation`, and
   `collect-garbage` removed; removal sweeps orphans in the same transaction and demotes
   still-required packages; `switch [GEN]` activates any generation (or the previous one with
@@ -108,10 +125,37 @@ heading when it is tagged.
 
 ### Fixed
 
+- `grm tome build --all --target <triple>` now uses the requested target consistently for rune
+  ordering/filtering and for store-only realization of intermediate build outputs.
+- Source-root install dry-runs now validate target/conflict gates and compute dependency store
+  hashes like named-package dry-runs. Real source-root installs also refuse linked conflicts before
+  realizing build dependencies.
+- `grm tome build --index` now fails on an unreadable or invalid archive instead of silently
+  omitting it from the rebuilt package index.
+- Store-hash planning now derives the musl floor identity from the resolved build-dependency
+  closure, including floor packages installed earlier in the same transaction, instead of from the
+  pre-plan installed world. Source-root installs also install build deps before hashing the root.
 - Source extraction now handles codeload tag tarballs. `source_archive_kind` keyed off the URL
   suffix, so `codeload.github.com/.../tar.gz/0.9.0` (a dotted tag ref) was never recognized as a
   tarball and went silently unextracted — leaving `$ctx.sources.main.dir` null and failing the build
   with "Input type not supported." It now recognizes the `/tar.gz/<ref>` path form directly.
+- Prebuilt build dependencies from signed tomes now verify their detached archive signatures before
+  store-only installation, matching the normal linked substitute path.
+- Capability resolution now reads package capabilities through the same package-index loader as
+  normal resolution, so HTTP binhost indexes and local `dist/index.nuon` indexes expose the same
+  providers.
+- Source archive extraction now strips setuid, setgid, and sticky bits after unpacking, matching
+  package archive extraction.
+- Target-specific archive metadata now embeds only the sources selected for that target and
+  preserves `host_libc` selectors for those sources.
+- `grm setup --bootstrap` now ensures the `core` and `world` tomes specifically instead of skipping
+  bootstrap whenever any tome exists, and setup now fails loudly if the self-install step fails
+  after `/grm` is writable.
+- `grm doctor` reports a missing macOS SDK (`xcrun --show-sdk-path`) as a health problem.
+- `toolchain-wrappers` no longer assumes every non-Darwin target is musl when writing driver
+  sysroot flags.
+- `musl.rn` now asks clang for compiler-rt only when the host compiler is clang; GCC hosts use the
+  normal `libgcc` path instead of failing on an unsupported `--rtlib` flag.
 - `grm man` now generates pages for nested subcommands (`grm-pkg-install.1`,
   `grm-generation-switch.1`, …); it recursed only the top level before, so grouped subcommands had
   `--help` but no man page. Each page's synopsis uses the full `grm pkg install` invocation.

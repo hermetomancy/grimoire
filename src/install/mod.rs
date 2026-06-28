@@ -18,8 +18,8 @@ use crate::{
     cli::InstallArgs,
     profile,
     solve::{self, Plan, PlanStep},
-    util::paths,
     util::output::report,
+    util::paths,
 };
 
 pub(crate) mod lock;

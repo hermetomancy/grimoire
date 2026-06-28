@@ -12,8 +12,8 @@ use std::path::Path;
 
 use crate::build::output::{lib_base_name, needed_libraries};
 use crate::model::IndexEntry;
-use crate::util::paths;
 use crate::util::output::warn;
+use crate::util::paths;
 
 /// Host path prefixes that must never appear in a store package's output: host
 /// package-manager trees and the build's own ephemeral staging dir.

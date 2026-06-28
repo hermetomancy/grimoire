@@ -306,22 +306,21 @@ pub fn make_fake_core_tome(triple: &str) -> TempDir {
     // doctor's readiness check is just build-env's presence (its closure is the build requirement),
     // so that's all the fake core tome needs to stock.
     let mut entries = String::from("{\n  format: 2,\n    entries: {\n");
-    for package in ["build-env"] {
-        let store_hash = format!("cafef00dcafef00d-{package}");
-        let archive_name = format!("{package}-0.1.0-{triple}.tar.zst");
-        let archive = make_versioned_archive_with_hash(
-            &dist.join(&archive_name),
-            package,
-            "0.1.0",
-            triple,
-            &format!("#!/usr/bin/env sh\nprintf '{package}\\n'\n"),
-            &store_hash,
-        );
-        let archive_hash = sha256_file(&archive);
-        entries.push_str(&format!(
-            "    \"cafef00dcafef00d-{package}\": {{ name: \"{package}\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{archive_hash}\", runtime_deps: []}}\n"
-        ));
-    }
+    let package = "build-env";
+    let store_hash = format!("cafef00dcafef00d-{package}");
+    let archive_name = format!("{package}-0.1.0-{triple}.tar.zst");
+    let archive = make_versioned_archive_with_hash(
+        &dist.join(&archive_name),
+        package,
+        "0.1.0",
+        triple,
+        &format!("#!/usr/bin/env sh\nprintf '{package}\\n'\n"),
+        &store_hash,
+    );
+    let archive_hash = sha256_file(&archive);
+    entries.push_str(&format!(
+        "    \"cafef00dcafef00d-{package}\": {{ name: \"{package}\", version: \"0.1.0\", target: \"{triple}\", archive: \"{archive_name}\", archive_hash: \"{archive_hash}\", runtime_deps: []}}\n"
+    ));
     entries.push_str("  }\n}\n");
     fs::write(dist.join("index.nuon"), entries).unwrap();
 

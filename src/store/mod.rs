@@ -5,12 +5,12 @@
 //!
 //! - **Compiled packages** are *input-addressed*: the hash covers the sources, rune bytes, target,
 //!   host build environment, build flags, and — transitively — the **store hashes of the runtime
-//!   dependency closure**. Because each dependency contributes its own content address, a builder
-//!   and an installer compute identical hashes as long as they resolve the same closure.
+//!   and build dependency closures**. Because each dependency contributes its own content address,
+//!   a builder and an installer compute identical hashes as long as they resolve the same closures.
 //! - **Fixed-output packages** (`fixed_output`, the x-bin / fetch-only case) are *output-addressed*:
 //!   the hash covers only the declared source checksums (plus name/version/target). It deliberately
-//!   excludes the build environment and the dependency closure, so the same fetched artifact lands
-//!   at the same store path regardless of which host produced it — Nix's fixed-output derivation.
+//!   excludes the build environment and dependency closures, so the same fetched artifact lands at
+//!   the same store path regardless of which host produced it — Nix's fixed-output derivation.
 
 pub(crate) mod closure;
 
@@ -19,17 +19,19 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 /// Computes a package's content address from its resolved metadata, the raw rune bytes, and the
-/// store hashes of its resolved runtime dependency closure.
+/// store hashes of its resolved runtime and build dependency closures.
 ///
 /// This is the single definition of a package's store hash: the builder records it (in the archive
 /// and the published index entry) and the installer recomputes it to decide whether a prebuilt
-/// substitute matches the inputs it would otherwise build. `dep_store_hashes` are the content
-/// addresses of the package's direct runtime dependencies — each already folds in its own closure,
-/// so listing the direct ones captures the whole transitive set.
+/// substitute matches the inputs it would otherwise build. `runtime_dep_hashes` and
+/// `build_dep_hashes` are the content addresses of the package's direct dependencies in each
+/// class — each already folds in its own closure, so listing the direct ones captures the whole
+/// transitive set.
 pub fn store_hash_for_metadata(
     metadata: &PackageMetadata,
     rune_bytes: &[u8],
-    dep_store_hashes: &[String],
+    runtime_dep_hashes: &[String],
+    build_dep_hashes: &[String],
     target: &str,
     build_env: &str,
 ) -> String {
@@ -46,7 +48,8 @@ pub fn store_hash_for_metadata(
             &metadata.version,
             &metadata.sources_for(target),
             &hash_bytes(rune_bytes),
-            dep_store_hashes,
+            runtime_dep_hashes,
+            build_dep_hashes,
             &metadata.build_flags,
             target,
             build_env,
@@ -55,7 +58,7 @@ pub fn store_hash_for_metadata(
 }
 
 /// The input-addressed hash of a compiled package: sources, rune, target, build environment, build
-/// flags, and the content addresses of the runtime dependency closure.
+/// flags, and the content addresses of the runtime and build dependency closures.
 // Each argument is a distinct hash input; grouping them into a struct would only obscure that the
 // signature *is* the list of things a compiled store path depends on. Prefer [`store_hash_for_metadata`].
 #[allow(clippy::too_many_arguments)]
@@ -64,14 +67,15 @@ fn compiled_hash(
     version: &str,
     sources: &BTreeMap<String, Source>,
     rune_hash: &str,
-    dep_store_hashes: &[String],
+    runtime_dep_hashes: &[String],
+    build_dep_hashes: &[String],
     build_flags: &BTreeMap<String, String>,
     target: &str,
     build_env: &str,
 ) -> String {
     let mut hasher = Sha256::new();
 
-    hasher.update(b"grimoire-store-v4\n");
+    hasher.update(b"grimoire-store-v5\n");
     hasher.update(name.as_bytes());
     hasher.update(b"\0");
     hasher.update(version.as_bytes());
@@ -99,21 +103,24 @@ fn compiled_hash(
         hasher.update(b"\0");
     }
 
-    // Dependencies fold in by content address (sorted for determinism), so the whole closure is
-    // captured transitively without depending on resolved version strings.
-    hasher.update(b"deps\0");
-    let mut deps: Vec<&str> = dep_store_hashes.iter().map(String::as_str).collect();
+    hash_dep_hashes(&mut hasher, b"runtime_deps\0", runtime_dep_hashes);
+    hash_dep_hashes(&mut hasher, b"build_deps\0", build_dep_hashes);
+
+    truncate(hasher)
+}
+
+fn hash_dep_hashes(hasher: &mut Sha256, label: &[u8], dep_hashes: &[String]) {
+    hasher.update(label);
+    let mut deps: Vec<&str> = dep_hashes.iter().map(String::as_str).collect();
     deps.sort_unstable();
     for dep in deps {
         hasher.update(dep.as_bytes());
         hasher.update(b"\0");
     }
-
-    truncate(hasher)
 }
 
 /// The output-addressed hash of a fixed-output (fetch-only) package: name, version, target, and the
-/// declared source checksums. Excludes the build environment and the dependency closure so the same
+/// declared source checksums. Excludes the build environment and dependency closures so the same
 /// artifact resolves to the same store path on every host.
 fn fixed_output_hash(
     name: &str,
@@ -143,6 +150,7 @@ pub fn split_group_hash(
     parent: &PackageMetadata,
     group_rune_hashes: &BTreeMap<String, String>,
     external_dep_store_hashes: &[String],
+    build_dep_hashes: &[String],
     target: &str,
     build_env: &str,
 ) -> String {
@@ -162,6 +170,7 @@ pub fn split_group_hash(
         &parent.sources_for(target),
         &combined_rune_hash,
         external_dep_store_hashes,
+        build_dep_hashes,
         &parent.build_flags,
         target,
         build_env,
@@ -254,16 +263,28 @@ mod tests {
         }
     }
 
-    fn hash(meta: &PackageMetadata, deps: &[String], build_env: &str) -> String {
-        store_hash_for_metadata(meta, b"rune", deps, "linux-x86_64-gnu", build_env)
+    fn hash(
+        meta: &PackageMetadata,
+        runtime_deps: &[String],
+        build_deps: &[String],
+        build_env: &str,
+    ) -> String {
+        store_hash_for_metadata(
+            meta,
+            b"rune",
+            runtime_deps,
+            build_deps,
+            "linux-x86_64-gnu",
+            build_env,
+        )
     }
 
     #[test]
     fn hash_is_deterministic() {
         let meta = metadata("hello", false);
         let deps = vec!["aaaa".to_string()];
-        let h1 = hash(&meta, &deps, "cc: clang 17.0.0");
-        let h2 = hash(&meta, &deps, "cc: clang 17.0.0");
+        let h1 = hash(&meta, &deps, &[], "cc: clang 17.0.0");
+        let h2 = hash(&meta, &deps, &[], "cc: clang 17.0.0");
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 16);
     }
@@ -271,8 +292,8 @@ mod tests {
     #[test]
     fn build_env_changes_the_compiled_hash() {
         let meta = metadata("p", false);
-        let gcc13 = hash(&meta, &[], "cc: gcc 13");
-        let gcc14 = hash(&meta, &[], "cc: gcc 14");
+        let gcc13 = hash(&meta, &[], &[], "cc: gcc 13");
+        let gcc14 = hash(&meta, &[], &[], "cc: gcc 14");
         assert_ne!(
             gcc13, gcc14,
             "different host toolchains must resolve to different store paths"
@@ -282,34 +303,74 @@ mod tests {
     #[test]
     fn dependency_closure_changes_the_compiled_hash() {
         let meta = metadata("p", false);
-        let without = hash(&meta, &[], "e");
-        let with = hash(&meta, &["dephash".to_string()], "e");
+        let without = hash(&meta, &[], &[], "e");
+        let with = hash(&meta, &["dephash".to_string()], &[], "e");
         assert_ne!(
             without, with,
-            "a different dependency closure must change the store hash"
+            "a different runtime dependency closure must change the store hash"
+        );
+    }
+
+    #[test]
+    fn build_dependency_closure_changes_the_compiled_hash() {
+        let meta = metadata("p", false);
+        let without = hash(&meta, &[], &[], "e");
+        let with = hash(&meta, &[], &["builddephash".to_string()], "e");
+        assert_ne!(
+            without, with,
+            "a different build dependency closure must change the store hash"
+        );
+    }
+
+    #[test]
+    fn runtime_and_build_deps_are_distinct_hash_inputs() {
+        let meta = metadata("p", false);
+        let runtime = hash(&meta, &["samehash".to_string()], &[], "e");
+        let build = hash(&meta, &[], &["samehash".to_string()], "e");
+        assert_ne!(
+            runtime, build,
+            "the same dependency hash must not collide across runtime and build input classes"
+        );
+    }
+
+    #[test]
+    fn dependency_hash_order_is_deterministic() {
+        let meta = metadata("p", false);
+        assert_eq!(
+            hash(&meta, &["b".to_string(), "a".to_string()], &[], "e"),
+            hash(&meta, &["a".to_string(), "b".to_string()], &[], "e")
+        );
+        assert_eq!(
+            hash(&meta, &[], &["b".to_string(), "a".to_string()], "e"),
+            hash(&meta, &[], &["a".to_string(), "b".to_string()], "e")
         );
     }
 
     #[test]
     fn fixed_output_ignores_build_env_and_deps() {
         let meta = metadata("blob", true);
-        let base = hash(&meta, &[], "cc: gcc 13");
+        let base = hash(&meta, &[], &[], "cc: gcc 13");
         assert_eq!(
             base,
-            hash(&meta, &[], "cc: gcc 14"),
+            hash(&meta, &[], &[], "cc: gcc 14"),
             "a fixed-output package must not depend on the host toolchain"
         );
         assert_eq!(
             base,
-            hash(&meta, &["dephash".to_string()], "cc: gcc 13"),
-            "a fixed-output package must not depend on its dependency closure"
+            hash(
+                &meta,
+                &["runtimehash".to_string()],
+                &["buildhash".to_string()],
+                "cc: gcc 13"
+            ),
+            "a fixed-output package must not depend on its dependency closures"
         );
     }
 
     #[test]
     fn different_names_yield_different_hashes() {
-        let h1 = hash(&metadata("a", false), &[], "e");
-        let h2 = hash(&metadata("b", false), &[], "e");
+        let h1 = hash(&metadata("a", false), &[], &[], "e");
+        let h2 = hash(&metadata("b", false), &[], &[], "e");
         assert_ne!(h1, h2);
     }
 
@@ -320,7 +381,7 @@ mod tests {
             ("core".to_string(), "aaa".to_string()),
             ("extra".to_string(), "bbb".to_string()),
         ]);
-        let group = split_group_hash(&parent, &rune_hashes, &[], "linux-x86_64-gnu", "env");
+        let group = split_group_hash(&parent, &rune_hashes, &[], &[], "linux-x86_64-gnu", "env");
         let core = split_member_hash(&group, "core");
         let extra = split_member_hash(&group, "extra");
         assert_ne!(core, extra, "members must have distinct addresses");
@@ -344,8 +405,8 @@ mod tests {
             // e.g. the member's `files` globs changed: the parent's remainder changes too.
             ("extra".to_string(), "ccc".to_string()),
         ]);
-        let g1 = split_group_hash(&parent, &before, &[], "linux-x86_64-gnu", "env");
-        let g2 = split_group_hash(&parent, &after, &[], "linux-x86_64-gnu", "env");
+        let g1 = split_group_hash(&parent, &before, &[], &[], "linux-x86_64-gnu", "env");
+        let g2 = split_group_hash(&parent, &after, &[], &[], "linux-x86_64-gnu", "env");
         assert_ne!(g1, g2);
         assert_ne!(
             split_member_hash(&g1, "core"),
@@ -358,11 +419,28 @@ mod tests {
     fn external_deps_fold_into_the_group_hash() {
         let parent = metadata("core", false);
         let rune_hashes = BTreeMap::from([("core".to_string(), "aaa".to_string())]);
-        let without = split_group_hash(&parent, &rune_hashes, &[], "linux-x86_64-gnu", "env");
+        let without = split_group_hash(&parent, &rune_hashes, &[], &[], "linux-x86_64-gnu", "env");
         let with = split_group_hash(
             &parent,
             &rune_hashes,
             &["dephash".to_string()],
+            &[],
+            "linux-x86_64-gnu",
+            "env",
+        );
+        assert_ne!(without, with);
+    }
+
+    #[test]
+    fn build_deps_fold_into_the_group_hash() {
+        let parent = metadata("core", false);
+        let rune_hashes = BTreeMap::from([("core".to_string(), "aaa".to_string())]);
+        let without = split_group_hash(&parent, &rune_hashes, &[], &[], "linux-x86_64-gnu", "env");
+        let with = split_group_hash(
+            &parent,
+            &rune_hashes,
+            &[],
+            &["builddephash".to_string()],
             "linux-x86_64-gnu",
             "env",
         );

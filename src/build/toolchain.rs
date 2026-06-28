@@ -7,7 +7,7 @@
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     io::Read,
     path::{Path, PathBuf},
@@ -98,6 +98,66 @@ pub fn source_build_host_tools() -> Result<Vec<HostTool>> {
 pub fn build_env_id() -> Option<String> {
     static CACHE: OnceLock<Option<String>> = OnceLock::new();
     CACHE.get_or_init(compute_build_env_id).clone()
+}
+
+/// The build-environment identity folded into compiled store hashes for a concrete target and
+/// build mode. `build_env_id` captures the compiler/toolchain boundary; the PATH mode captures
+/// whether the build could see the ambient POSIX tail (`/usr/bin`, `/bin`). Musl builds also
+/// receive an implicit libc/header/C++ floor from `build_env_for_target`, so the realized floor
+/// package addresses are part of the identity even when a rune did not declare them directly.
+/// Otherwise a pre-floor build and a post-floor build could share one store hash while compiling
+/// against different libc inputs.
+pub fn store_build_env_id_for_target(hermetic: bool, target: &str) -> String {
+    let resolved = installed_floor_hashes();
+    store_build_env_id_for_target_with_resolved(hermetic, target, &resolved)
+}
+
+/// Like [`store_build_env_id_for_target`], but uses the caller's resolved dependency/floor closure
+/// instead of re-reading installed state. Planning must call this after seeding build dependencies
+/// so the content address names the floor the build will actually see, including floor packages
+/// installed earlier in the same transaction.
+pub fn store_build_env_id_for_target_with_resolved(
+    hermetic: bool,
+    target: &str,
+    resolved: &BTreeMap<String, String>,
+) -> String {
+    let mut parts = Vec::new();
+    if let Some(id) = build_env_id()
+        && !id.is_empty()
+    {
+        parts.push(id);
+    }
+    parts.push(if hermetic {
+        "path:hermetic".to_string()
+    } else {
+        "path:ambient-posix".to_string()
+    });
+    parts.extend(implicit_floor_id_parts(target, resolved));
+    parts.join(",")
+}
+
+fn installed_floor_hashes() -> BTreeMap<String, String> {
+    let Ok(world) = crate::install::InstalledWorld::load_default() else {
+        return BTreeMap::new();
+    };
+    world
+        .iter()
+        .map(|state| (state.name.clone(), state.store_hash.clone()))
+        .collect()
+}
+
+fn implicit_floor_id_parts(target: &str, resolved: &BTreeMap<String, String>) -> Vec<String> {
+    if !super::is_musl_target(target) {
+        return Vec::new();
+    }
+    ["musl", "linux-headers", "libcxx"]
+        .into_iter()
+        .filter_map(|name| {
+            resolved
+                .get(name)
+                .map(|hash| format!("floor-{name}:{hash}"))
+        })
+        .collect()
 }
 
 fn compute_build_env_id() -> Option<String> {
@@ -450,5 +510,22 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         fake_wrapper(temp.path(), "ld", "ld64-1234.5");
         assert!(managed_boundary_id_from(temp.path()).is_none());
+    }
+
+    #[test]
+    fn store_build_env_id_distinguishes_path_mode() {
+        let ambient = store_build_env_id_for_target(false, "macos-aarch64-darwin");
+        let hermetic = store_build_env_id_for_target(true, "macos-aarch64-darwin");
+        assert_ne!(ambient, hermetic);
+        assert!(ambient.contains("path:ambient-posix"));
+        assert!(hermetic.contains("path:hermetic"));
+    }
+
+    #[test]
+    fn non_musl_target_has_no_implicit_floor_id_parts() {
+        let id = store_build_env_id_for_target(false, "macos-aarch64-darwin");
+        assert!(!id.contains("floor-musl:"));
+        assert!(!id.contains("floor-linux-headers:"));
+        assert!(!id.contains("floor-libcxx:"));
     }
 }

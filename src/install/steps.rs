@@ -9,8 +9,8 @@ use crate::{
     model::{Dependency, validate_targets},
     solve::{Plan, PlanStep, Substitute},
     tome,
-    util::paths,
     util::output::{report, status},
+    util::paths,
 };
 
 use super::*;
@@ -51,9 +51,28 @@ impl Installer {
             self.dry_run_source_root(&rune)?;
             return Ok(package.to_owned());
         }
-        let store_hash =
-            crate::store::closure::store_hash_for_rune(&rune, &self.world.store_hashes())
-                .with_context(|| format!("compute store hash for source root `{package}`"))?;
+        let metadata =
+            build::read_rune_metadata(&rune, build::tome_name_for_rune(&rune)?.as_deref())?;
+        let target = paths::target_triple();
+        validate_targets(&metadata, &target)
+            .with_context(|| format!("validate target for `{}`", metadata.name))?;
+        refuse_linked_conflicts(
+            &self.world,
+            &metadata.name,
+            &metadata.conflicts,
+            &metadata.replaces,
+        )?;
+        let build_deps = build::effective_build_deps(&rune, &metadata, &target)?;
+        self.install_deps(&build_deps)
+            .with_context(|| format!("install build dependencies for source root `{package}`"))?;
+        let resolved = self.world.store_hashes();
+        let build_env = build::toolchain::store_build_env_id_for_target_with_resolved(
+            false, &target, &resolved,
+        );
+        let store_hash = crate::store::closure::store_hash_for_rune_with_target_and_env(
+            &rune, &target, &build_env, &resolved,
+        )
+        .with_context(|| format!("compute store hash for source root `{package}`"))?;
         let installed = self.build_and_install(&rune, &store_hash)?;
         let name = installed.name.clone();
         let runtime = installed.runtime_deps.clone();
@@ -99,6 +118,14 @@ impl Installer {
             rune.display()
         ));
         let target = paths::target_triple();
+        validate_targets(&metadata, &target)
+            .with_context(|| format!("validate target for `{}`", metadata.name))?;
+        refuse_linked_conflicts(
+            &self.world,
+            &metadata.name,
+            &metadata.conflicts,
+            &metadata.replaces,
+        )?;
         let mut combined = metadata.deps.build_for(&target);
         combined.extend(
             metadata
@@ -112,7 +139,9 @@ impl Installer {
             return Ok(());
         }
         let linked = self.world.linked_immut();
-        let plan = solve::resolve(&combined, &self.installed, &linked, self.pins.as_ref())?;
+        let mut plan = solve::resolve(&combined, &self.installed, &linked, self.pins.as_ref())?;
+        plan.compute_store_hashes()
+            .with_context(|| format!("compute store hashes for source rune `{}`", metadata.name))?;
         print_plan_body(&plan);
         print_plan_consequences(&plan, &self.installed)?;
         Ok(())
@@ -172,7 +201,7 @@ impl Installer {
     /// installed by the time a step runs.
     fn execute_step(&mut self, step: PlanStep) -> Result<()> {
         // A pinned content address is the lock's recipe identity: it folds in the rune,
-        // sources, dependency closure, and build environment. Drift fails here, before any
+        // sources, dependency closures, and build environment. Drift fails here, before any
         // fetch or build, with a message that names what the lock expected.
         if let (Some(pins), Some(computed)) = (&self.pins, step.store_hash.as_deref())
             && let Some(pinned) = pins
@@ -181,7 +210,7 @@ impl Installer {
             && pinned != computed
         {
             bail!(
-                "store hash for `{}` drifted from the lock (recipe, sources, or build                          environment changed): locked {pinned}, computed {computed}",
+                "store hash for `{}` drifted from the lock (recipe, sources, dependencies, or build environment changed): locked {pinned}, computed {computed}",
                 step.name
             );
         }
@@ -219,7 +248,7 @@ impl Installer {
     /// The binhost is keyed by content address: when a source rune is available, the store hash is
     /// recomputed from it (with the resolved runtime dependency versions and the host toolchain) and
     /// a substitute is accepted only if its published `store_hash` matches — a mismatch means the
-    /// prebuilt is stale (changed sources, flags, or dependency closure) and the package is built
+    /// prebuilt is stale (changed sources, flags, or dependency closures) and the package is built
     /// instead. A substitute that carries no `store_hash` is unverifiable and trusted as-is (a host
     /// with no compiler boundary cannot rebuild anyway, and legacy indexes predate the field).
     ///
@@ -331,7 +360,7 @@ impl Installer {
     }
 
     /// The content address the package defined by `rune` would have if built here — computed over
-    /// its dependency closure via [`crate::closure`], the same path the builder and the `store-hash`
+    /// its dependency closures via [`crate::closure`], the same path the builder and the `store-hash`
     /// seam use, so the addresses agree by construction. Matched against a published `store_hash` to
     /// decide whether a prebuilt is a valid substitute.
     ///
@@ -427,10 +456,7 @@ impl Installer {
     /// generation is active so the notes are the last thing the user reads.
     pub(super) fn report_notes(&self) {
         for (name, lines) in &self.notes {
-            report(&format!(
-                "notes for {}:",
-                crate::util::output::strong(name)
-            ));
+            report(&format!("notes for {}:", crate::util::output::strong(name)));
             for line in lines {
                 crate::util::output::note(&format!("  {line}"));
             }

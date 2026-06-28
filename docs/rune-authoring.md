@@ -61,7 +61,7 @@ Every field Grimoire parses. Unknown keys are ignored, so informational conventi
 | `version` | string | yes | Semver, leniently parsed (`1.2` normalizes to `1.2.0`). Non-semver upstream versions must be normalized here; keep the real version string in the source `url`. |
 | `summary` | string | no | One-line description shown by `grm search`/`info`. |
 | `targets` | list\<string\> | no | Supported target triples. Non-empty + current triple absent ⇒ the rune is skipped by `grm tome build --all` and refuses to build. Empty/absent ⇒ builds everywhere. |
-| `fixed_output` | bool | no (default `false`) | Declares that the output is fully determined by the sources — the build only fetches/repackages, never compiles. Switches the package to output addressing: its store hash covers name + version + (platform-filtered) sources + target only, excluding the build environment and dependency closure. Use for repackaged prebuilts (see `rust.rn`); never for anything that invokes a compiler. Grimoire trusts the declaration — do not lie. |
+| `fixed_output` | bool | no (default `false`) | Declares that the output is fully determined by the sources — the build only fetches/repackages, never compiles. Switches the package to output addressing: its store hash covers name + version + (platform-filtered) sources + target only, excluding the build environment and dependency closures. Use for repackaged prebuilts (see `rust.rn`); never for anything that invokes a compiler. Grimoire trusts the declaration — do not lie. |
 | `sources` | record | no | Verified inputs; see [Sources](#sources). `sources: {}` is valid for generated-output packages. |
 | `deps` | record | no | Build and runtime dependencies; see [Dependencies](#dependencies). |
 | `bins` | record | no | Target-keyed executable declarations; see [Bins and capabilities](#bins-and-capabilities). |
@@ -110,6 +110,7 @@ sources: {
 | `url` | yes | `https://` (or `http://`), or a path relative to the rune's directory (vendored files under the tome's `sources/`). |
 | `sha256` | yes | 64 hex digits, optional `sha256:` prefix. Every source is verified before the build can read it; a mismatch is fatal. |
 | `platform` | no | Target glob (dependency-bracket syntax: `macos-*`, `linux-x86_64-musl`). Non-matching sources are neither fetched nor folded into the store hash — how a fixed-output package pins a different artifact per platform (`rust.rn` is the canonical example). |
+| `host_libc` | no | Build-host libc selector (`glibc` or `musl`) for bootstrap sources that must execute on the build host. Non-matching sources are neither fetched nor folded into the store hash. Omit for ordinary target-selected sources. |
 
 Archive sources (`.tar.zst`/`.tar.gz`/`.tar.xz`) are extracted automatically (path-validated
 first, same rules as package archives) and exposed as `ctx.sources.<name>.dir`. A URL whose
@@ -137,7 +138,9 @@ deps: {
   variables (`CMAKE_PREFIX_PATH`, `PKG_CONFIG_PATH`, `CPATH`, `LIBRARY_PATH`, `ACLOCAL_PATH`,
   `<DEP>_PREFIX`). Declare every non-POSIX tool the build invokes — and remember the
   self-hosted userland floor (uutils/dash/mawk/gsed/ggrep) ships no `make`. Out-of-core packages can
-  declare `build-env` instead of enumerating the toolchain.
+  declare `build-env` instead of enumerating the toolchain. The resolved build-dependency closure
+  is part of a compiled package's store hash, so changing a build tool's recipe or version moves
+  every package built with it to a new address.
 - **`deps.runtime`** — packages required at execution time; resolved by the solver and
   installed into the active generation.
 - **Entry forms** (anywhere a dependency appears): a bare name (`"libc"`, any version), a
@@ -282,8 +285,8 @@ registers exactly these commands (`src/nu/commands/`):
 Anything not listed does not exist in the rune engine — `from json`, `http get`, `where`,
 `each`, and the rest of nushell's surface are deliberately absent. This keeps rune behavior
 stable across Nushell upgrades and the dependency tree small. If a rune genuinely needs a
-missing command, it is added to `src/nu/commands/` and to this table in the same commit
-(AGENTS.md §15.4) — or the build step uses an external tool instead.
+missing structured operation, add it to `src/nu/commands/` and to this table in the same commit
+(AGENTS.md §15.4). Do not route around a missing rune command with an undeclared host utility.
 
 The file-loading parse keywords (`use`, `source`, `source-env`, `overlay`, `module`,
 `register`, `plugin`) are **rejected outright** when Grimoire reads a rune's metadata: they
@@ -296,6 +299,14 @@ record.
 **No `sh -c`.** Rune `build` functions are native Nushell. Use Nushell's own control flow,
 variables, and external command invocation. Shelling out to `sh` forfeits error handling and
 obscures the build logic; decompose complex steps instead of hiding them in a shell script.
+
+**External commands must be owned by the build environment.** Invoking upstream build tools
+(`make`, `cmake`, `cargo`, `cc`) is expected when those tools come from declared build deps or
+the package's own source tree. Generic POSIX utilities may come from the managed floor (or the
+documented ambient tail during bootstrap), but a rune must not use an arbitrary host utility to
+stand in for missing Nushell functionality. Prefer the native rune commands above for filesystem
+work (`cp`, `rm`, `path`, string transforms); when a generic external utility is genuinely
+required, make sure the providing package/floor contract is explicit.
 
 **Use explicit parentheses for variable interpolation in external commands.** Bare
 record-field access like `$ctx.prefix` or `$env.VAR` in external command position can be

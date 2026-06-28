@@ -6,8 +6,8 @@ use anyhow::Result;
 use std::{collections::BTreeSet, fs, path::Path};
 
 use crate::{
-    util::paths,
     util::output::{accent, faint, report, warn},
+    util::paths,
 };
 
 use super::*;

@@ -17,8 +17,8 @@ use crate::{
         validate_relative_package_path, validate_sha256, validate_target,
     },
     nu::nuon_io,
-    util::paths,
     util::output::{accent, faint, report, status, success},
+    util::paths,
 };
 
 use super::world::InstalledWorld;
@@ -149,6 +149,28 @@ pub(crate) fn install_store_only(
     expected_store_hash: Option<&str>,
     origin: InstallOrigin,
 ) -> Result<InstalledArchive> {
+    let target = paths::target_triple();
+    install_store_only_for_target(
+        world,
+        archive_path,
+        expected_hash,
+        expected_store_hash,
+        origin,
+        &target,
+    )
+}
+
+/// Like [`install_store_only`], but validates and records the archive against an explicit target.
+/// `grm tome build --all --target` uses this for store-only publishing outputs; linked installs
+/// still use the host target via [`install_store_only`].
+pub(crate) fn install_store_only_for_target(
+    world: &mut InstalledWorld,
+    archive_path: &Path,
+    expected_hash: Option<String>,
+    expected_store_hash: Option<&str>,
+    origin: InstallOrigin,
+    target: &str,
+) -> Result<InstalledArchive> {
     if archive_path.is_dir() {
         // `File::open` on a directory succeeds, so without this guard the failure surfaced only
         // when staging read the "archive" and got `Is a directory (os error 21)` — blamed on the
@@ -197,7 +219,7 @@ pub(crate) fn install_store_only(
         archive::validate_archive_paths_capturing(&safe_archive, Some(".grimoire/package.nuon"))?
             .context("package archive is missing .grimoire/package.nuon")?;
     let metadata = PackageMetadata::from_value(nuon_io::parse_nuon(&metadata_text)?, true)?;
-    validate_target(&metadata, &paths::target_triple())?;
+    validate_target(&metadata, target)?;
 
     // Conflicts gate linked installs only — on *both* sides: store-only packages (build
     // deps, tome-build products) never enter the environment, so coexistence in the store
@@ -234,7 +256,7 @@ pub(crate) fn install_store_only(
     archive::extract_archive(&safe_archive, &staging_dir)?;
 
     status("validating extracted files");
-    validate_bins(&metadata, &paths::target_triple(), &staging_dir)?;
+    validate_bins(&metadata, target, &staging_dir)?;
 
     // Everything from here mutates shared install state. Stage each step against a
     // transaction so that a failure restores the previously installed version.
@@ -246,7 +268,7 @@ pub(crate) fn install_store_only(
     status("writing package state");
     let state = build_package_state(
         &metadata,
-        &paths::target_triple(),
+        target,
         &archive_hash,
         &store_hash,
         &package_dir.to_string_lossy(),
@@ -296,12 +318,11 @@ pub(crate) fn install_store_only(
     ));
     let version = parse_version_relaxed(&metadata.version)
         .with_context(|| format!("package version `{}` is not valid semver", metadata.version))?;
-    let target = paths::target_triple();
     let runtime_deps: Vec<Dependency> = metadata
         .deps
         .runtime
         .into_iter()
-        .filter(|d| d.matches_platform(&target))
+        .filter(|d| d.matches_platform(target))
         .collect();
     Ok(InstalledArchive {
         name: metadata.name,
@@ -497,12 +518,12 @@ pub(crate) fn build_package_state(
             .deps
             .runtime
             .iter()
-            .filter(|d| d.matches_platform(&paths::target_triple()))
+            .filter(|d| d.matches_platform(target))
             .map(|dep| dep.name.clone())
             .collect(),
         build_deps: metadata
             .deps
-            .build_for(&paths::target_triple())
+            .build_for(target)
             .iter()
             .map(|dep| dep.name.clone())
             .collect(),
@@ -519,7 +540,9 @@ pub(crate) fn build_package_state(
         upstream_version: metadata.upstream_version.clone(),
         conflicts: metadata.conflicts.clone(),
         replaces: metadata.replaces.clone(),
-        build_env: crate::build::toolchain::build_env_id(),
+        build_env: Some(crate::build::toolchain::store_build_env_id_for_target(
+            false, target,
+        )),
         build_only: metadata.build_only,
     }
 }

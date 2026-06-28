@@ -9,8 +9,8 @@ use std::collections::{HashSet, VecDeque};
 
 use crate::{
     model::PackageState,
-    util::paths,
     util::output::{accent, note, report, strong, warn},
+    util::paths,
 };
 
 use super::world::InstalledWorld;

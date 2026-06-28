@@ -15,7 +15,8 @@ pub struct PackageState {
     pub target: Option<String>,
     pub archive_hash: String,
     /// The content address (store hash) of this installed package. Folded into the store hash of
-    /// any package that depends on it, so the dependency closure is captured transitively.
+    /// any package that depends on it at runtime or build time, so dependency closures are captured
+    /// transitively.
     pub store_hash: String,
     /// The content-addressed store path this package was installed into, e.g.
     /// `/grm/store/<hash>-<name>-<version>`.

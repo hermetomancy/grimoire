@@ -213,7 +213,7 @@ pub struct BuildArgs {
     pub bootstrap: bool,
     /// Drop the POSIX ambient PATH tail (`/usr/bin`, `/bin`) so the build sees only declared
     /// deps and the managed core floor. Diagnostic for stage-2 self-hosting: a build that fails
-    /// for a missing tool names a host-userland leak to package. Does not affect the store hash.
+    /// for a missing tool names a host-userland leak to package. Affects the store hash.
     #[arg(long, conflicts_with = "bootstrap")]
     pub hermetic: bool,
     /// Target triple to build for (defaults to the host target).
@@ -292,6 +292,9 @@ pub struct SetupArgs {
     /// Show what setup would do without touching the system.
     #[arg(long, visible_alias = "explain")]
     pub dry_run: bool,
+    /// After store setup, add the core/world tomes and install grimoire through itself.
+    #[arg(long)]
+    pub bootstrap: bool,
 }
 
 #[derive(Debug, Args)]
@@ -451,7 +454,7 @@ pub struct TomeBuildArgs {
     pub bootstrap: bool,
     /// Drop the POSIX ambient PATH tail (`/usr/bin`, `/bin`) so each rune builds against only
     /// declared deps and the managed core floor. Diagnostic for stage-2 self-hosting: a rune
-    /// that fails for a missing tool names a host-userland leak to package. No store-hash impact.
+    /// that fails for a missing tool names a host-userland leak to package. Affects the store hash.
     #[arg(long, conflicts_with = "bootstrap")]
     pub hermetic: bool,
     /// Target triple to build for (defaults to the host target).

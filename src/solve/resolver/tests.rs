@@ -315,7 +315,11 @@ fn rebuilds_when_installed_is_older_than_newest_candidate() {
         .into_iter()
         .map(|step| (step.name, step.version.to_string()))
         .collect();
-    assert_eq!(steps, vec![("lib".to_owned(), "1.1.0".to_owned())], "{steps:?}");
+    assert_eq!(
+        steps,
+        vec![("lib".to_owned(), "1.1.0".to_owned())],
+        "{steps:?}"
+    );
 }
 
 #[test]

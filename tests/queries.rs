@@ -172,7 +172,10 @@ fn prefer_resolves_contested_bins_between_installed_packages() {
         "prefer a non-provider",
     );
 
-    assert_success(&run(root, &["pkg", "prefer", "tool", "beta"]), "prefer beta");
+    assert_success(
+        &run(root, &["pkg", "prefer", "tool", "beta"]),
+        "prefer beta",
+    );
     assert_success(
         &run(root, &["install", "beta"]),
         "install beta after prefer",
@@ -184,7 +187,10 @@ fn prefer_resolves_contested_bins_between_installed_packages() {
     );
 
     // Switching the preference relinks the active generation without reinstalling.
-    assert_success(&run(root, &["pkg", "prefer", "tool", "alpha"]), "prefer alpha");
+    assert_success(
+        &run(root, &["pkg", "prefer", "tool", "alpha"]),
+        "prefer alpha",
+    );
     assert_eq!(
         stdout(&run_shim(root, "tool")).trim(),
         "alpha",
@@ -252,7 +258,10 @@ fn solver_resolves_capability_dependency_through_preference() {
     );
     assert_success(&run(root, &["tome", "update", "capcore"]), "tome update");
 
-    assert_success(&run(root, &["pkg", "prefer", "tool", "beta"]), "prefer beta");
+    assert_success(
+        &run(root, &["pkg", "prefer", "tool", "beta"]),
+        "prefer beta",
+    );
     assert_success(&run(root, &["install", "consumer"]), "install consumer");
     assert!(
         root.join("state")
@@ -699,7 +708,10 @@ fn owns_reports_only_the_linked_provider_for_a_contested_bin() {
         ),
         "tome add awktome",
     );
-    assert_success(&run(root, &["pkg", "prefer", "awk", "gawk"]), "prefer awk gawk");
+    assert_success(
+        &run(root, &["pkg", "prefer", "awk", "gawk"]),
+        "prefer awk gawk",
+    );
     assert_success(
         &run(root, &["install", "gawk", "mawk"]),
         "install gawk + mawk",

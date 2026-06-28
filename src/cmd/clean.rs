@@ -19,8 +19,8 @@ use walkdir::WalkDir;
 use crate::{
     cli::CleanArgs,
     install, profile,
-    util::paths,
     util::output::{accent, faint, line, report, status},
+    util::paths,
 };
 
 pub fn clean(args: CleanArgs) -> Result<()> {

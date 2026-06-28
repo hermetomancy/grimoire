@@ -8,7 +8,7 @@ use crate::{build, build::toolchain, install::InstalledWorld};
 
 /// Installed packages whose recorded address has drifted from the catalog: the rune currently
 /// resolvable for the same name *and version* produces a different store hash — its content,
-/// declared sources, build flags, dependency closure, or the host build environment changed
+/// declared sources, build flags, dependency closures, or the host build environment changed
 /// since the package was realized. Resolution must not reuse these by version; re-realizing
 /// them is how a rune edit propagates to installs at all.
 ///
@@ -41,7 +41,8 @@ pub fn stale_installed(world: &InstalledWorld) -> Vec<StaleInstall> {
         .filter(|state| state.held)
         .map(|state| (state.name.clone(), state.store_hash.clone()))
         .collect();
-    let current_env = toolchain::build_env_id();
+    let current_env =
+        toolchain::store_build_env_id_for_target(false, &crate::util::paths::target_triple());
     let mut stale = Vec::new();
     for state in world.iter() {
         // A hold pins the installed bits, not just the version: a held package is never
@@ -62,9 +63,9 @@ pub fn stale_installed(world: &InstalledWorld) -> Vec<StaleInstall> {
             continue;
         };
         if expected != state.store_hash {
-            let env_change = match (&state.build_env, &current_env) {
-                (Some(recorded), Some(current)) if recorded != current => {
-                    Some(diff_build_env(recorded, current))
+            let env_change = match &state.build_env {
+                Some(recorded) if recorded != &current_env => {
+                    Some(diff_build_env(recorded, &current_env))
                 }
                 _ => None,
             };

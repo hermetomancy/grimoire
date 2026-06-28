@@ -45,6 +45,41 @@ fn build_respects_musl_target() {
 }
 
 #[test]
+fn source_root_dry_run_refuses_linked_conflicts() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+    let target = target_triple();
+
+    let archive = make_versioned_archive(
+        &root
+            .join("archives")
+            .join(format!("oldpkg-0.1.0-{target}.tar.zst")),
+        "oldpkg",
+        "0.1.0",
+        &target,
+        "#!/usr/bin/env sh\nprintf 'old\\n'\n",
+    );
+    assert_success(
+        &run(root, &["install", archive.to_str().unwrap()]),
+        "install conflicting package",
+    );
+
+    let rune = root.join("newpkg.rn");
+    fs::write(
+        &rune,
+        "export const package = {\n  name: 'newpkg'\n  version: '0.1.0'\n  conflicts: ['oldpkg']\n  sources: {}\n  deps: { build: {} runtime: [] }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf 'new\\n'\" | save ($ctx.package_dir | path join 'bin' 'newpkg')\n}\n",
+    )
+    .unwrap();
+
+    let dry_run = run(root, &["install", rune.to_str().unwrap(), "--dry-run"]);
+    assert_failure_contains(
+        &dry_run,
+        "conflicts with installed `oldpkg`",
+        "source dry-run conflict",
+    );
+}
+
+#[test]
 fn example_tome_checksummed_source() {
     let root = TempDir::new().unwrap();
     let root = root.path();

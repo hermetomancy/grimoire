@@ -5,9 +5,7 @@ use anyhow::Result;
 use semver::{Version, VersionReq};
 use std::collections::{BTreeMap, HashMap};
 
-use crate::{
-    model::PackageIndex, model::req_matches, nu::runtime::EmbeddedNuRuntime, tome, util::paths,
-};
+use crate::{model::req_matches, nu::runtime::EmbeddedNuRuntime, tome, util::paths};
 
 /// Maps capability names (e.g. "awk", "sh") to the package names that provide them.
 /// Built once per resolve by reading tome indexes first, then falling back to runes
@@ -23,19 +21,12 @@ impl CapabilityIndex {
         let target = paths::target_triple();
         let tomes = tome::load_tomes()?;
 
-        // 1. Read capabilities from published tome indexes (authoritative).
+        // 1. Read capabilities from published tome indexes (authoritative). Use the same
+        // package-index loader as normal resolution so HTTP binhosts and local dist/ indexes
+        // expose identical capability metadata.
         for tome in &tomes {
-            let cache = tome::ensure_tome_cache(tome)?;
-            let index_path = cache.join("dist").join("index.nuon");
-            if !index_path.exists() {
+            let Some((_, index)) = tome::package_index(tome)? else {
                 continue;
-            }
-            let index = match crate::nu::nuon_io::read_nuon(&index_path) {
-                Ok(v) => match PackageIndex::from_value(v) {
-                    Ok(idx) => idx,
-                    Err(_) => continue,
-                },
-                Err(_) => continue,
             };
             for (_, entry) in index.entries {
                 if entry.target != target {

@@ -15,8 +15,8 @@ use crate::{
     archive,
     model::PackageMetadata,
     nu::nuon_io,
-    util::paths,
     util::output::{status, success},
+    util::paths,
 };
 
 /// `group_runes` is empty for a standalone package. For a split group member it carries the

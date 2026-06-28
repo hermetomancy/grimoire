@@ -15,8 +15,8 @@ use crate::{
     install,
     model::{IndexEntry, PackageIndex, validate_package_name},
     nu::{nuon_io, runtime::EmbeddedNuRuntime},
-    util::paths,
     util::output::{report, status},
+    util::paths,
 };
 
 use super::lint;
@@ -57,8 +57,10 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
 
     // Decide which runes to build: every rune in `runes/` for `--all`, otherwise the single
     // named package. clap already rejects passing both, so exactly one branch applies.
+    let host_target = paths::target_triple();
+    let current_target = args.target.as_deref().unwrap_or(&host_target);
     let rune_names = if args.all {
-        let names = rune_names_ordered(root)?;
+        let names = rune_names_ordered(root, current_target)?;
         if names.is_empty() {
             bail!("tome `{}` has no runes to build", manifest.name);
         }
@@ -162,12 +164,13 @@ pub(crate) fn build_runes(
             ));
             if all {
                 let mut world = install::InstalledWorld::load_default()?;
-                install::install_store_only(
+                install::install_store_only_for_target(
                     &mut world,
                     &archive,
                     None,
                     None,
                     install::InstallOrigin::TomeBuild,
+                    &entry.target,
                 )
                 .with_context(|| format!("store-only install of {}", entry.name))?;
             }
@@ -270,25 +273,14 @@ pub(crate) fn rebuild_index(dist_dir: &Path) -> Result<PackageIndex> {
         if !name.ends_with(".tar.zst") {
             continue;
         }
-        match read_archive_index_entry(&path) {
-            Ok((store_hash, index_entry)) => {
-                report(&format!(
-                    "indexed {} {}",
-                    crate::util::output::accent(&format!(
-                        "{} {}",
-                        index_entry.name, index_entry.version
-                    )),
-                    crate::util::output::faint(&format!(
-                        "({}) from {}",
-                        index_entry.target, name
-                    ))
-                ));
-                entries.insert(store_hash, index_entry);
-            }
-            Err(e) => {
-                crate::util::output::warn(&format!("skipping {}: {e}", path.display()));
-            }
-        }
+        let (store_hash, index_entry) = read_archive_index_entry(&path)
+            .with_context(|| format!("index archive {}", path.display()))?;
+        report(&format!(
+            "indexed {} {}",
+            crate::util::output::accent(&format!("{} {}", index_entry.name, index_entry.version)),
+            crate::util::output::faint(&format!("({}) from {}", index_entry.target, name))
+        ));
+        entries.insert(store_hash, index_entry);
     }
     Ok(PackageIndex { entries })
 }
@@ -431,13 +423,12 @@ pub(crate) fn rune_names(root: &Path) -> Result<Vec<String>> {
 
 /// Returns rune names in dependency order: a rune's build dependencies appear before the rune
 /// itself. Cycles within the tome are reported as errors.
-pub(crate) fn rune_names_ordered(root: &Path) -> Result<Vec<String>> {
+pub(crate) fn rune_names_ordered(root: &Path, target: &str) -> Result<Vec<String>> {
     let names = rune_names(root)?;
     if names.is_empty() {
         return Ok(names);
     }
 
-    let target = paths::target_triple();
     let mut metadata_map: BTreeMap<String, crate::model::PackageMetadata> = BTreeMap::new();
     for name in &names {
         let rune_path = root.join("runes").join(format!("{name}.rn"));
@@ -445,7 +436,7 @@ pub(crate) fn rune_names_ordered(root: &Path) -> Result<Vec<String>> {
             .package_metadata(&rune_path)
             .with_context(|| format!("read metadata for {name}"))?;
         // Skip runes that explicitly declare targets and don't include the current one.
-        if !metadata.targets.is_empty() && !metadata.targets.contains(&target) {
+        if !metadata.targets.is_empty() && !metadata.targets.iter().any(|t| t == target) {
             continue;
         }
         metadata_map.insert(name.clone(), metadata);
@@ -489,7 +480,7 @@ pub(crate) fn rune_names_ordered(root: &Path) -> Result<Vec<String>> {
     }
     for name in &filtered_names {
         let metadata = &metadata_map[name];
-        let build_deps = metadata.deps.build_for(&target);
+        let build_deps = metadata.deps.build_for(target);
         for dep in build_deps {
             let dep_node = alias.get(&dep.name).unwrap_or(&dep.name);
             if dep_node == name {

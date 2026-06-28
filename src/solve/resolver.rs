@@ -8,7 +8,7 @@ use std::{
     path::PathBuf,
 };
 
-use crate::{model::Dependency, model::preferences::Preferences, util::paths, util::output};
+use crate::{model::Dependency, model::preferences::Preferences, util::output, util::paths};
 
 use super::*;
 

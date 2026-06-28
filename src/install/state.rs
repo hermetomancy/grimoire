@@ -2,9 +2,7 @@
 
 use anyhow::{Result, bail};
 
-use crate::{
-    util::output::{self, Cell, report},
-};
+use crate::util::output::{self, Cell, report};
 
 use super::world::InstalledWorld;
 use super::*;

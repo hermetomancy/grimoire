@@ -68,7 +68,10 @@ pub fn add(args: TomeAddArgs) -> Result<()> {
 
 pub fn remove(args: TomeRemoveArgs) -> Result<()> {
     if args.dry_run {
-        note(&format!("would remove addendum `{}` and its cache", args.name));
+        note(&format!(
+            "would remove addendum `{}` and its cache",
+            args.name
+        ));
         return Ok(());
     }
     sync_common::remove_catalog::<AddendumState>(&args.name, true)

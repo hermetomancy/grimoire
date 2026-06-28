@@ -592,13 +592,28 @@ fn store_only_packages_stay_out_of_lock_upgrade_and_profile() {
         "default list shows only the linked environment, not store-only cache: {default_list}"
     );
 
-    // A newer tooldep appears; a bare upgrade must leave the cache alone.
+    // A newer tooldep appears; a bare upgrade may refresh store-only cache when the cached bits
+    // drift from the current address, but it must not promote the build dep into the environment.
     fs::write(runes.join("tooldep.rn"), tooldep_rune("0.2.0")).unwrap();
     assert_success(&run(root, &["upgrade"]), "bare upgrade");
     assert!(
-        state_text(root, "tooldep").contains("version: \"0.1.0\""),
-        "bare upgrade must not touch store-only packages: {}",
+        state_text(root, "tooldep").contains("requested: false"),
+        "bare upgrade must keep build deps store-only: {}",
         state_text(root, "tooldep")
+    );
+    let lock = fs::read_to_string(root.join("state").join("grimoire.lock.nuon")).unwrap();
+    assert!(
+        !lock.contains("[tooldep,"),
+        "bare upgrade must not lock store-only packages: {lock}"
+    );
+    let profile_tooldep = root
+        .join("profiles")
+        .join("current")
+        .join("bin")
+        .join("tooldep");
+    assert!(
+        !profile_tooldep.exists(),
+        "bare upgrade must not link store-only build deps"
     );
 
     // Naming it explicitly still upgrades it; it stays store-only.

@@ -722,7 +722,12 @@ fn restore_reproduces_locked_set_on_a_fresh_root() {
     );
     let restore = run(
         fresh_root,
-        &["generation", "restore", "--lockfile", saved_lock.to_str().unwrap()],
+        &[
+            "generation",
+            "restore",
+            "--lockfile",
+            saved_lock.to_str().unwrap(),
+        ],
     );
     assert_success(&restore, "restore from saved lock");
 

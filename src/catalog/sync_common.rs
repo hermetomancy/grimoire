@@ -15,8 +15,8 @@ use crate::{
     model::{Catalog, CatalogManifest},
     nu::nuon_io,
     util::fs_util,
-    util::paths,
     util::output::{self, Cell},
+    util::paths,
 };
 
 /// Returns `true` when `url` is a local directory containing `manifest_name`.

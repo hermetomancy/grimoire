@@ -60,16 +60,18 @@ now-unneeded dependencies with it in the same transaction — file-ownership que
 ```sh
 cargo install --git https://github.com/hermetomancy/grimoire
 grm setup
+grm setup --bootstrap
 ```
 
 This installs the `grm` command. `grm setup` creates the fixed store (`/grm`), puts the
-active profile's `bin` on your shell's PATH, adds the core tome, and installs grimoire
-through itself — from then on `grm upgrade grimoire` is self-update.
+active profile's `bin` on your shell's PATH, and leaves package state alone. `grm setup
+--bootstrap` then adds the core and world tomes and installs grimoire through itself — from then
+on `grm upgrade grimoire` is self-update.
 
 ## Quick Start
 
 ```sh
-# Add a package catalog (grm setup already adds the core tome)
+# Add a package catalog if you did not run `grm setup --bootstrap`
 grm tome add https://github.com/hermetomancy/tome-core --ref main
 
 # Search, inspect, install
@@ -131,7 +133,7 @@ export const package = {
     }
   }
   deps: {
-    # build-env pulls the managed toolchain (compiler, gmake, cmake, python, toybox).
+    # build-env pulls the managed toolchain (compiler, gmake, cmake, python, userland floor).
     build: { default: ["build-env"] }
     runtime: []
   }
@@ -170,7 +172,8 @@ profiles:
 ```
 
 `grm setup` puts `~/.grimoire/profiles/current/bin` on your shell's PATH (zsh, bash, and
-fish are recognised); add it manually for other shells.
+fish are recognised); add it manually for other shells. `grm setup --bootstrap` performs the
+optional self-hosting bootstrap after that store/PATH setup is complete.
 
 ## Release Signing
 

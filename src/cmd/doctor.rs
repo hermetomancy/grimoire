@@ -236,6 +236,7 @@ fn check_stale_backups() -> Result<usize> {
 
 fn check_source_build_readiness() -> Result<usize> {
     let readiness = toolchain::source_build_readiness()?;
+    let mut problems = 0;
     field(
         "source builds",
         &format!(
@@ -248,16 +249,25 @@ fn check_source_build_readiness() -> Result<usize> {
         ),
     );
     report_managed_core_readiness()?;
+    if std::env::consts::OS == "macos" {
+        match toolchain::macos_sdk_path() {
+            Some(path) => field("macOS SDK", &path),
+            None => {
+                problems += 1;
+                problem("macOS SDK not found (`xcrun --show-sdk-path` failed)");
+            }
+        }
+    }
 
     if readiness.is_ready() {
-        return Ok(0);
+        return Ok(problems);
     }
 
     problem(&format!(
         "source builds need a host compiler boundary for now; missing {}",
         readiness.missing_required.join(", ")
     ));
-    Ok(1)
+    Ok(problems + 1)
 }
 
 /// build-env's dependency closure *is* the managed build requirement (the compiler toolchain plus

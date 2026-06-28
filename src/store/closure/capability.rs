@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use semver::{Version, VersionReq};
 
 use crate::install;
@@ -46,7 +46,9 @@ impl super::Walker {
                 installed,
             });
         }
-        let caps = self.caps.as_ref().expect("capability context built above");
+        let Some(caps) = self.caps.as_ref() else {
+            bail!("capability context was not initialized");
+        };
         let mut providers = caps.index.providers(name);
         if providers.is_empty() {
             return Ok(None);

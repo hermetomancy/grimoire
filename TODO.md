@@ -64,69 +64,20 @@ leaks; passing runes are certified floor-ambient, failures name what stage 2 mus
 The `grm tome build --hermetic` diagnostic has shipped: it drops the ambient tail so a build
 that reaches for an unpackaged tool fails and names the leak. The remaining stage-2 work is
 empirical — run it per rune to enumerate what actually leaks, certify the passing runes as
-floor-ambient, and package the failures. One deferred deliverable:
-
-- **Fold a floor-ambient marker into `build_env_id` (deferred; needs a decision).** The
-  cheap interim fix if prebuilts ever come from heterogeneous builders, but blocked by an
-  architecture mismatch: `build_env_id` is a process-global cached pure fn with no per-build
-  inputs while `--hermetic` is per-build, and the marker must reach all three address
-  consumers (resolver `plan.rs`, closure walker `closure.rs`, install state `realize.rs`)
-  identically or §9.8 breaks. Decide between a host-property marker and plumbing per-build
-  env identity end-to-end before writing it.
+floor-ambient, and package the failures.
 
 ### Build-env review follow-ups (2026-06-24 bootstrap/ethos review)
 
-- **`toolchain-wrappers.rn:75` gnu crash (one-liner).** `driver_flags` is gated on `is_macos`;
-  its `else` dereferences `$env.MUSL_PREFIX`, which is unset for `-gnu` (musl is
-  `linux-*-musl`-filtered). Gate on `is_musl` (else `""`), matching line 82. Latent until gnu is a
-  built target.
-- **Musl floor-flip is not in the store address (§9.8 silent-correctness gap).** Pre-floor
-  (`-static`/host-glibc) and post-floor (`--sysroot=<musl>`) builds run under the same host-cc
-  banner → identical `build_env_id`, identical hash, different bytes. Same shape as the *boundary*
-  flip (host cc → managed clang), which **is** addressed via `managed_boundary_id`; this second
-  boundary is not. Fix: append installed musl+linux-headers store hashes to `build_env_id` on musl
-  targets, or gate `grm build`/`--index`/publish on floor presence and document the limit. Shares
-  the architecture blocker described in the deferred floor-ambient marker above (§ Bootstrap
-  stage 2): `build_env_id` is a process-global cached pure fn and the marker must reach all three
-  address consumers identically.
 - **Decide `-gnu`'s status; make the docs honest.** Managed clang is musl-defaulted on every
   non-Darwin target (`llvm.rn:71`) and no floor/SDK analogue is injected for gnu, so it links host
   glibc/libstdc++ unhashed and undeclared. AGENTS §11 says gnu is "supported"; this list / stage 1
   say not-done. Either wire gnu (clang gnu arm + host-glibc fold into `build_env_id` + floor branch
   in `build_env_for_target`) or soften §11 to "recognized cross-target, not self-hostable yet" and
   drop gnu from rune `targets:` (or emit an early clear error instead of the MUSL_PREFIX crash).
-- **Doctor macOS SDK probe.** Once the managed boundary is installed, `doctor` never checks the SDK
-  exists; a later Xcode removal → clean `health: ok` then a cryptic `stdio.h not found`. Add a
-  macOS-only `macos_sdk_path()` line to `check_source_build_readiness`, mirroring the host-compiler
-  field.
-- **Cross-host substitution caveat (`host_libc` not in the address).** A glibc-cross host and a
-  musl-native host compute the same `rust`/`grimoire` address for different bits (rust-stage0 is
-  host-keyed but it is a *build* dep, which does not fold into the closure). Fine for today's
-  single-host reality; needs a written caveat in AGENTS §9.8 / multi-os-bootstrap.md. Ties into the
-  `host_libc` test line under "In progress / next".
-- **`musl.rn:39` clang-host assumption.** The `LIBCC` pin runs `cc --rtlib=compiler-rt …` at the
-  floor bottom, where `cc` is still the host compiler; a gcc host fails cryptically. Document the
-  clang-host requirement in multi-os-bootstrap.md §1, or probe and only add `--rtlib` when `cc` is
-  clang.
-
-### Doc drift (2026-06-24 review)
-
-- **toybox → uutils/dash/mawk/gsed/ggrep** in `README.md:134`, `tome-core/README.md:26` & `:74`,
-  `CHANGELOG.md:17` ("toybox's coreutils" present-tense inside the section documenting its removal).
-  Authoritative sources (CORE_PACKAGES, build-env.rn, rune-authoring.md) are already correct.
-- **`multi-os-bootstrap.md:98`** credits `grimoire.rn` with an `if $is_musl` branch it lacks
-  (comment only).
-- **AGENTS §1.3** lists only `cc`/`xcrun` but the discovery path also `--version`-probes
-  `ld`/`as`/`install_name_tool`/`lipo` and execs `xcrun --show-sdk-path` for provisioning — widen
-  the wording; the code is compliant.
-
 ### Second-pass review follow-ups (2026-06-24 subsystem review)
 
 Pass 2 (solver / splits / transactions / security / runes / FreeBSD + design premises) found no trust
-bypass, no crash on a supported path, and no data-loss path. It corroborated the **`build_env_id` musl
-floor-flip above as the single highest-priority item** — the process-global `OnceLock` cache is the
-shared structural root of the floor-flip, hermetic-marker, and host_libc address gaps, and the
-musl floor-hash interim is the cheapest correct fix. New items:
+bypass, no crash on a supported path, and no data-loss path. Remaining items:
 
 - **doctor is blind to interrupted-restore artifacts.** A torn-rename kill in `restore_state_snapshot`
   leaves `state/.packages-old` / `.packages-staging`; `check_stale_backups` only scans the store +

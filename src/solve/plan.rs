@@ -3,9 +3,17 @@
 
 use anyhow::{Context, Result, bail};
 use semver::Version;
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
-use crate::{build::toolchain, model::IndexEntry, store::closure, util::paths};
+use crate::{
+    build::{self, toolchain},
+    model::IndexEntry,
+    store::closure,
+    util::paths,
+};
 
 /// A package pinned by the lockfile: the exact version and archive hash last installed. Used by
 /// `install --locked` to constrain resolution to the recorded reproducible set.
@@ -64,19 +72,36 @@ impl Plan {
     /// dependency's hash is available when its dependents need it.
     pub fn compute_store_hashes(&mut self) -> Result<()> {
         let target = paths::target_triple();
-        let build_env = toolchain::build_env_id().unwrap_or_default();
         let mut computed: BTreeMap<String, String> = BTreeMap::new();
+        let mut installed_versions: BTreeMap<String, Version> = BTreeMap::new();
 
         // Pre-populate with already-installed packages so reused dependencies
         // do not cause "missing computed hash" errors.
         if let Ok(world) = crate::install::InstalledWorld::load_default() {
             for state in world.iter() {
                 computed.insert(state.name.clone(), state.store_hash.clone());
+                if let Ok(version) = crate::model::parse_version_relaxed(&state.version) {
+                    installed_versions.insert(state.name.clone(), version);
+                }
             }
         }
 
+        self.compute_store_hashes_inner(&target, &mut computed, &mut installed_versions)
+    }
+
+    fn compute_store_hashes_inner(
+        &mut self,
+        target: &str,
+        computed: &mut BTreeMap<String, String>,
+        installed_versions: &mut BTreeMap<String, Version>,
+    ) -> Result<()> {
         for step in &mut self.steps {
             let hash = if let Some(rune) = &step.rune {
+                seed_build_dep_hashes(rune, target, computed, installed_versions).with_context(
+                    || format!("compute build dependency hashes for `{}`", step.name),
+                )?;
+                let build_env =
+                    toolchain::store_build_env_id_for_target_with_resolved(false, target, computed);
                 // `runtime_deps` carries the resolver's *expanded* names (capabilities already
                 // replaced by concrete providers) in the rune's declaration order, so the
                 // hashes are passed positionally rather than looked up by raw dep name.
@@ -98,9 +123,9 @@ impl Plan {
                 closure::store_hash_for_rune_with_deps(
                     rune,
                     &dep_hashes,
-                    &target,
+                    target,
                     &build_env,
-                    &computed,
+                    computed,
                 )
                 .with_context(|| format!("compute store hash for `{}`", step.name))?
             } else if let Some(sub) = step.substitutes.first() {
@@ -112,8 +137,27 @@ impl Plan {
                 );
             };
             computed.insert(step.name.clone(), hash.clone());
+            installed_versions.insert(step.name.clone(), step.version.clone());
             step.store_hash = Some(hash);
         }
         Ok(())
     }
+}
+
+fn seed_build_dep_hashes(
+    rune: &Path,
+    target: &str,
+    computed: &mut BTreeMap<String, String>,
+    installed_versions: &mut BTreeMap<String, Version>,
+) -> Result<()> {
+    let metadata = build::read_rune_metadata(rune, build::tome_name_for_rune(rune)?.as_deref())?;
+    let build_deps = build::effective_build_deps(rune, &metadata, target)?;
+    if build_deps.is_empty() {
+        return Ok(());
+    }
+
+    let mut plan =
+        crate::solve::resolve(&build_deps, installed_versions, &Default::default(), None)
+            .with_context(|| format!("resolve build dependencies for `{}`", metadata.name))?;
+    plan.compute_store_hashes_inner(target, computed, installed_versions)
 }

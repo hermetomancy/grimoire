@@ -16,8 +16,8 @@ use crate::{
     model::{PackageMetadata, PackageState},
     nu::runtime::EmbeddedNuRuntime,
     solve, tome,
-    util::paths,
     util::output::{self, Cell},
+    util::paths,
 };
 
 #[derive(Debug, Clone)]
@@ -323,10 +323,7 @@ fn collect_upgrades(
 /// dependency the upgrade would pull in or rebuild — so it matches what a real run would do.
 /// Mirrors the upgrade resolve (`estimate_extra_realizations`): drop the targets so they
 /// re-resolve to the newest, keep the rest of the current world.
-fn print_dry_run_plan(
-    targets: &[String],
-    to_upgrade: &[(String, Version, Version)],
-) -> Result<()> {
+fn print_dry_run_plan(targets: &[String], to_upgrade: &[(String, Version, Version)]) -> Result<()> {
     let world = install::InstalledWorld::load_default()?;
     let installed_now = world.installed_versions();
     let mut installed = world.installed_versions_current()?;

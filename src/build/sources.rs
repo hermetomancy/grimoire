@@ -128,6 +128,12 @@ pub(super) fn extract_source_archive_inner(
     let mut tar = tar::Archive::new(source_archive_reader(path, kind)?);
     tar.unpack(destination)
         .with_context(|| format!("unpack source archive into {}", destination.display()))?;
+    archive::sanitize_permissions(destination).with_context(|| {
+        format!(
+            "sanitize source archive permissions in {}",
+            destination.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -216,5 +222,34 @@ mod tests {
             source_archive_kind("https://ftp.gnu.org/gnu/grep/grep-3.12.tar.xz"),
             Some(SourceArchiveKind::TarXz)
         ));
+    }
+
+    #[test]
+    fn source_archive_extraction_strips_special_mode_bits() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let archive_path = dir.path().join("src.tar.zst");
+        let output = dir.path().join("out");
+
+        let file = File::create(&archive_path)?;
+        let encoder = zstd::stream::write::Encoder::new(file, 0)?;
+        let mut tar = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(4);
+        header.set_mode(0o4755);
+        header.set_cksum();
+        tar.append_data(&mut header, "tool", std::io::Cursor::new(b"tool"))?;
+        let encoder = tar.into_inner()?;
+        encoder.finish()?;
+
+        extract_source_archive_inner(&archive_path, &output, SourceArchiveKind::TarZst)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(output.join("tool"))?.permissions().mode();
+            assert_eq!(mode & 0o7000, 0, "special mode bits must be stripped");
+        }
+
+        Ok(())
     }
 }

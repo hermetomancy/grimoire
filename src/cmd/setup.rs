@@ -17,6 +17,12 @@ pub fn setup(args: crate::cli::SetupArgs) -> Result<()> {
             root.display()
         ));
         ensure_profile_on_path(args.dry_run)?;
+        if args.bootstrap {
+            crate::util::output::note(
+                "`grm setup --bootstrap` is skipped when GRIMOIRE_ROOT is set; configure tomes \
+                 and install grimoire inside that root explicitly",
+            );
+        }
         return Ok(());
     }
     if args.dry_run {
@@ -26,12 +32,21 @@ pub fn setup(args: crate::cli::SetupArgs) -> Result<()> {
              reboot so macOS creates the synthetic root directory",
         );
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        crate::util::output::note("would create /grm (requires sudo) and chown it to the current user");
+        crate::util::output::note(
+            "would create /grm (requires sudo) and chown it to the current user",
+        );
         ensure_profile_on_path(true)?;
-        crate::util::output::note(&format!(
-            "would then add the {CORE_TOME_URL} and {WORLD_TOME_URL} tomes (if no tome \
-             is configured) and install grimoire through itself"
-        ));
+        if args.bootstrap {
+            crate::util::output::note(&format!(
+                "would then add the {CORE_TOME_URL} and {WORLD_TOME_URL} tomes and install \
+                 grimoire through itself"
+            ));
+        } else {
+            crate::util::output::note(
+                "would leave bootstrap untouched; run `grm setup --bootstrap` to add tomes and \
+                 install grimoire through itself",
+            );
+        }
         return Ok(());
     }
 
@@ -42,7 +57,10 @@ pub fn setup(args: crate::cli::SetupArgs) -> Result<()> {
     setup_linux()?;
 
     ensure_profile_on_path(false)?;
-    bootstrap_core()
+    if args.bootstrap {
+        bootstrap_core()?;
+    }
+    Ok(())
 }
 
 /// Puts the active profile's `bin` on PATH by appending one line to the invoking shell's
@@ -140,10 +158,10 @@ fn display_with_home(path: &Path, home: &str) -> String {
 const CORE_TOME_URL: &str = "https://github.com/hermetomancy/tome-core";
 const WORLD_TOME_URL: &str = "https://github.com/hermetomancy/tome-world";
 
-/// The dogfooding tail of `grm setup`: once the store is usable, configure the core and
-/// world tomes (when none are configured yet) and install `grimoire` through itself.
-/// Best-effort — the store setup already succeeded, so a bootstrap problem warns instead
-/// of failing setup, and an already-bootstrapped system is a quiet no-op.
+/// The dogfooding tail of `grm setup`: once the store is usable, ensure the core and world tomes
+/// are configured and install `grimoire` through itself. Store preparation and bootstrap are one
+/// user-facing setup flow, so failures after `/grm` exists are reported as setup failures rather
+/// than quiet warnings that leave a half-bootstrapped root.
 fn bootstrap_core() -> Result<()> {
     let store = Path::new("/grm");
     if !store.exists() || !is_writable(store)? {
@@ -155,24 +173,8 @@ fn bootstrap_core() -> Result<()> {
     // the bootstrap mutates shared state, so serialise it like any other mutation.
     let _lock = crate::util::process_lock::acquire()?;
 
-    if crate::tome::load_tomes()?.is_empty() {
-        for (name, url) in [("core", CORE_TOME_URL), ("world", WORLD_TOME_URL)] {
-            crate::util::output::note(&format!("adding the {name} tome from {url}…"));
-            if let Err(e) = crate::tome::add(crate::cli::TomeAddArgs {
-                git_url: url.to_owned(),
-                ref_name: "main".to_owned(),
-                signer: Vec::new(),
-                dry_run: false,
-            }) {
-                crate::util::output::warn(&format!(
-                    "could not add the {name} tome: {e:#}; add it with `grm tome add {url}`"
-                ));
-                if name == "core" {
-                    return Ok(()); // without core, the grimoire install below cannot work
-                }
-            }
-        }
-    }
+    ensure_bootstrap_tome("core", CORE_TOME_URL)?;
+    ensure_bootstrap_tome("world", WORLD_TOME_URL)?;
 
     let grimoire_installed = crate::install::InstalledWorld::load_default()?
         .iter()
@@ -181,19 +183,32 @@ fn bootstrap_core() -> Result<()> {
         return Ok(());
     }
     crate::util::output::note("installing grimoire through itself…");
-    if let Err(e) = crate::install::install(crate::cli::InstallArgs {
+    crate::install::install(crate::cli::InstallArgs {
         packages: vec!["grimoire".to_owned()],
         from_source: false,
         locked: false,
         sha256: None,
         dry_run: false,
-    }) {
-        crate::util::output::warn(&format!(
-            "could not install grimoire through itself: {e:#}; run `grm install grimoire` \
-             once the tome publishes it"
-        ));
-    }
+    })
+    .context("install grimoire through itself")?;
     Ok(())
+}
+
+fn ensure_bootstrap_tome(name: &str, url: &str) -> Result<()> {
+    if crate::tome::load_tomes()?
+        .iter()
+        .any(|tome| tome.name == name)
+    {
+        return Ok(());
+    }
+    crate::util::output::note(&format!("adding the {name} tome from {url}…"));
+    crate::tome::add(crate::cli::TomeAddArgs {
+        git_url: url.to_owned(),
+        ref_name: "main".to_owned(),
+        signer: Vec::new(),
+        dry_run: false,
+    })
+    .with_context(|| format!("add the {name} tome from {url}"))
 }
 
 fn setup_posix(path: &Path) -> Result<()> {

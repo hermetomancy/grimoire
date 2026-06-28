@@ -7,7 +7,7 @@ use std::{collections::HashSet, path::PathBuf};
 use crate::{
     build, fetch,
     model::{Dependency, PackageState},
-    solve,
+    solve, tome,
     util::paths,
 };
 
@@ -103,6 +103,7 @@ pub(crate) fn ensure_build_deps_installed_inner(
                 &paths::archive_cache_dir()?,
                 &format!("archive `{}` {}", sub.entry.name, sub.entry.version),
             )?;
+            verify_build_dep_substitute(&archive, sub)?;
             install_store_only(
                 world,
                 &archive,
@@ -111,18 +112,19 @@ pub(crate) fn ensure_build_deps_installed_inner(
                 InstallOrigin::BuildDep,
             )
         } else if let Some(rune) = &step.rune {
-            let store_hash =
-                crate::store::closure::store_hash_for_rune(rune, &world.store_hashes())
-                    .with_context(|| format!("cannot compute store hash for `{}`", step.name))?;
+            let store_hash = step
+                .store_hash
+                .as_deref()
+                .with_context(|| format!("missing planned store hash for `{}`", step.name))?;
             let metadata =
                 build::read_rune_metadata(rune, build::tome_name_for_rune(rune)?.as_deref())?;
             // Reuse a verified cached build of these exact inputs instead of rebuilding.
-            if let Some(archive) = cached_build_archive(&metadata, &store_hash) {
+            if let Some(archive) = cached_build_archive(&metadata, store_hash) {
                 let installed_archive = install_store_only(
                     world,
                     &archive,
                     None,
-                    Some(&store_hash),
+                    Some(store_hash),
                     InstallOrigin::BuildDep,
                 )
                 .with_context(|| format!("store-only install `{}` {}", step.name, step.version))?;
@@ -143,7 +145,7 @@ pub(crate) fn ensure_build_deps_installed_inner(
                 &rune.to_string_lossy(),
                 &paths::build_output_dir()?,
                 &env,
-                &store_hash,
+                store_hash,
                 &world.store_hashes(),
             )?;
             install_store_only(
@@ -167,6 +169,21 @@ pub(crate) fn ensure_build_deps_installed_inner(
         building.remove(&step.name);
     }
 
+    Ok(())
+}
+
+fn verify_build_dep_substitute(archive: &std::path::Path, sub: &solve::Substitute) -> Result<()> {
+    if let Some(tome) = tome::load_tomes()?
+        .into_iter()
+        .find(|tome| tome.name == sub.tome_name)
+    {
+        tome::verify_archive(archive, &sub.entry.archive, &sub.root, &tome).with_context(|| {
+            format!(
+                "verify archive signature for build dependency `{}` {}",
+                sub.entry.name, sub.entry.version
+            )
+        })?;
+    }
     Ok(())
 }
 

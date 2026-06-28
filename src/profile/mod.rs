@@ -17,8 +17,8 @@ use std::{collections::BTreeSet, fs, path::PathBuf};
 use crate::{
     install::InstalledWorld,
     model::PackageState,
-    util::paths,
     util::output::{note, status, strong, success, warn},
+    util::paths,
 };
 
 mod gc;

@@ -49,7 +49,7 @@ fn render_tree(cmd: &clap::Command, stem: &str, invocation: &str, args: &ManArgs
             sub,
             &format!("{stem}-{}", sub.get_name()),
             &format!("{invocation} {}", sub.get_name()),
-            &args,
+            args,
         )?;
     }
     Ok(count)

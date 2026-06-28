@@ -27,7 +27,8 @@ in-process and reads/writes NUON data.
 2. A rune's `build` function may invoke its package's build tooling (`make`, `cc`) — that is
    the package's business, not Grimoire's.
 3. **Exception:** read-only host toolchain identity discovery (`cc --version`,
-   `xcrun --show-sdk-version`, …) may shell out, confined to `src/build/toolchain.rs`.
+   binary-affecting tool `--version` probes, `xcrun --show-sdk-{path,version}`, …) may shell out,
+   confined to `src/build/toolchain.rs`.
 
 ## 2. Rust idiom
 

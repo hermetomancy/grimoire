@@ -126,7 +126,10 @@ fn switch_forward_restores_the_newer_set() {
     setup_two_generations(root);
 
     assert_success(&run(root, &["generation", "switch"]), "switch to gen 1");
-    assert_success(&run(root, &["generation", "switch", "2"]), "switch forward to gen 2");
+    assert_success(
+        &run(root, &["generation", "switch", "2"]),
+        "switch forward to gen 2",
+    );
 
     let list = stdout(&run(root, &["list"]));
     assert!(
@@ -208,7 +211,10 @@ fn doctor_flags_state_generation_divergence() {
     // Re-activating the current generation is the documented repair path.
     let current = stdout(&run(root, &["generation", "list"]));
     assert!(current.contains("* gen-2"), "gen 2 active: {current}");
-    assert_success(&run(root, &["generation", "switch", "2"]), "re-activate to converge");
+    assert_success(
+        &run(root, &["generation", "switch", "2"]),
+        "re-activate to converge",
+    );
     assert!(
         root.join("state")
             .join("packages")
@@ -296,7 +302,10 @@ fn failed_generation_link_is_retried_by_the_next_install() {
 
     // Settling the contest unwedges the same re-run: it relinks and the environment
     // finally contains mawk.
-    assert_success(&run(root, &["pkg", "prefer", "awk", "gawk"]), "prefer awk gawk");
+    assert_success(
+        &run(root, &["pkg", "prefer", "awk", "gawk"]),
+        "prefer awk gawk",
+    );
     assert_success(
         &run(root, &["install", "mawk"]),
         "install mawk after preference relinks",

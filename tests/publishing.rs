@@ -407,3 +407,73 @@ fn tome_build_all_skips_non_matching_targets() {
         );
     }
 }
+
+#[test]
+fn tome_build_all_uses_requested_target_for_filtering_and_store_only_install() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let workspace = TempDir::new().unwrap();
+    let tome_dir = workspace.path().join("crosstarget");
+    let tome_path = tome_dir.to_str().unwrap();
+    assert_success(
+        &run(root, &["tome", "init", "crosstarget", "--path", tome_path]),
+        "tome init",
+    );
+
+    let requested = if target_triple().starts_with("macos-") {
+        "linux-x86_64-musl"
+    } else {
+        "macos-aarch64-darwin"
+    };
+    fs::write(
+        tome_dir.join("runes").join("onlyrequested.rn"),
+        format!(
+            "export const package = {{\n  name: 'onlyrequested'\n  version: '0.1.0'\n  targets: ['{requested}']\n  sources: {{}}\n  deps: {{ build: {{}} runtime: [] }}\n}}\n\nexport def build [ctx] {{\n  let bin_dir = ($ctx.package_dir | path join 'bin')\n  mkdir $bin_dir\n  \"#!/usr/bin/env sh\\nprintf 'onlyrequested\\n'\" | save ($bin_dir | path join 'onlyrequested')\n}}\n"
+        ),
+    )
+    .unwrap();
+
+    let build = run(
+        root,
+        &[
+            "tome", "build", "--all", "--path", tome_path, "--target", requested,
+        ],
+    );
+    assert_success(&build, "cross-target tome build --all");
+
+    let archive_rel = format!("onlyrequested-0.1.0-{requested}.tar.zst");
+    assert!(
+        tome_dir.join("dist").join(&archive_rel).exists(),
+        "requested-target archive should be built"
+    );
+    let index = fs::read_to_string(tome_dir.join("dist").join("index.nuon")).unwrap();
+    assert!(
+        index.contains(&archive_rel),
+        "requested-target archive should be indexed: {index}"
+    );
+}
+
+#[test]
+fn tome_build_index_fails_on_bad_archive() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let workspace = TempDir::new().unwrap();
+    let tome_dir = workspace.path().join("badindex");
+    let tome_path = tome_dir.to_str().unwrap();
+    assert_success(
+        &run(root, &["tome", "init", "badindex", "--path", tome_path]),
+        "tome init",
+    );
+    let dist = tome_dir.join("dist");
+    fs::create_dir_all(&dist).unwrap();
+    fs::write(
+        dist.join("broken-0.1.0-linux-x86_64-musl.tar.zst"),
+        b"not zstd",
+    )
+    .unwrap();
+
+    let rebuild = run(root, &["tome", "build", "--path", tome_path, "--index"]);
+    assert_failure_contains(&rebuild, "index archive", "bad archive index rebuild");
+}

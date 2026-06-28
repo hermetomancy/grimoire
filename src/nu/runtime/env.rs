@@ -23,7 +23,8 @@ pub struct BuildEnv {
     pub target: String,
     /// When set, the POSIX ambient tail (`/usr/bin`, `/bin`) is dropped from build PATH so the
     /// build sees only declared deps and the managed core floor — the `--hermetic` enumeration
-    /// mode that surfaces silent host-userland leaks. Diagnostic only; never affects the store hash.
+    /// mode that surfaces silent host-userland leaks. Folded into compiled store hashes so a
+    /// floor-clean build never shares an address with a build that could see the host tail.
     pub hermetic: bool,
 }
 
