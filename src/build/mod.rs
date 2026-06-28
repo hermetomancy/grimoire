@@ -101,7 +101,7 @@ fn build_log_path(name: &str, version: &str, target: &str, store_hash: &str) -> 
 }
 
 pub fn build(args: BuildArgs) -> Result<()> {
-    let hermetic = !args.bootstrap && !args.impure;
+    let hermetic = effective_source_build_hermetic(args.bootstrap, args.impure)?;
     let result = build_package(
         &args.package,
         &args.output,
@@ -113,6 +113,21 @@ pub fn build(args: BuildArgs) -> Result<()> {
         report(&format!("built {}", product.archive.display()));
     }
     Ok(())
+}
+
+/// Source builds can drop the ambient POSIX tail only after the managed floor exists. Before that
+/// point, bootstrap builds still need `/usr/bin` and `/bin` to realize the floor itself, and their
+/// store hashes use the impure build-environment identity.
+pub fn effective_source_build_hermetic(bootstrap: bool, impure: bool) -> Result<bool> {
+    Ok(source_build_hermetic_with_floor(
+        bootstrap,
+        impure,
+        env::managed_floor_available()?,
+    ))
+}
+
+fn source_build_hermetic_with_floor(bootstrap: bool, impure: bool, floor_available: bool) -> bool {
+    !bootstrap && !impure && floor_available
 }
 
 pub fn build_package(
@@ -658,5 +673,13 @@ mod tests {
             metadata.libs,
             vec!["real".to_owned(), "virtual-lib".to_owned()]
         );
+    }
+
+    #[test]
+    fn source_builds_become_hermetic_only_after_the_floor_exists() {
+        assert!(!source_build_hermetic_with_floor(true, false, true));
+        assert!(!source_build_hermetic_with_floor(false, true, true));
+        assert!(!source_build_hermetic_with_floor(false, false, false));
+        assert!(source_build_hermetic_with_floor(false, false, true));
     }
 }

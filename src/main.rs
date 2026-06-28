@@ -124,8 +124,9 @@ fn run(cli: Cli) -> Result<()> {
         Command::Setup(args) => cmd::setup::setup(args),
 
         Command::StoreHash(args) => {
+            let hermetic = build::effective_source_build_hermetic(false, false)?;
             for package in &args.packages {
-                output::line(&store::closure::store_hash(package)?);
+                output::line(&store::closure::store_hash_with_mode(package, hermetic)?);
             }
             Ok(())
         }

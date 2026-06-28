@@ -52,11 +52,12 @@ Unblocked (native build + per-rune debugging):
 
 The toolchain is already self-hosted (every build driver — cmake, python3, gmake, the compiler
 boundary — is a core package; the host compiler seeds bootstrap only and `host_tool_dirs()` drops
-out once toolchain-wrappers exists). Managed source builds now drop `/usr/bin` + `/bin` by default;
-`--impure` restores that ambient tail only as an explicit escape hatch while packaging a missing
-floor tool. The remaining stage-2 work is empirical: rebuild the core/world runes without
-`--impure`, package every missing utility they expose, and delete each temporary impure need once
-its floor package exists.
+out once toolchain-wrappers exists). Managed source builds drop `/usr/bin` + `/bin` only after the
+complete managed floor exists; before then, bootstrap keeps that ambient tail so the floor can be
+realized. `--impure` keeps the tail as an explicit escape hatch while packaging a missing floor
+tool. The remaining stage-2 work is empirical: rebuild the core/world runes without `--impure`,
+package every missing utility they expose, and delete each temporary impure need once its floor
+package exists.
 
 ### Second-pass review follow-ups (2026-06-24 subsystem review)
 

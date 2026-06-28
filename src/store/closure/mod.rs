@@ -21,7 +21,7 @@ mod stale;
 use capability::CapabilityContext;
 // Re-exported for callers that name the return type; not used inside this module.
 #[allow(unused_imports)]
-pub use stale::{StaleInstall, stale_installed};
+pub use stale::{StaleInstall, stale_installed, stale_installed_with_mode};
 
 /// One member's hash inputs when addressing a split group: its metadata and the sha256 of
 /// its rune bytes. Assembled from disk runes or from a member archive's embedded group.
@@ -49,9 +49,10 @@ fn disk_group_parts(group: &build::split::SplitGroup) -> Result<Vec<GroupPart>> 
 }
 
 /// Computes the content address (store hash) of the package named `name`, resolving its runtime
-/// and build dependency closures to store hashes.
-pub fn store_hash(name: &str) -> Result<String> {
-    Walker::new()?.of_name(name, &VersionReq::STAR)
+/// and build dependency closures with the source-build PATH mode the caller will actually use.
+pub fn store_hash_with_mode(name: &str, hermetic: bool) -> Result<String> {
+    Walker::with_target_and_mode(&paths::target_triple(), hermetic)?
+        .of_name(name, &VersionReq::STAR)
 }
 
 /// Computes the content address for a specific rune file and explicit target triple, so the exact
@@ -202,16 +203,16 @@ struct Walker {
 }
 
 impl Walker {
-    fn new() -> Result<Self> {
-        Self::with_target(&paths::target_triple())
+    fn with_target(target: &str) -> Result<Self> {
+        Self::with_target_and_mode(target, true)
     }
 
-    fn with_target(target: &str) -> Result<Self> {
+    fn with_target_and_mode(target: &str, hermetic: bool) -> Result<Self> {
         Ok(Self {
             target: target.to_string(),
             // Compiled packages fold the host toolchain identity and PATH mode into their hash;
             // fixed-output packages ignore it.
-            build_env: toolchain::store_build_env_id_for_target(true, target),
+            build_env: toolchain::store_build_env_id_for_target(hermetic, target),
             cache: HashMap::new(),
             stack: Vec::new(),
             resolved: BTreeMap::new(),

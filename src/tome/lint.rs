@@ -14,7 +14,7 @@ use crate::{
     cli::TomeLintArgs,
     model::validate_tome_name,
     nu::runtime::EmbeddedNuRuntime,
-    util::output::{problem, report},
+    util::output::{problem, report, warn},
 };
 
 use super::verify::{read_tome_manifest, validate_tome_packages};
@@ -25,7 +25,11 @@ pub fn lint(args: TomeLintArgs) -> Result<()> {
         bail!("{} is not a tome (missing tome.rn)", root.display());
     }
 
+    let warnings = collect_warnings(root)?;
     let problems = collect_problems(root)?;
+    for warning in &warnings {
+        warn(warning);
+    }
     if problems.is_empty() {
         let runes = root.join("runes");
         let count = rune_files(&runes).map(|v| v.len()).unwrap_or(0);
@@ -101,6 +105,26 @@ pub(super) fn collect_problems(root: &Path) -> Result<Vec<String>> {
     }
 
     Ok(problems)
+}
+
+fn collect_warnings(root: &Path) -> Result<Vec<String>> {
+    let runes_dir = root.join("runes");
+    if !runes_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut warnings = Vec::new();
+    for path in rune_files(&runes_dir)? {
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        let source = std::fs::read(&path)?;
+        if let Some(warning) = crate::nu::runtime::shell_wrapper_warning(&source, &rel) {
+            warnings.push(warning);
+        }
+    }
+    Ok(warnings)
 }
 
 /// The `.rn` files directly under `runes_dir`, sorted by name for stable output and a
@@ -202,5 +226,25 @@ mod tests {
                 .any(|p| p.contains("duplicate package name `dup`")),
             "{problems:?}"
         );
+    }
+
+    #[test]
+    fn shell_wrapper_is_warning_not_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("runes")).unwrap();
+        write(
+            &root.join("tome.rn"),
+            &crate::tome::tome_manifest_template("scratch", "scratch tome"),
+        );
+        write(
+            &root.join("runes/shell.rn"),
+            "export const package = { name: \"shell\", version: \"1.0.0\" }\n\
+             export def build [ctx] { sh -c \"echo hi\" }\n",
+        );
+        assert!(collect_problems(root).unwrap().is_empty());
+        let warnings = collect_warnings(root).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("sh -c"), "{warnings:?}");
     }
 }

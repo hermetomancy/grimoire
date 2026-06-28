@@ -51,7 +51,7 @@ pub(crate) fn ensure_build_deps_installed_inner(
             Some(state) => satisfied.push(state.clone()),
         }
     }
-    let stale_info = crate::store::closure::stale_installed(world);
+    let stale_info = crate::store::closure::stale_installed_with_mode(world, hermetic);
     let stale: HashSet<String> = stale_info.iter().map(|s| s.name.clone()).collect();
     for dep in deps {
         if let Some(state) = world.resolve_dep(&dep.name)

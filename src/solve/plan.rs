@@ -84,7 +84,7 @@ impl Plan {
         // canonically here (the address the rebuild installs them at); any a step folds positionally
         // are themselves steps, since they were dropped from `installed` before resolving.
         if let Ok(world) = crate::install::InstalledWorld::load_default() {
-            let drifted: HashSet<String> = closure::stale_installed(&world)
+            let drifted: HashSet<String> = closure::stale_installed_with_mode(&world, hermetic)
                 .into_iter()
                 .map(|stale| stale.name)
                 .collect();

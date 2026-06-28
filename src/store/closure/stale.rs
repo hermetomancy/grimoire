@@ -28,7 +28,14 @@ pub struct StaleInstall {
 }
 
 pub fn stale_installed(world: &InstalledWorld) -> Vec<StaleInstall> {
-    let Ok(mut walker) = super::Walker::new() else {
+    let hermetic = build::effective_source_build_hermetic(false, false).unwrap_or(true);
+    stale_installed_with_mode(world, hermetic)
+}
+
+pub fn stale_installed_with_mode(world: &InstalledWorld, hermetic: bool) -> Vec<StaleInstall> {
+    let Ok(mut walker) =
+        super::Walker::with_target_and_mode(&crate::util::paths::target_triple(), hermetic)
+    else {
         return Vec::new();
     };
     // Address split-member externals that are *held* against their pinned installed address,
@@ -42,7 +49,7 @@ pub fn stale_installed(world: &InstalledWorld) -> Vec<StaleInstall> {
         .map(|state| (state.name.clone(), state.store_hash.clone()))
         .collect();
     let current_env =
-        toolchain::store_build_env_id_for_target(true, &crate::util::paths::target_triple());
+        toolchain::store_build_env_id_for_target(hermetic, &crate::util::paths::target_triple());
     let mut stale = Vec::new();
     for state in world.iter() {
         // A hold pins the installed bits, not just the version: a held package is never

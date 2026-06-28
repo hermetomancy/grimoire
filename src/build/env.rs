@@ -78,6 +78,12 @@ fn core_bin_dirs() -> Result<Vec<PathBuf>> {
     Ok(dirs)
 }
 
+/// Returns `true` once the complete managed build floor is installed.
+pub fn managed_floor_available() -> Result<bool> {
+    let world = install::InstalledWorld::load_default()?;
+    Ok(CORE_PACKAGES.iter().all(|name| world.contains(name)))
+}
+
 /// Returns `true` when `toolchain-wrappers` is installed, meaning the managed compiler boundary
 /// is available and the host compiler boundary is no longer needed.
 fn core_compiler_boundary_available() -> Result<bool> {
@@ -247,15 +253,17 @@ pub fn build_env_for_target(
         env.push(("MACOSX_DEPLOYMENT_TARGET".to_string(), "11.0".to_string()));
     }
 
-    if managed_boundary {
-        Ok(BuildEnv::managed(all_path_dirs, Vec::new(), env))
+    let mut build_env = if managed_boundary {
+        BuildEnv::managed(all_path_dirs, Vec::new(), env)
     } else {
-        Ok(BuildEnv::managed(
+        BuildEnv::managed(
             all_path_dirs,
             super::toolchain::source_build_host_tools()?,
             env,
-        ))
-    }
+        )
+    };
+    build_env.target = target.to_owned();
+    Ok(build_env)
 }
 
 #[cfg(test)]
@@ -409,6 +417,7 @@ mod tests {
     #[test]
     fn musl_target_sets_static_flags() {
         let env = build_env_for_target(Vec::new(), Vec::new(), "linux-x86_64-musl", "pkg").unwrap();
+        assert_eq!(env.target, "linux-x86_64-musl");
         let get = |key: &str| {
             env.extra_env
                 .iter()

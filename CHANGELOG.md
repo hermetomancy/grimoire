@@ -22,8 +22,9 @@ heading when it is tagged.
   linter.
 - Managed build-floor userland: `uutils` (Rust coreutils), `dash` (POSIX sh), `mawk` (awk),
   `ggrep` (GNU grep), and `gtar` (GNU tar) join `gsed` on the build floor (`CORE_PACKAGES`), replacing `toybox` — whose
-  set was too thin for autotools `configure` (no awk/sh/tr/expr/…). Managed builds now drop the
-  host `/usr/bin` tail by default; `--impure` restores it only as an explicit shrinking fallback.
+  set was too thin for autotools `configure` (no awk/sh/tr/expr/…). Managed builds drop the host
+  `/usr/bin` tail once that floor exists; before then, bootstrap builds keep the POSIX ambient
+  tail to realize the floor itself.
 - `build_only` rune metadata: a build-only package (the managed `build-env`, `clang`, and `llvm`)
   is pinned in the store and available to source builds, but its bins stay off the active profile —
   the managed toolchain/userland floor (dash, mawk, uutils, gsed, ggrep, clang, llvm, cmake,
@@ -48,10 +49,12 @@ heading when it is tagged.
   `LC_LOAD_DYLIB`) for dynamic references to host libraries that are neither a declared
   dependency nor the libc/platform floor — the host-link class the purity scan cannot see (a
   library bound without a baked path). Warns by default, `--strict` fails the build.
-- Managed source builds are hermetic by default: `grm build`, `grm install` source fallback, and
-  `grm tome build` see only declared deps and the managed core floor. The new `--impure` flag
-  restores the POSIX ambient PATH tail (`/usr/bin`, `/bin`) as an explicit escape hatch while
-  packaging missing floor tools, and impure builds have distinct store hashes from hermetic builds.
+- Managed source builds are hermetic by default once the managed core floor exists: `grm build`,
+  `grm install` source fallback, and `grm tome build` see only declared deps and that floor.
+  Before the floor exists, bootstrap builds keep the POSIX ambient PATH tail (`/usr/bin`, `/bin`)
+  so they can realize the floor itself; `--impure` keeps the same tail as an explicit escape hatch
+  while packaging missing floor tools. Ambient-tail builds have distinct store hashes from
+  hermetic builds.
 - Capability runtime deps are content-addressable: the closure walker resolves providers
   like the solver (preference → installed → first by name, deterministically).
 - Compiled package store hashes now fold in the resolved build-dependency closure, not only the
@@ -68,6 +71,8 @@ heading when it is tagged.
 
 ### Changed
 
+- `grm tome lint` now warns, rather than fails, when a rune uses `sh -c`/`bash -c`; the authoring
+  contract still prefers native Nushell build steps.
 - Rune authoring docs now make the external-command boundary explicit: missing structured
   Nushell operations should become curated rune commands, while external invocations must come
   from declared build deps, the package source tree, or the managed POSIX floor.
@@ -161,6 +166,10 @@ heading when it is tagged.
 
 ### Fixed
 
+- Target-specific build environments now set `ctx.target` to the requested build target instead of
+  leaving it at the host triple.
+- Rollback restores of package state and the lockfile now write through an atomic staged file
+  rather than mutating those state files in place.
 - `grm tome build --all --target <triple>` now uses the requested target consistently for rune
   ordering/filtering and for store-only realization of intermediate build outputs.
 - Source-root install dry-runs now validate target/conflict gates and compute dependency store

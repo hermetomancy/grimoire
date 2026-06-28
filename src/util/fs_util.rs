@@ -1,7 +1,7 @@
 //! Small filesystem utilities shared across modules.
 
 use anyhow::{Context, Result, bail};
-use std::{fs, path::Path};
+use std::{fs, io::Write, path::Path};
 
 /// Flushes a directory's own contents to disk so that a `rename`, create, or remove of an entry
 /// inside it survives a crash. POSIX `rename` is atomic with respect to concurrent readers but is
@@ -17,6 +17,24 @@ pub fn fsync_dir(dir: &Path) -> Result<()> {
     // WHY ignored: a directory that cannot be fsync'd (unsupported on the filesystem) still leaves
     // the rename visible; we lose only the durability upgrade, never consistency.
     let _ = file.sync_all();
+    Ok(())
+}
+
+/// Writes bytes through a fsync'd temporary file and atomic rename.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut temp = tempfile::Builder::new()
+        .prefix(".grimoire-write-")
+        .tempfile_in(parent)?;
+    temp.write_all(bytes)?;
+    temp.flush()?;
+    temp.as_file()
+        .sync_all()
+        .with_context(|| format!("fsync staged file for {}", path.display()))?;
+    temp.persist(path)
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    fsync_dir(parent)?;
     Ok(())
 }
 

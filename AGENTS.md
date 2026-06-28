@@ -3,14 +3,14 @@
 Binding engineering rules for the Grimoire codebase. When a rule and convenience conflict,
 rule wins. When two rules conflict, prefer correctness and safety, then clarity, then brevity.
 
-**Correctness over expediency — the prime directive.** Never choose the easiest or fastest
-solution when a more correct one exists. The goal is *always* to advance Grimoire toward its end
-goal — a fully self-hosted, hermetic toolchain — never to make a local build pass sooner. Do not
-reach for an allowlist, an exception, or a "good enough" shortcut to skip work the end goal
-requires. A rebuild is an acceptable cost — even of LLVM or Rust, however many times — an unearned
-exception is not. When a host dependency can be packaged or eliminated, package or eliminate it;
-accept it as a platform given only after the correct path is genuinely exhausted, and say so
-explicitly when you do.
+**Correctness over expediency — the prime directive.**
+
+- Advance Grimoire toward a fully self-hosted, hermetic toolchain; do not make a local build pass by
+  weakening that goal.
+- Do not add allowlists, exceptions, or host fallbacks when a dependency can be packaged or removed.
+- Rebuilds are acceptable; unearned exceptions are not.
+- Accept a host/platform boundary only after the packaging or elimination path is genuinely
+  exhausted, and document that boundary explicitly.
 
 ## 0. What Grimoire is
 
@@ -39,8 +39,8 @@ in-process and reads/writes NUON data.
 4. All fallible functions return `anyhow::Result<T>`. Attach `.context(...)` / `.with_context(...)`
    at every boundary where a bare error would be ambiguous.
 5. Prefer `&str`/`&Path`/`&[T]` in signatures; take ownership only when storing or consuming.
-6. Derive (`Debug`, `Clone`, `Serialize`, `Deserialize`, `PartialEq`) by default. Implement by
-   hand only when the derive is wrong.
+6. Derive routine traits (`Debug`, `Clone`, `PartialEq`, etc.) when useful. Implement by hand only
+   when the derive is wrong.
 7. Code must pass `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`.
 
 ## 3. Functions and structure
@@ -50,11 +50,11 @@ in-process and reads/writes NUON data.
 3. Follow DRY, but do not invent abstractions for a single caller.
 4. Modularise aggressively. Group related modules under folders with a clear root.
 5. Keep surfaces minimal and intentional. Do not add `pub` just for cross-module convenience.
-6. **File size limits: 500 lines soft, 800 hard.** Past 500, look for a seam to split along; a
-   change that would cross 800 must split the file first, into a directory module per rule 4.
-   Do not dodge the limit by compressing code or stripping comments — it exists to force
-   scoping, not brevity. Integration tests follow the same limits: themed files under
-   `tests/`, shared helpers in `tests/support/`.
+6. **File size limits: 500 lines soft, 800 hard.** Past 500, look for a seam to split along. New
+   files and touched files must not cross 800; if an existing file is already over 800, the change
+   that touches it must split it first. Do not dodge the limit by compressing code or stripping
+   comments — it exists to force scoping, not brevity. Integration tests follow the same limits:
+   themed files under `tests/`, shared helpers in `tests/support/`.
 7. **One module, one concern.** A module's name should predict its contents. Logic shared by
    two modules moves to a common home — never copy-paste it or reach into a sibling's private
    helpers. Split oversized files along responsibilities (parsing vs. orchestration vs. IO),
@@ -113,11 +113,12 @@ inherited host env vars unless Grimoire deliberately sets them.
 
 **Capability resolution:** any `bins` key that differs from the package name is a capability
 (`gawk` provides `gawk` and `awk`). Literal names resolve directly; capability names resolve
-to any provider, with `grm pkg prefer` breaking ties (an explicit `grm install <capability>` with
-several providers and no preference asks the user and records the answer). Depend on the
-capability (`awk`) when any implementation will do; on the literal name (`gawk`) when you
-need that implementation. Multi-implementation standard utilities are packaged under their
-implementation name and ship both command names — the naming rule in rune-authoring.md.
+to any provider, with `grm pkg prefer` breaking ties. An explicit `grm install <capability>` with
+several providers and no preference may prompt when interactive; otherwise it errors with guidance
+and records no choice. Depend on the capability (`awk`) when any implementation will do; on the
+literal name (`gawk`) when you need that implementation. Multi-implementation standard utilities
+are packaged under their implementation name and ship both command names — the naming rule in
+rune-authoring.md.
 
 **Platform-conditional build deps:** `'name[platform-glob]'` includes the dep only when the
 target triple matches the glob — full triple or prefix (`linux-*`, `linux-*-musl`).
@@ -131,7 +132,8 @@ rules:
 1. A rune exports `package` (inert metadata, §4) and `build` (the only place package logic runs).
 2. Install into `ctx.package_dir` (the staging area that gets packed); configure against
    `ctx.prefix` (the final store location).
-3. **No `sh -c` in runes.** Build steps are native Nushell.
+3. **Avoid `sh -c` in runes.** Build steps are native Nushell; `grm tome lint` warns when a rune
+   hides work behind `sh -c`/`bash -c`.
 4. Wrap variables in parentheses in external command position — `($ctx.prefix)`, never
    `$ctx.prefix` — or Nushell can silently mis-parse them.
 5. Platform logic lives in the rune via `ctx.target` prefix matches; Rust only supplies the triple.
@@ -217,7 +219,8 @@ early with a clear build-env error.
 
 ## 12. CLI and user-facing output
 
-1. Progress and diagnostics go to **stderr**; final results go to **stdout**.
+1. Progress and problems go to **stderr**; final results, cautions, and requested data go to
+   **stdout**.
 2. Error messages are for humans. Say what failed and, where possible, what to do.
 3. The CLI is imperative and explicit. Commands accept multiple positional packages where
    semantically reasonable; multi-package mutations are one all-or-nothing transaction (§9.3).

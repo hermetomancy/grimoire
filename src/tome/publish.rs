@@ -47,7 +47,7 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
     fs::create_dir_all(&dist_dir)?;
     let index_path = dist_dir.join(&packages.index);
 
-    let hermetic = !args.bootstrap && !args.impure;
+    let hermetic = crate::build::effective_source_build_hermetic(args.bootstrap, args.impure)?;
 
     if args.index {
         let catalog = rebuild_index_with_mode(&dist_dir, hermetic)?;

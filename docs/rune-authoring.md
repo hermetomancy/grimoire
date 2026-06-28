@@ -305,9 +305,10 @@ record.
 
 ## Build script patterns
 
-**No `sh -c`.** Rune `build` functions are native Nushell. Use Nushell's own control flow,
-variables, and external command invocation. Shelling out to `sh` forfeits error handling and
-obscures the build logic; decompose complex steps instead of hiding them in a shell script.
+**Avoid `sh -c`.** Rune `build` functions should be native Nushell. Use Nushell's own control
+flow, variables, and external command invocation. Shelling out to `sh` forfeits error handling and
+obscures the build logic; `grm tome lint` warns on `sh -c`/`bash -c` so authors can decompose
+complex steps instead of hiding them in a shell script.
 
 **External commands must be owned by the build environment.** Invoking upstream build tools
 (`make`, `cmake`, `cargo`, `cc`) is expected when those tools come from declared build deps or

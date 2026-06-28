@@ -267,7 +267,7 @@ impl InstalledWorld {
                 let path_for_closure = path.clone();
                 tx.on_rollback(move || match &previous {
                     Some(bytes) => {
-                        let _ = fs::write(&path_for_closure, bytes);
+                        let _ = crate::util::fs_util::write_atomic(&path_for_closure, bytes);
                     }
                     None => {
                         let _ = fs::remove_file(&path_for_closure);
@@ -288,7 +288,7 @@ impl InstalledWorld {
                 let path_for_closure = path.clone();
                 tx.on_rollback(move || match &previous {
                     Some(bytes) => {
-                        let _ = fs::write(&path_for_closure, bytes);
+                        let _ = crate::util::fs_util::write_atomic(&path_for_closure, bytes);
                     }
                     None => {
                         let _ = fs::remove_file(&path_for_closure);

@@ -162,7 +162,8 @@ pub fn install(args: InstallArgs) -> Result<()> {
         installed.retain(|name, version| pins.get(name).is_some_and(|pin| &pin.version == version));
     }
 
-    let mut installer = Installer::new(installed, pins, args.dry_run, !args.impure, world);
+    let hermetic = build::effective_source_build_hermetic(false, args.impure)?;
+    let mut installer = Installer::new(installed, pins, args.dry_run, hermetic, world);
 
     // Announce implied work before the first fetch: a one-line install can pull a long
     // tail of missing or drifted build deps, and the user deserves the count (and the
@@ -316,7 +317,8 @@ pub fn restore(args: crate::cli::RestoreArgs) -> Result<()> {
     // Reuse an installed package only when it already matches its pin, like `--locked`.
     let mut installed = world.installed_versions_current()?;
     installed.retain(|name, version| pins.get(name).is_some_and(|pin| &pin.version == version));
-    let mut installer = Installer::new(installed, Some(pins), args.dry_run, true, world);
+    let hermetic = build::effective_source_build_hermetic(false, false)?;
+    let mut installer = Installer::new(installed, Some(pins), args.dry_run, hermetic, world);
     for name in &requested {
         installer
             .install_named(name)
@@ -434,7 +436,8 @@ pub fn upgrade_packages(names: &[String]) -> Result<()> {
     for name in names {
         installed.remove(name);
     }
-    let mut installer = Installer::new(installed, None, false, true, world);
+    let hermetic = build::effective_source_build_hermetic(false, false)?;
+    let mut installer = Installer::new(installed, None, false, hermetic, world);
     for name in names {
         installer
             .install_named(name)

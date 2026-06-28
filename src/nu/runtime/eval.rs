@@ -59,6 +59,22 @@ pub(crate) fn exported_const_from_bytes(source: &[u8], label: &str, name: &str) 
     Ok(value.clone())
 }
 
+fn token_text<'a>(src: &'a [u8], token: &nu_parser::Token) -> &'a [u8] {
+    src.get(token.span.start..token.span.end).unwrap_or(&[])
+}
+
+/// A block/closure/record/list body is lexed as a single bracketed token; strip one layer of
+/// `{}`/`()`/`[]` so the body can be re-lexed and its command positions inspected too.
+fn inner_block(text: &[u8]) -> Option<&[u8]> {
+    let close = match text.first()? {
+        b'{' => b'}',
+        b'(' => b')',
+        b'[' => b']',
+        _ => return None,
+    };
+    (text.len() >= 2 && text.last() == Some(&close)).then(|| &text[1..text.len() - 1])
+}
+
 /// Parse keywords that read files from disk *during parsing* — `use`/`source`/`source-env` load a
 /// module or script, `overlay`'s `use` form loads a module, and `register`/`plugin`/`module` pull
 /// in external definitions. None belong to the rune command set, and on the metadata path they
@@ -78,22 +94,6 @@ const FILE_LOADING_KEYWORDS: &[&str] = &[
 /// the `export use`/`export module` forms. Runs purely on the lexer — no parsing, so no file is
 /// ever opened — and so must precede [`nu_parser::parse`] on the metadata path.
 fn reject_file_loading_keywords(source: &[u8], label: &str) -> Result<()> {
-    fn token_text<'a>(src: &'a [u8], token: &nu_parser::Token) -> &'a [u8] {
-        src.get(token.span.start..token.span.end).unwrap_or(&[])
-    }
-
-    /// A block/closure/record/list body is lexed as a single bracketed token; strip one layer of
-    /// `{}`/`()`/`[]` so the body can be re-lexed and its command positions inspected too.
-    fn inner_block(text: &[u8]) -> Option<&[u8]> {
-        let close = match text.first()? {
-            b'{' => b'}',
-            b'(' => b')',
-            b'[' => b']',
-            _ => return None,
-        };
-        (text.len() >= 2 && text.last() == Some(&close)).then(|| &text[1..text.len() - 1])
-    }
-
     fn scan(src: &[u8]) -> Option<String> {
         use nu_parser::TokenContents;
         let (tokens, _) = nu_parser::lex(src, 0, &[], &[], true);
@@ -138,6 +138,60 @@ fn reject_file_loading_keywords(source: &[u8], label: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Runes may run external build tools, but hiding build logic in a shell parser is worth a
+/// lint warning because it obscures error handling and dependency ownership.
+pub(crate) fn shell_wrapper_warning(source: &[u8], label: &str) -> Option<String> {
+    fn is_shell_command(word: &str) -> bool {
+        matches!(word, "sh" | "bash") || word.ends_with("/sh") || word.ends_with("/bash")
+    }
+
+    fn scan(src: &[u8]) -> Option<String> {
+        use nu_parser::TokenContents;
+        let (tokens, _) = nu_parser::lex(src, 0, &[], &[], true);
+        let mut command_position = true;
+        let mut shell_command: Option<String> = None;
+        for token in &tokens {
+            match token.contents {
+                TokenContents::Pipe
+                | TokenContents::PipePipe
+                | TokenContents::Semicolon
+                | TokenContents::Eol => {
+                    command_position = true;
+                    shell_command = None;
+                }
+                TokenContents::Item => {
+                    let word = std::str::from_utf8(token_text(src, token)).unwrap_or_default();
+                    if command_position {
+                        shell_command = is_shell_command(word).then(|| word.to_owned());
+                        command_position = false;
+                    } else if word == "-c"
+                        && let Some(shell) = &shell_command
+                    {
+                        return Some(shell.clone());
+                    }
+                    if let Some(inner) = inner_block(token_text(src, token))
+                        && let Some(found) = scan(inner)
+                    {
+                        return Some(found);
+                    }
+                }
+                _ => {
+                    command_position = false;
+                    shell_command = None;
+                }
+            }
+        }
+        None
+    }
+
+    scan(source).map(|shell| {
+        format!(
+            "{label}: `{shell} -c` hides build logic in a shell parser; prefer Nushell control \
+             flow and direct external command invocation"
+        )
+    })
 }
 
 pub(crate) fn eval_nu_source(

@@ -531,7 +531,7 @@ pub(crate) fn rebuild_lock(tx: &mut Transaction, world: &InstalledWorld) -> Resu
         let lock_path = lock_path.clone();
         tx.on_rollback(move || match &previous {
             Some(bytes) => {
-                let _ = fs::write(&lock_path, bytes);
+                let _ = crate::util::fs_util::write_atomic(&lock_path, bytes);
             }
             None => {
                 let _ = fs::remove_file(&lock_path);

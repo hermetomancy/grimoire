@@ -35,8 +35,8 @@ them store-only for later builds.
 addresses, install reasons, holds, and tome commits; `grm generation restore` rebuilds the recorded set
 on any install root, and `--locked` operations refuse to resolve against a tome that moved
 off its pinned commit.
-- **Trustable binaries.** Tome indexes can be minisign-signed and TOFU-pinned, so an index
-signature authenticates every archive hash it publishes.
+- **Trustable binaries.** Signed tomes authenticate source runes through a signed manifest and
+each published archive through its own minisign signature.
 - **Generations and switching.** Every install/remove/upgrade creates a new generation;
 `grm generation switch` moves between them (back or forward) instantly without rebuilding.
 - **Distro-citizen tooling.** Install-reason tracking — removing a package takes its
@@ -248,7 +248,7 @@ grm addendum remove <name>
 ## Security
 
 Grimoire's design eliminates many traditional package-manager risks by construction:
-everything is user-local, checksum-verified, optionally index-signed, and installed without
+everything is user-local, checksum-verified, optionally signature-verified, and installed without
 arbitrary root execution. The binding security invariants are documented in
 [AGENTS.md §10](AGENTS.md).
 
