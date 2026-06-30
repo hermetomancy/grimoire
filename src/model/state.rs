@@ -171,7 +171,6 @@ impl PackageState {
 pub struct LockFile {
     pub target: String,
     pub tomes: Vec<TomeState>,
-    pub addendums: Vec<AddendumState>,
     pub packages: Vec<PackageState>,
 }
 
@@ -187,13 +186,6 @@ impl LockFile {
             .map(LockFile::tome_value)
             .collect::<Vec<_>>();
         record.push("tomes", Value::list(tomes, Span::unknown()));
-
-        let addendums = self
-            .addendums
-            .iter()
-            .map(LockFile::addendum_value)
-            .collect::<Vec<_>>();
-        record.push("addendums", Value::list(addendums, Span::unknown()));
 
         let packages = self
             .packages
@@ -225,20 +217,6 @@ impl LockFile {
             "source_commit",
             Value::string(
                 tome.checked_commit.as_deref().unwrap_or(""),
-                Span::unknown(),
-            ),
-        );
-        Value::record(record, Span::unknown())
-    }
-
-    fn addendum_value(addendum: &AddendumState) -> Value {
-        let mut record = Record::new();
-        record.push("name", Value::string(&addendum.name, Span::unknown()));
-        record.push("source_url", Value::string(&addendum.url, Span::unknown()));
-        record.push(
-            "source_commit",
-            Value::string(
-                addendum.checked_commit.as_deref().unwrap_or(""),
                 Span::unknown(),
             ),
         );

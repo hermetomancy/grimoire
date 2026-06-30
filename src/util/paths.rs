@@ -178,11 +178,11 @@ pub fn validate_target_triple(target: &str) -> Result<()> {
     }
     let valid = matches!(
         (os, abi),
-        ("linux", "musl" | "gnu") | ("macos", "darwin") | ("freebsd", "unknown")
+        ("linux", "musl") | ("macos", "darwin") | ("freebsd", "unknown")
     );
     if !valid {
         bail!(
-            "target `{target}` is unsupported; expected linux-*-musl, linux-*-gnu, macos-*-darwin, or freebsd-*-unknown"
+            "target `{target}` is unsupported; expected linux-*-musl, macos-*-darwin, or freebsd-*-unknown"
         );
     }
     Ok(())
@@ -303,7 +303,7 @@ mod tests {
     fn validate_target_triple_accepts_supported_targets() {
         for target in [
             "linux-x86_64-musl",
-            "linux-aarch64-gnu",
+            "linux-aarch64-musl",
             "macos-aarch64-darwin",
             "freebsd-x86_64-unknown",
         ] {
@@ -317,6 +317,7 @@ mod tests {
             "linux",
             "linux-*",
             "windows-x86_64-msvc",
+            "linux-aarch64-gnu",
             "linux-riscv64-musl",
         ] {
             assert!(validate_target_triple(target).is_err(), "{target}");

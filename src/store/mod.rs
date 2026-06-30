@@ -274,7 +274,7 @@ mod tests {
             b"rune",
             runtime_deps,
             build_deps,
-            "linux-x86_64-gnu",
+            "linux-x86_64-musl",
             build_env,
         )
     }
@@ -381,7 +381,7 @@ mod tests {
             ("core".to_string(), "aaa".to_string()),
             ("extra".to_string(), "bbb".to_string()),
         ]);
-        let group = split_group_hash(&parent, &rune_hashes, &[], &[], "linux-x86_64-gnu", "env");
+        let group = split_group_hash(&parent, &rune_hashes, &[], &[], "linux-x86_64-musl", "env");
         let core = split_member_hash(&group, "core");
         let extra = split_member_hash(&group, "extra");
         assert_ne!(core, extra, "members must have distinct addresses");
@@ -405,8 +405,8 @@ mod tests {
             // e.g. the member's `files` globs changed: the parent's remainder changes too.
             ("extra".to_string(), "ccc".to_string()),
         ]);
-        let g1 = split_group_hash(&parent, &before, &[], &[], "linux-x86_64-gnu", "env");
-        let g2 = split_group_hash(&parent, &after, &[], &[], "linux-x86_64-gnu", "env");
+        let g1 = split_group_hash(&parent, &before, &[], &[], "linux-x86_64-musl", "env");
+        let g2 = split_group_hash(&parent, &after, &[], &[], "linux-x86_64-musl", "env");
         assert_ne!(g1, g2);
         assert_ne!(
             split_member_hash(&g1, "core"),
@@ -419,13 +419,13 @@ mod tests {
     fn external_deps_fold_into_the_group_hash() {
         let parent = metadata("core", false);
         let rune_hashes = BTreeMap::from([("core".to_string(), "aaa".to_string())]);
-        let without = split_group_hash(&parent, &rune_hashes, &[], &[], "linux-x86_64-gnu", "env");
+        let without = split_group_hash(&parent, &rune_hashes, &[], &[], "linux-x86_64-musl", "env");
         let with = split_group_hash(
             &parent,
             &rune_hashes,
             &["dephash".to_string()],
             &[],
-            "linux-x86_64-gnu",
+            "linux-x86_64-musl",
             "env",
         );
         assert_ne!(without, with);
@@ -435,13 +435,13 @@ mod tests {
     fn build_deps_fold_into_the_group_hash() {
         let parent = metadata("core", false);
         let rune_hashes = BTreeMap::from([("core".to_string(), "aaa".to_string())]);
-        let without = split_group_hash(&parent, &rune_hashes, &[], &[], "linux-x86_64-gnu", "env");
+        let without = split_group_hash(&parent, &rune_hashes, &[], &[], "linux-x86_64-musl", "env");
         let with = split_group_hash(
             &parent,
             &rune_hashes,
             &[],
             &["builddephash".to_string()],
-            "linux-x86_64-gnu",
+            "linux-x86_64-musl",
             "env",
         );
         assert_ne!(without, with);

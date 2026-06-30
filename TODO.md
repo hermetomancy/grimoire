@@ -6,12 +6,11 @@ not here. When everything below is done and reflected in the design doc, delete 
 ## In progress / next
 
 - **Verify the toolchain cleanup + build-scratch hardening on a musl host**
-- **Generalize / harden**: extend `rust-stage0.rn` to host-gate and fetch
-  the correct Tier 2 host-tools tarball for every supported target (aarch64-musl, x86_64-musl,
-  freebsd-x86_64, freebsd-aarch64), not just gnu vs. musl on Linux aarch64; the x86_64-musl seed
-  currently isn't host-gated because the static release runs anywhere, but the others must select
-  the right upstream tarball. Then consider a `host_libc` unit test via the `GRM_HOST_LIBC`
-  override.
+- **Generalize / harden**: finish `rust-stage0.rn` host-tool coverage for supported targets.
+  Linux always targets musl; `glibc` only selects a build-host seed when the host is glibc.
+  The Linux aarch64 seeds are host-libc gated, and the x86_64-musl seed is not host-gated because
+  the static release runs anywhere. Remaining: add the FreeBSD aarch64 host-tools tarball and
+  consider a `host_libc` unit test via the `GRM_HOST_LIBC` override.
 
 ## Remaining before a stable release
 
@@ -38,12 +37,11 @@ tarball. The remaining work is native build + per-rune debugging.
 
 Unblocked (native build + per-rune debugging):
 
-- ⏳ Linux x86_64 glibc
-- ⏳ Linux aarch64 glibc
-- ⏳ Linux x86_64 musl
-- ⏳ Linux aarch64 musl — needs `rust-stage0.rn` updated to fetch the official
-  `aarch64-unknown-linux-musl` host tools (currently cross-seeds from the gnu tarball on a glibc
-  host). Already proven on a glibc-hosted musl cross build.
+- ⏳ Linux x86_64 musl on a glibc host
+- ⏳ Linux aarch64 musl on a glibc host
+- ⏳ Linux x86_64 musl on a musl host
+- ⏳ Linux aarch64 musl on a musl host — host-gated stage0 source is wired; still needs native
+  build proof. Already proven on a glibc-hosted musl cross build.
 - ⏳ FreeBSD x86_64
 - ⏳ FreeBSD aarch64 — needs `rust-stage0.rn` updated to fetch the official
   `aarch64-unknown-freebsd` host tools.
@@ -53,21 +51,18 @@ Unblocked (native build + per-rune debugging):
 The toolchain is already self-hosted (every build driver — cmake, python3, gmake, the compiler
 boundary — is a core package; the host compiler seeds bootstrap only and `host_tool_dirs()` drops
 out once toolchain-wrappers exists). Managed source builds drop `/usr/bin` + `/bin` only after the
-complete managed floor exists; before then, bootstrap keeps that ambient tail so the floor can be
-realized. `--impure` keeps the tail as an explicit escape hatch while packaging a missing floor
-tool. The remaining stage-2 work is empirical: rebuild the core/world runes without `--impure`,
-package every missing utility they expose, and delete each temporary impure need once its floor
-package exists.
+cached `build-env` contract is installed; before then, bootstrap keeps that ambient tail so the
+floor can be realized. `--impure` keeps the tail as an explicit escape hatch while packaging a
+missing floor tool. The remaining stage-2 work is empirical: rebuild the core/world runes without
+`--impure`, package every missing utility they expose, and delete each temporary impure need once
+its floor package exists.
 
 ### Second-pass review follow-ups (2026-06-24 subsystem review)
 
-- **Wire the glibc and FreeBSD build floors.** `linux-*-gnu` and FreeBSD triples are recognized in
-  metadata/indexes but source builds now fail early because no managed floor/sysroot is wired. Landing
-  them means adding the target-specific build env, folding the floor identity into store hashes, and
-  closing the corresponding core-rune bootstrap loop.
-
-Test gaps (cheap, named): an https-only index e2e (non-loopback `http://` repo → resolve fails on
-the scheme, not a timeout).
+- **Wire the FreeBSD build floor.** FreeBSD triples are recognized in metadata/indexes but source
+  builds now fail early because no managed floor/sysroot is wired. Landing it means adding the
+  target-specific build env, folding the floor identity into store hashes, and closing the
+  corresponding core-rune bootstrap loop.
 
 ## Expansion projects (spec before code)
 

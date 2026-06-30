@@ -90,7 +90,6 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
         root,
         &dist_dir,
         &index_path,
-        args.all,
         args.bootstrap,
         hermetic,
         args.target.as_deref(),
@@ -113,7 +112,6 @@ pub(crate) fn build_runes(
     root: &Path,
     dist_dir: &Path,
     index_path: &Path,
-    all: bool,
     bootstrap: bool,
     hermetic: bool,
     target: Option<&str>,
@@ -151,7 +149,7 @@ pub(crate) fn build_runes(
             ));
             continue;
         }
-        for (store_hash, entry, archive) in
+        for (store_hash, entry, archive, build_env) in
             build_rune_into(root, name, dist_dir, bootstrap, hermetic, target)?
         {
             output_lint::archive_purity(&archive, strict)
@@ -167,18 +165,17 @@ pub(crate) fn build_runes(
                     archive.display()
                 ))
             ));
-            if all {
-                let mut world = install::InstalledWorld::load_default()?;
-                install::install_store_only_for_target(
-                    &mut world,
-                    &archive,
-                    None,
-                    None,
-                    install::InstallOrigin::TomeBuild,
-                    &entry.target,
-                )
-                .with_context(|| format!("store-only install of {}", entry.name))?;
-            }
+            let mut world = install::InstalledWorld::load_default()?;
+            install::install_store_only_for_target(
+                &mut world,
+                &archive,
+                None,
+                None,
+                Some(&build_env),
+                install::InstallOrigin::TomeBuild,
+                &entry.target,
+            )
+            .with_context(|| format!("store-only install of {}", entry.name))?;
             catalog.upsert(store_hash, entry);
             any_built = true;
         }
@@ -206,8 +203,8 @@ fn group_output_names(root: &Path, name: &str) -> Result<Vec<String>> {
 }
 
 /// Builds the rune named `name` (`runes/<name>.rn`) into `dist_dir`, returning one
-/// `(store_hash, entry, archive)` per produced package — one for a standalone rune, one per
-/// member for a split group. Shared by single-package and `--all` builds so both register
+/// `(store_hash, entry, archive, build_env)` per produced package — one for a standalone rune, one
+/// per member for a split group. Shared by single-package and `--all` builds so both register
 /// identical entries.
 pub(crate) fn build_rune_into(
     root: &Path,
@@ -216,7 +213,7 @@ pub(crate) fn build_rune_into(
     bootstrap: bool,
     hermetic: bool,
     target: Option<&str>,
-) -> Result<Vec<(String, IndexEntry, PathBuf)>> {
+) -> Result<Vec<(String, IndexEntry, PathBuf, String)>> {
     validate_package_name(name)?;
     let rune_path = root.join("runes").join(format!("{name}.rn"));
     if !rune_path.exists() {
@@ -231,6 +228,8 @@ pub(crate) fn build_rune_into(
         target,
     )?;
     let resolved_target = target.map_or_else(paths::target_triple, |t| t.to_string());
+    let resolved = BTreeMap::new();
+    let build_env = crate::build::build_env_id_for_resolved(hermetic, &resolved_target, &resolved);
 
     result
         .products()
@@ -259,7 +258,12 @@ pub(crate) fn build_rune_into(
                 conflicts: metadata.conflicts.clone(),
                 replaces: metadata.replaces.clone(),
             };
-            Ok((product.store_hash.clone(), entry, product.archive.clone()))
+            Ok((
+                product.store_hash.clone(),
+                entry,
+                product.archive.clone(),
+                build_env.clone(),
+            ))
         })
         .collect()
 }

@@ -170,7 +170,7 @@ fn bins_for_merges_default_os_and_target() {
     let resolved: Vec<_> = meta.bins_for("linux-x86_64-musl").into_keys().collect();
     assert_eq!(resolved, vec!["awk", "sed", "tar"]);
 
-    let resolved: Vec<_> = meta.bins_for("linux-aarch64-gnu").into_keys().collect();
+    let resolved: Vec<_> = meta.bins_for("linux-aarch64-musl").into_keys().collect();
     assert_eq!(resolved, vec!["awk", "sed"]);
 
     let resolved: Vec<_> = meta.bins_for("macos-aarch64-darwin").into_keys().collect();

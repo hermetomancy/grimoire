@@ -26,11 +26,12 @@ pub(crate) trait CandidateSource {
 /// configured tome for the current target.
 pub(crate) struct TomeCandidates {
     pub(crate) target: String,
+    pub(crate) local_roots: Vec<PathBuf>,
 }
 
 impl CandidateSource for TomeCandidates {
     fn candidates(&self, name: &str) -> Result<Vec<Candidate>> {
-        gather_candidates(name, &self.target)
+        gather_candidates_with_roots(name, &self.target, &self.local_roots)
     }
 }
 
@@ -106,8 +107,16 @@ pub(crate) fn pin_candidates(
 /// defines it (when present); the rune is authoritative for that version's runtime dependencies. No
 /// downloads happen — this reads index metadata and the rune.
 pub(crate) fn gather_candidates(name: &str, target: &str) -> Result<Vec<Candidate>> {
+    gather_candidates_with_roots(name, target, &[])
+}
+
+pub(crate) fn gather_candidates_with_roots(
+    name: &str,
+    target: &str,
+    local_roots: &[PathBuf],
+) -> Result<Vec<Candidate>> {
     let by_version = gather_index_candidates(name, target)?;
-    let rune = gather_rune_candidate(name, target)?;
+    let rune = gather_rune_candidate_with_roots(name, target, local_roots)?;
 
     let mut versions: BTreeSet<Version> = by_version.keys().cloned().collect();
     if let Some(rc) = &rune {
@@ -187,8 +196,12 @@ pub(crate) fn gather_index_candidates(name: &str, target: &str) -> Result<Versio
     Ok(by_version)
 }
 
-pub(crate) fn gather_rune_candidate(name: &str, target: &str) -> Result<Option<RuneCandidate>> {
-    let Some(rune) = build::find_rune(name)? else {
+pub(crate) fn gather_rune_candidate_with_roots(
+    name: &str,
+    target: &str,
+    local_roots: &[PathBuf],
+) -> Result<Option<RuneCandidate>> {
+    let Some(rune) = build::find_rune_prefer_roots(name, local_roots)? else {
         return Ok(None);
     };
     // Rune resolution here is speculative: `name` may have matched a file that turns out not to be

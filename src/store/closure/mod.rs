@@ -8,7 +8,7 @@
 //! from the store hashes of the dependencies it has already installed.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use semver::VersionReq;
@@ -20,6 +20,7 @@ mod stale;
 
 use capability::CapabilityContext;
 // Re-exported for callers that name the return type; not used inside this module.
+pub(crate) use stale::stale_installed_with_mode_and_roots;
 #[allow(unused_imports)]
 pub use stale::{StaleInstall, stale_installed, stale_installed_with_mode};
 
@@ -188,6 +189,7 @@ pub fn store_hash_for_rune_with_deps(
 struct Walker {
     target: String,
     build_env: String,
+    local_roots: Vec<PathBuf>,
     cache: HashMap<String, String>,
     stack: Vec<String>,
     /// Resolver-chosen (or installed) store hashes keyed by package name. When a split group's
@@ -213,6 +215,7 @@ impl Walker {
             // Compiled packages fold the host toolchain identity and PATH mode into their hash;
             // fixed-output packages ignore it.
             build_env: toolchain::store_build_env_id_for_target(hermetic, target),
+            local_roots: Vec::new(),
             cache: HashMap::new(),
             stack: Vec::new(),
             resolved: BTreeMap::new(),
@@ -220,11 +223,17 @@ impl Walker {
         })
     }
 
+    fn with_target_mode_and_roots(target: &str, hermetic: bool, roots: &[PathBuf]) -> Result<Self> {
+        let mut walker = Self::with_target_and_mode(target, hermetic)?;
+        walker.local_roots = roots.to_vec();
+        Ok(walker)
+    }
+
     fn of_name(&mut self, name: &str, req: &VersionReq) -> Result<String> {
         if let Some(hash) = self.cache.get(name) {
             return Ok(hash.clone());
         }
-        if let Some(rune) = build::find_rune(name)? {
+        if let Some(rune) = build::find_rune_prefer_roots(name, &self.local_roots)? {
             return self.of_rune(name, &rune);
         }
         // No rune, but a resolved package of its own: this is a binary-index-only package (an
@@ -295,7 +304,7 @@ impl Walker {
         if let Some(hash) = self.resolved.get(name) {
             return Ok(hash.clone());
         }
-        if build::find_rune(name)?.is_none()
+        if build::find_rune_prefer_roots(name, &self.local_roots)?.is_none()
             && let Some(provider) = self.resolve_capability(name, req)?
             && let Some(hash) = self.resolved.get(&provider)
         {
@@ -477,8 +486,9 @@ mod tests {
     /// pure function of its inputs when every external dep is covered by `resolved`.
     fn walker(resolved: BTreeMap<String, String>) -> Walker {
         Walker {
-            target: "linux-x86_64-gnu".to_string(),
+            target: "linux-x86_64-musl".to_string(),
             build_env: "env".to_string(),
+            local_roots: Vec::new(),
             cache: HashMap::new(),
             stack: Vec::new(),
             resolved,
@@ -561,7 +571,7 @@ mod tests {
             &rune_hashes,
             &["DEPHASH".to_string()],
             &[],
-            "linux-x86_64-gnu",
+            "linux-x86_64-musl",
             "env",
         );
         assert_eq!(

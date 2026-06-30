@@ -212,10 +212,11 @@ Grimoire is **POSIX-only**: Linux, macOS, FreeBSD — no `#[cfg(windows)]` code.
 supported POSIX targets is allowed where necessary (platform-specific paths, SDK discovery). The bootstrap
 depends on a POSIX userland at `/usr/bin` and `/bin`. Default target triples:
 `linux-{x86_64,aarch64}-musl`, `macos-{x86_64,aarch64}-darwin`,
-`freebsd-{x86_64,aarch64}-unknown`; the Linux `-gnu` variants remain recognized via explicit
-`--target`. Source-build environments are wired only for `linux-*-musl` and
-`macos-*-darwin` until the glibc and FreeBSD floors land; recognized-but-unwired targets fail
-early with a clear build-env error.
+`freebsd-{x86_64,aarch64}-unknown`. Linux targets are always musl regardless of whether the
+build host is glibc or musl; glibc is a host-libc condition only, never a package/archive target.
+On macOS and FreeBSD, the platform libc is the target because there is no practical alternate libc
+boundary. Source-build environments are wired only for `linux-*-musl` and `macos-*-darwin` until
+the FreeBSD floor lands; recognized-but-unwired targets fail early with a clear build-env error.
 
 ## 12. CLI and user-facing output
 

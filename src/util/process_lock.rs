@@ -1,10 +1,10 @@
 //! Process-wide install-root and store locks.
 //!
-//! Two `grm install`/`remove`/`clean`/`tome …`/`addendum …` runs mutate shared state; without
+//! Two `grm install`/`remove`/`clean`/`tome …` runs mutate shared state; without
 //! coordination they can race and corrupt it. A mutating command takes two advisory locks:
 //!
 //! - the **install-root lock** (`<install root>/.grimoire-lock`) serializes a single user's own
-//!   per-user state (state/, bin/, transactions/, the lockfile, tomes/, addendums/, generations);
+//!   per-user state (state/, bin/, transactions/, the lockfile, tomes/, generations);
 //! - the **store lock** serializes mutations of the content-addressed store, which on the fixed
 //!   `/grm/store` is *shared across users*. Without it, user B's `grm clean` could reclaim a store
 //!   path only user A's generation references (GC reachability is per-user). It is a `flock` on the

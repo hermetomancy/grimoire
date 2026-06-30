@@ -140,16 +140,6 @@ pub(crate) fn string_map_value(items: &BTreeMap<String, String>) -> Value {
     Value::record(record, Span::unknown())
 }
 
-pub(crate) fn string_map_of_maps_value(
-    items: &BTreeMap<String, BTreeMap<String, String>>,
-) -> Value {
-    let mut record = Record::new();
-    for (key, inner) in items {
-        record.push(key, string_map_value(inner));
-    }
-    Value::record(record, Span::unknown())
-}
-
 pub(crate) fn required_field_string(record: &Record, label: &str, field: &str) -> Result<String> {
     let value = record
         .get(field)

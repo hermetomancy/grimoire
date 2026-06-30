@@ -1,5 +1,4 @@
-//! Shared catalog machinery: the sync lifecycle tomes and addenda have in common,
-//! minisign verification, and the data-only addendum catalog itself.
+//! Catalog machinery: tome syncing, minisign verification, and disabled addendum stubs.
 
 pub(crate) mod addendum;
 pub(crate) mod signing;

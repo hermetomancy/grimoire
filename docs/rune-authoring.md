@@ -63,7 +63,7 @@ such as homepage/license under `meta`, which is inert data and carries no behavi
 | `version` | string | yes | Semver, leniently parsed (`1.2` normalizes to `1.2.0`). Non-semver upstream versions must be normalized here; keep the real version string in the source `url`. |
 | `summary` | string | no | One-line description shown by `grm search`/`info`. |
 | `meta` | record | no | Inert informational metadata ignored by Grimoire for now. Use for conventions like `homepage` and `license` instead of adding unknown top-level fields. |
-| `targets` | list\<string\> | no | Recognized exact target triples (`linux-{x86_64,aarch64}-{musl,gnu}`, `macos-{x86_64,aarch64}-darwin`, `freebsd-{x86_64,aarch64}-unknown`). Non-empty + current triple absent ⇒ the rune is skipped by `grm tome build --all` and refuses to build. Empty/absent ⇒ builds everywhere. Source-build environments are wired today for `linux-*-musl` and `macos-*-darwin`; `linux-*-gnu` and FreeBSD are metadata/index targets until their managed floors land. |
+| `targets` | list\<string\> | no | Recognized exact target triples (`linux-{x86_64,aarch64}-musl`, `macos-{x86_64,aarch64}-darwin`, `freebsd-{x86_64,aarch64}-unknown`). Linux targets are always musl; `glibc` is only a build-host libc selector for bootstrap sources. Non-empty + current triple absent ⇒ the rune is skipped by `grm tome build --all` and refuses to build. Empty/absent ⇒ builds everywhere. Source-build environments are wired today for `linux-*-musl` and `macos-*-darwin`; FreeBSD is a metadata/index target until its managed floor lands. |
 | `fixed_output` | bool | no (default `false`) | Declares that the output is fully determined by declared sources — the build only fetches/repackages, never compiles. Requires at least one source and no build deps. Switches the package to output addressing: its store hash covers name + version + (platform-filtered) sources + target only, excluding the build environment and dependency closures. Use for repackaged prebuilts (see `rust-stage0.rn`); never for anything that invokes a compiler. |
 | `sources` | record | no | Verified inputs; see [Sources](#sources). `sources: {}` is valid for generated-output packages. |
 | `deps` | record | no | Build and runtime dependencies; see [Dependencies](#dependencies). |
@@ -239,7 +239,7 @@ directory) must also be a runtime dep so GC keeps it alive.
 | `ctx.sources.<name>.dir` | string | Extracted directory for an archive source — use this for tarballs. `null` for non-archive sources (patches, single files). |
 | `ctx.sources.<name>.path` | string | The raw verified file in the cache. Use for non-archive sources (e.g. `patch -p1 -i ($ctx.sources.fix.path)`). |
 | `ctx.sources.<name>.url` / `.sha256` | string | The declared origin and pinned hash, for runes that need to reference them. |
-| `ctx.build_flags` | record | Key-value flags from the rune metadata (possibly patched by addenda). Use for feature toggles. |
+| `ctx.build_flags` | record | Key-value flags from the rune metadata. Use for feature toggles. |
 | `ctx.env.PATH` | string | The managed build PATH (AGENTS.md §5). |
 | `ctx.env.GRIMOIRE_VERBOSITY` | string | `"quiet"`, `"normal"`, or `"verbose"`. |
 | `ctx.env.<DEP>_PREFIX` | string | The store prefix of each declared build dep, uppercased (`LLVM_PREFIX`, `CLANG_PREFIX`). Also set in the process env, so `$env.LLVM_PREFIX` works in external command position. |

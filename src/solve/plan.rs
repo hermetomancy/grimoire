@@ -53,6 +53,8 @@ pub struct PlanStep {
     pub substitutes: Vec<Substitute>,
     /// The content-addressed store hash computed eagerly after version resolution.
     pub store_hash: Option<String>,
+    /// Dependency/floor hashes used to compute `store_hash`.
+    pub resolved_hashes: BTreeMap<String, String>,
     /// Runtime dependency names, used for hash computation.
     pub runtime_deps: Vec<String>,
     /// `conflicts`/`replaces` metadata for the resolved version, so linked-coexistence
@@ -68,6 +70,14 @@ pub struct Plan {
 
 impl Plan {
     pub fn compute_store_hashes_with_mode(&mut self, hermetic: bool) -> Result<()> {
+        self.compute_store_hashes_with_mode_and_roots(hermetic, &[])
+    }
+
+    pub(crate) fn compute_store_hashes_with_mode_and_roots(
+        &mut self,
+        hermetic: bool,
+        local_roots: &[PathBuf],
+    ) -> Result<()> {
         let target = paths::target_triple();
         let mut computed: BTreeMap<String, String> = BTreeMap::new();
         let mut installed_versions: BTreeMap<String, Version> = BTreeMap::new();
@@ -84,10 +94,11 @@ impl Plan {
         // canonically here (the address the rebuild installs them at); any a step folds positionally
         // are themselves steps, since they were dropped from `installed` before resolving.
         if let Ok(world) = crate::install::InstalledWorld::load_default() {
-            let drifted: HashSet<String> = closure::stale_installed_with_mode(&world, hermetic)
-                .into_iter()
-                .map(|stale| stale.name)
-                .collect();
+            let drifted: HashSet<String> =
+                closure::stale_installed_with_mode_and_roots(&world, hermetic, local_roots)
+                    .into_iter()
+                    .map(|stale| stale.name)
+                    .collect();
             for state in world.iter() {
                 if drifted.contains(&state.name) {
                     continue;
@@ -152,9 +163,11 @@ impl Plan {
                     step.name
                 );
             };
+            let resolved_hashes = computed.clone();
             computed.insert(step.name.clone(), hash.clone());
             installed_versions.insert(step.name.clone(), step.version.clone());
             step.store_hash = Some(hash);
+            step.resolved_hashes = resolved_hashes;
         }
         Ok(())
     }

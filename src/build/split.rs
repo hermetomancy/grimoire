@@ -52,7 +52,7 @@ impl SplitGroup {
 
 /// Resolves the split group `rune` belongs to: the rune itself may be the parent or any
 /// member. Returns `None` when the rune is an ordinary standalone package. Group metadata
-/// is read through [`crate::build::read_rune_metadata`] (signature + addendums), exactly
+/// is read through [`crate::build::read_rune_metadata`] (signature verification), exactly
 /// like a standalone build would read it.
 pub fn group_for(rune: &Path) -> Result<Option<SplitGroup>> {
     let metadata = crate::build::read_rune_metadata(rune, tome_name(rune)?.as_deref())?;

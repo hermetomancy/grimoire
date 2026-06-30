@@ -295,16 +295,14 @@ pub fn make_fake_core_tome(triple: &str) -> TempDir {
     )
     .unwrap();
 
-    // validate_tome_cache requires at least one rune, but we want binary installs.
-    // A dummy rune satisfies the validator without causing a source-build fallback.
+    // validate_tome_cache requires at least one rune, and doctor reads the build-env rune as the
+    // managed floor contract. The index still provides the binary install.
     fs::write(
-        runes.join("dummy.rn"),
-        "export const package = { name: 'dummy' version: '0.0.1' }\n",
+        runes.join("build-env.rn"),
+        "export const package = { name: 'build-env' version: '0.1.0' deps: { runtime: [] } }\n",
     )
     .unwrap();
 
-    // doctor's readiness check is just build-env's presence (its closure is the build requirement),
-    // so that's all the fake core tome needs to stock.
     let mut entries = String::from("{\n  format: 2,\n    entries: {\n");
     let package = "build-env";
     let store_hash = format!("cafef00dcafef00d-{package}");

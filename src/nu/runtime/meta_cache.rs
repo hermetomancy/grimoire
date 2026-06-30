@@ -25,7 +25,7 @@ static MEMORY: OnceLock<Mutex<HashMap<String, Value>>> = OnceLock::new();
 /// sha256 of the rune bytes, so a catalog's runes are parsed once per *content*, not once
 /// per command. The cached artifact is the const value itself — exactly what
 /// `PackageMetadata::from_value` consumes — so the cache cannot drift from the parser, and
-/// addendum patches (applied downstream, on the struct) never enter it.
+/// downstream metadata consumers never enter it.
 ///
 /// The disk layer is best-effort on every path: an unreadable or corrupt entry is a miss
 /// (and is overwritten), an unwritable cache directory just means re-parsing next time.

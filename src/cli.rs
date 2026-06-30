@@ -72,7 +72,7 @@ pub enum Command {
         #[command(subcommand)]
         command: TomeCommand,
     },
-    /// Manage addenda: data-only overlays that patch tome rune definitions.
+    /// Addenda are disabled while the overlay design is reworked.
     #[command(visible_alias = "ad")]
     Addendum {
         #[command(subcommand)]
@@ -96,7 +96,7 @@ pub enum Command {
     /// (cached build deps, residue from failed installs), delete old generations (keeping the
     /// most recent ones plus the switch-back target), delete store paths no retained generation
     /// references, and empty the source/archive/build caches and leftover transaction staging
-    /// directories. Installed packages, recent generations, tomes, addenda, and the lockfile
+    /// directories. Installed packages, recent generations, tomes, and the lockfile
     /// are untouched; the next install or build re-fetches what it needs.
     Clean(CleanArgs),
     /// Create the fixed Grimoire store directory (/grm on POSIX systems).
@@ -541,15 +541,15 @@ pub struct TomeRemoveArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum AddendumCommand {
-    /// Add an addendum by cloning a git repository of data-only rune overlays.
+    /// Disabled while the overlay design is reworked.
     Add(TomeAddArgs),
-    /// Remove a configured addendum.
+    /// Disabled while the overlay design is reworked.
     #[command(visible_alias = "rm")]
     Remove(TomeRemoveArgs),
-    /// List configured addenda.
+    /// Disabled while the overlay design is reworked.
     #[command(visible_alias = "ls")]
     List,
-    /// Sync configured addenda, fetching the latest commit for their tracked ref.
+    /// Disabled while the overlay design is reworked.
     #[command(visible_aliases = ["up", "sync"])]
     Update(TomeUpdateArgs),
 }

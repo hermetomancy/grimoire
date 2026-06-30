@@ -293,35 +293,6 @@ impl PackageMetadata {
 
         Value::record(record, Span::unknown())
     }
-
-    pub fn apply_addendum_patch(&mut self, patch: &AddendumPatch) {
-        if let Some(version) = &patch.version {
-            self.version = version.clone();
-        }
-        if let Some(target) = &patch.target {
-            self.target = Some(target.clone());
-        }
-        if let Some(summary) = &patch.summary {
-            self.summary = Some(summary.clone());
-        }
-        if let Some(bins) = &patch.bins {
-            for (target_key, inner) in bins {
-                self.bins
-                    .entry(target_key.clone())
-                    .or_default()
-                    .extend(inner.clone());
-            }
-        }
-        if let Some(sources) = &patch.sources {
-            self.sources.extend(sources.clone());
-        }
-        if let Some(deps) = &patch.deps {
-            self.deps = deps.clone();
-        }
-        if let Some(build_flags) = &patch.build_flags {
-            self.build_flags.extend(build_flags.clone());
-        }
-    }
 }
 
 const COMMON_PACKAGE_FIELDS: &[&str] = &[

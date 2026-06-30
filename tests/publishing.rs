@@ -39,6 +39,24 @@ fn tome_build_publishes_prebuilt_into_index() {
         index.contains(&archive_rel),
         "index records archive path: {index}"
     );
+    assert!(
+        store_has_package(root, "widget"),
+        "named tome build should seed the store for later build dependency reuse"
+    );
+    let widget_state = state_text(root, "widget");
+    assert!(
+        widget_state.contains("requested: false"),
+        "named tome build should record a store-only package: {widget_state}"
+    );
+    assert!(
+        !root
+            .join("profiles")
+            .join("current")
+            .join("bin")
+            .join("widget")
+            .exists(),
+        "named tome build must not link the built package into the active profile"
+    );
 
     // Point the tome at its built `dist/` directory as a local package repo so the published
     // prebuilt archive is installable without --from-source.
@@ -77,6 +95,88 @@ fn tome_build_publishes_prebuilt_into_index() {
         1,
         "rebuild should upsert, not duplicate: {index}"
     );
+}
+
+#[test]
+fn tome_build_prefers_current_tome_for_build_deps() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let configured = TempDir::new().unwrap();
+    let configured = configured.path();
+    fs::create_dir_all(configured.join("runes")).unwrap();
+    fs::write(
+        configured.join("tome.rn"),
+        "export const tome = {\n  name: 'configured'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        configured.join("runes").join("tooldep.rn"),
+        tooldep_rune("configured"),
+    )
+    .unwrap();
+    assert_success(
+        &run(
+            root,
+            &["tome", "add", configured.to_str().unwrap(), "--ref", "main"],
+        ),
+        "add configured tome",
+    );
+
+    let local = TempDir::new().unwrap();
+    let local = local.path();
+    fs::create_dir_all(local.join("runes")).unwrap();
+    fs::write(
+        local.join("tome.rn"),
+        "export const tome = {\n  name: 'local'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        local.join("runes").join("tooldep.rn"),
+        tooldep_rune("local"),
+    )
+    .unwrap();
+    fs::write(
+        local.join("runes").join("app.rn"),
+        "export const package = {\n  name: 'app'\n  version: '0.1.0'\n  deps: { build: { default: ['tooldep'] }, runtime: [] }\n}\n\nexport def build [ctx] {\n  mkdir ($ctx.package_dir | path join 'bin')\n  let stamped = (stamp | str trim)\n  $\"#!/usr/bin/env sh\\nprintf '($stamped)\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'app')\n}\n",
+    )
+    .unwrap();
+
+    assert_success(
+        &run(
+            root,
+            &[
+                "tome",
+                "build",
+                "tooldep",
+                "--path",
+                local.to_str().unwrap(),
+            ],
+        ),
+        "seed local tooldep",
+    );
+    assert_success(
+        &run(
+            root,
+            &["tome", "build", "app", "--path", local.to_str().unwrap()],
+        ),
+        "build app with local build dep",
+    );
+
+    let archive = local
+        .join("dist")
+        .join(format!("app-0.1.0-{}.tar.zst", target_triple()));
+    let app = archive_member_text(&archive, "bin/app");
+    assert!(
+        app.contains("local"),
+        "current tome build dep should beat configured cache: {app}"
+    );
+}
+
+fn tooldep_rune(stamp: &str) -> String {
+    format!(
+        "export const package = {{\n  name: 'tooldep'\n  version: '0.1.0'\n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf '{stamp}\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'stamp')\n}}\n"
+    )
 }
 
 /// A prebuilt whose published `store_hash` does not match the local rune's inputs is stale and must

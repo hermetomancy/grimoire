@@ -1,35 +1,14 @@
 //! Managed build environment construction.
 
 use anyhow::{Result, bail};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::{install, nu::runtime::BuildEnv, util::paths};
-
-/// Core packages whose `bin/` directories are always prepended to build PATH — the managed build
-/// floor. The toolchain (compiler, cmake, gmake, python3) plus the userland: a POSIX shell, awk,
-/// coreutils, sed, grep, and tar, enough for autotools/Makefile builds without the host
-/// `/usr/bin` tail.
-const CORE_PACKAGES: &[&str] = &[
-    "linux-headers",
-    "musl",
-    "llvm",
-    "clang",
-    "cmake",
-    "python3",
-    "gmake",
-    "toolchain-wrappers",
-    // Userland floor (replaces toybox, which was too thin for configure — no awk/sh/tr/expr/…).
-    "dash",
-    "mawk",
-    "uutils",
-    "gsed",
-    "ggrep",
-    "gtar",
-    // find/cmp: the base POSIX tools the generated configure/Makefile contract assumes (uutils
-    // ships neither), e.g. git's build and the autotools move-if-change idiom.
-    "findutils",
-    "diffutils",
-];
+use crate::{
+    install,
+    model::{Dependency, PackageMetadata, PackageState, parse_version_relaxed, req_matches},
+    nu::runtime::BuildEnv,
+    util::paths,
+};
 
 /// Returns `true` when `target` is a Linux musl triple.
 pub fn is_musl_target(target: &str) -> bool {
@@ -38,6 +17,47 @@ pub fn is_musl_target(target: &str) -> bool {
 
 fn target_has_build_env(target: &str) -> bool {
     is_musl_target(target) || target.starts_with("macos-")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManagedFloorReadiness {
+    Ready,
+    UnwiredTarget(String),
+    MissingRune,
+    MissingBuildEnv,
+    VersionMismatch { installed: String, expected: String },
+    MissingDeps(Vec<String>),
+}
+
+impl ManagedFloorReadiness {
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+
+    pub fn message(&self) -> String {
+        match self {
+            Self::Ready => "ready (build-env closure installed)".to_string(),
+            Self::UnwiredTarget(target) => {
+                format!("build-env not wired for target `{target}`")
+            }
+            Self::MissingRune => "build-env rune not found in configured tomes".to_string(),
+            Self::MissingBuildEnv => {
+                "build-env not installed (run `grm install build-env`)".to_string()
+            }
+            Self::VersionMismatch {
+                installed,
+                expected,
+            } => {
+                format!("build-env installed {installed}, expected {expected}")
+            }
+            Self::MissingDeps(missing) => {
+                format!(
+                    "build-env closure incomplete: missing {}",
+                    missing.join(", ")
+                )
+            }
+        }
+    }
 }
 
 /// Merges `additions` into `env` at the path-segment level: each colon-separated segment of a
@@ -65,12 +85,53 @@ fn merge_path_env(env: &mut Vec<(String, String)>, additions: Vec<(String, Strin
     }
 }
 
-/// Returns the `bin/` directories of all installed core packages.
-fn core_bin_dirs() -> Result<Vec<PathBuf>> {
+fn build_env_metadata() -> Result<Option<PackageMetadata>> {
+    let Some(rune) = super::find_rune("build-env")? else {
+        return Ok(None);
+    };
+    let tome = super::tome_name_for_rune(&rune)?;
+    Ok(Some(super::read_rune_metadata(&rune, tome.as_deref())?))
+}
+
+fn build_env_floor_deps(metadata: &PackageMetadata, target: &str) -> Vec<Dependency> {
+    metadata
+        .deps
+        .runtime
+        .iter()
+        .filter(|dep| dep.matches_platform(target))
+        .cloned()
+        .collect()
+}
+
+fn floor_dep_state<'a>(
+    world: &'a install::InstalledWorld,
+    dep: &Dependency,
+) -> Option<&'a PackageState> {
+    let state = world.resolve_dep(&dep.name)?;
+    let version = parse_version_relaxed(&state.version).ok()?;
+    if !req_matches(&dep.req, &version) {
+        return None;
+    }
+    Path::new(&state.store_path).exists().then_some(state)
+}
+
+fn missing_floor_deps(world: &install::InstalledWorld, deps: &[Dependency]) -> Vec<String> {
+    deps.iter()
+        .filter(|dep| floor_dep_state(world, dep).is_none())
+        .map(|dep| dep.name.clone())
+        .collect()
+}
+
+/// Returns the installed `bin/` dirs named by the current `build-env` runtime contract.
+fn core_bin_dirs(target: &str) -> Result<Vec<PathBuf>> {
+    let Some(metadata) = build_env_metadata()? else {
+        return Ok(Vec::new());
+    };
+    let deps = build_env_floor_deps(&metadata, target);
     let world = install::InstalledWorld::load_default()?;
     let mut dirs = Vec::new();
-    for name in CORE_PACKAGES {
-        let Some(state) = world.get(name) else {
+    for dep in deps {
+        let Some(state) = floor_dep_state(&world, &dep) else {
             continue;
         };
         install::push_bin_dirs(&mut dirs, state);
@@ -78,10 +139,41 @@ fn core_bin_dirs() -> Result<Vec<PathBuf>> {
     Ok(dirs)
 }
 
-/// Returns `true` once the complete managed build floor is installed.
-pub fn managed_floor_available() -> Result<bool> {
+/// Returns the current readiness of the cached `build-env` contract for `target`.
+pub fn managed_floor_readiness(target: &str) -> Result<ManagedFloorReadiness> {
+    if !target_has_build_env(target) {
+        return Ok(ManagedFloorReadiness::UnwiredTarget(target.to_string()));
+    }
     let world = install::InstalledWorld::load_default()?;
-    Ok(CORE_PACKAGES.iter().all(|name| world.contains(name)))
+    let Some(installed) = world.get("build-env") else {
+        return Ok(ManagedFloorReadiness::MissingBuildEnv);
+    };
+    let Some(metadata) = build_env_metadata()? else {
+        return Ok(ManagedFloorReadiness::MissingRune);
+    };
+    if metadata.version != installed.version {
+        return Ok(ManagedFloorReadiness::VersionMismatch {
+            installed: installed.version.clone(),
+            expected: metadata.version,
+        });
+    }
+    if !Path::new(&installed.store_path).exists() {
+        return Ok(ManagedFloorReadiness::MissingDeps(vec![
+            "build-env".to_string(),
+        ]));
+    }
+    let deps = build_env_floor_deps(&metadata, target);
+    let missing = missing_floor_deps(&world, &deps);
+    if missing.is_empty() {
+        Ok(ManagedFloorReadiness::Ready)
+    } else {
+        Ok(ManagedFloorReadiness::MissingDeps(missing))
+    }
+}
+
+/// Returns `true` once the cached `build-env` contract is installed.
+pub fn managed_floor_available() -> Result<bool> {
+    Ok(managed_floor_readiness(&paths::target_triple())?.is_ready())
 }
 
 /// Returns `true` when `toolchain-wrappers` is installed, meaning the managed compiler boundary
@@ -163,11 +255,11 @@ fn inject_libcxx_flags(env: &mut [(String, String)], libcxx: &str) {
     }
 }
 
-/// Constructs a [`BuildEnv`] for a build on `target`. Declared build-dep `bin/` dirs come
-/// first — declaration is specificity, so a rune's explicitly declared build dep outranks the
-/// same command from the managed floor — then the core package dirs (the floor: toolchain plus
-/// the userland — shell/awk/coreutils/sed/grep). When the managed compiler boundary is not yet
-/// available (bootstrap), host compiler tools are included after both.
+/// Constructs a [`BuildEnv`] for a build on `target`. Declared build-dep `bin/` dirs come first —
+/// declaration is specificity, so a rune's explicitly declared build dep outranks the same command
+/// from the managed floor — then the installed direct runtime deps of the current `build-env` rune.
+/// When the managed compiler boundary is not yet available (bootstrap), host compiler tools are
+/// included after both.
 pub fn build_env_for_target(
     path_dirs: Vec<PathBuf>,
     extra_env: Vec<(String, String)>,
@@ -180,7 +272,7 @@ pub fn build_env_for_target(
         );
     }
     let mut all_path_dirs = path_dirs;
-    all_path_dirs.extend(core_bin_dirs()?);
+    all_path_dirs.extend(core_bin_dirs(target)?);
 
     let mut env = extra_env;
     let managed_boundary = core_compiler_boundary_available()?;
@@ -389,8 +481,29 @@ mod tests {
     }
 
     #[test]
-    fn core_bin_dirs_returns_installed_core_packages() {
-        let _dirs = core_bin_dirs().unwrap();
+    fn build_env_floor_deps_filters_by_target() {
+        let value = crate::nu::nuon_io::parse_nuon(
+            r#"{
+                name: "build-env",
+                version: "0.1.0",
+                deps: {
+                    runtime: ["dash" "linux-headers[linux]" "libcxx[linux-*-musl]" "objc[macos-*]"]
+                }
+            }"#,
+        )
+        .unwrap();
+        let metadata = crate::model::PackageMetadata::from_value(value, false).unwrap();
+        let names = |target: &str| {
+            build_env_floor_deps(&metadata, target)
+                .into_iter()
+                .map(|dep| dep.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names("linux-x86_64-musl"),
+            vec!["dash", "linux-headers", "libcxx"]
+        );
+        assert_eq!(names("macos-aarch64-darwin"), vec!["dash", "objc"]);
     }
 
     #[test]
@@ -434,14 +547,13 @@ mod tests {
 
     #[test]
     fn unwired_targets_fail_before_build_env_construction() {
-        for target in ["linux-x86_64-gnu", "freebsd-x86_64-unknown"] {
-            let err = build_env_for_target(Vec::new(), Vec::new(), target, "pkg").unwrap_err();
-            assert!(
-                err.to_string()
-                    .contains("managed build environment is not wired yet"),
-                "unexpected error for {target}: {err:#}"
-            );
-        }
+        let target = "freebsd-x86_64-unknown";
+        let err = build_env_for_target(Vec::new(), Vec::new(), target, "pkg").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("managed build environment is not wired yet"),
+            "unexpected error for {target}: {err:#}"
+        );
     }
 
     #[test]

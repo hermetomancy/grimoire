@@ -10,9 +10,8 @@ use semver::Version;
 use std::path::PathBuf;
 
 use crate::{
-    catalog::sync_common,
     install::InstalledWorld,
-    model::{AddendumState, LockFile, parse_version_relaxed},
+    model::{LockFile, parse_version_relaxed},
     nu::nuon_io,
     tome,
     util::paths,
@@ -63,7 +62,6 @@ pub fn rebuild(world: &InstalledWorld) -> Result<()> {
     let lock = LockFile {
         target: paths::target_triple(),
         tomes: tome::load_tomes()?,
-        addendums: sync_common::load_catalogs::<AddendumState>()?,
         packages,
     };
     let path = lock_path()?;

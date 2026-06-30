@@ -22,6 +22,7 @@ impl Installer {
         let linked = self.world.linked_immut();
         let source = solve::TomeCandidates {
             target: paths::target_triple(),
+            local_roots: Vec::new(),
         };
         let preferences = crate::model::preferences::Preferences::load().unwrap_or_default();
         let mut plan = solve::resolve_with_state(
@@ -82,7 +83,7 @@ impl Installer {
             &rune, &target, &build_env, &resolved,
         )
         .with_context(|| format!("compute store hash for source root `{package}`"))?;
-        let installed = self.build_and_install(&rune, &store_hash)?;
+        let installed = self.build_and_install(&rune, &store_hash, &resolved)?;
         let name = installed.name.clone();
         let runtime = installed.runtime_deps.clone();
         self.record(installed);
@@ -111,6 +112,7 @@ impl Installer {
             &mut self.world,
             &PathBuf::from(package),
             sha256,
+            None,
             None,
             InstallOrigin::LocalArchive,
         )?;
@@ -274,9 +276,12 @@ impl Installer {
             return match (step.substitutes.first(), &step.rune) {
                 (Some(sub), _) => {
                     self.verify_pinned_substitute(step, sub)?;
-                    self.install_substitute(sub)
+                    let build_env = self.step_build_env_id(step);
+                    self.install_substitute(sub, build_env.as_deref())
                 }
-                (None, Some(rune)) => self.build_and_install(rune, require_store_hash(step)?),
+                (None, Some(rune)) => {
+                    self.build_and_install(rune, require_store_hash(step)?, &step.resolved_hashes)
+                }
                 (None, None) => bail!("no pinned artifact available for `{}`", step.name),
             };
         }
@@ -284,7 +289,8 @@ impl Installer {
         if let Some(hash) = &step.store_hash
             && let Some(sub) = step.substitutes.iter().find(|s| s.store_hash == *hash)
         {
-            return self.install_substitute(sub);
+            let build_env = self.step_build_env_id(step);
+            return self.install_substitute(sub, build_env.as_deref());
         }
 
         match &step.rune {
@@ -295,7 +301,7 @@ impl Installer {
                         step.name, step.version
                     ));
                 }
-                self.build_and_install(rune, require_store_hash(step)?)
+                self.build_and_install(rune, require_store_hash(step)?, &step.resolved_hashes)
             }
             None => bail!(
                 "no installable prebuilt or source for `{}` {}",
@@ -341,7 +347,20 @@ impl Installer {
     }
 
     /// Fetches, verifies, and installs a prebuilt substitute.
-    fn install_substitute(&mut self, sub: &Substitute) -> Result<InstalledArchive> {
+    fn step_build_env_id(&self, step: &PlanStep) -> Option<String> {
+        step.rune.as_ref()?;
+        Some(build::build_env_id_for_resolved(
+            self.hermetic,
+            &paths::target_triple(),
+            &step.resolved_hashes,
+        ))
+    }
+
+    fn install_substitute(
+        &mut self,
+        sub: &Substitute,
+        build_env: Option<&str>,
+    ) -> Result<InstalledArchive> {
         // Fetch and checksum-verify the archive first: its detached signature is verified against
         // the fetched bytes, and for a remote binhost the `.minisig` is fetched over the same
         // transport (it has no local path to read).
@@ -370,6 +389,7 @@ impl Installer {
             &archive,
             Some(sub.entry.archive_hash.clone()),
             Some(&sub.store_hash),
+            build_env,
             InstallOrigin::Prebuilt,
         )
     }
@@ -386,7 +406,12 @@ impl Installer {
     /// Builds the rune at `rune` from source and installs the resulting archive. Build
     /// dependencies are resolved and installed first so they are present when the rune runs; the
     /// `building` guard rejects a build dependency that cycles back to the package being built.
-    fn build_and_install(&mut self, rune: &Path, store_hash: &str) -> Result<InstalledArchive> {
+    fn build_and_install(
+        &mut self,
+        rune: &Path,
+        store_hash: &str,
+        resolved: &std::collections::BTreeMap<String, String>,
+    ) -> Result<InstalledArchive> {
         let metadata =
             build::read_rune_metadata(rune, build::tome_name_for_rune(rune)?.as_deref())?;
         validate_targets(&metadata, &paths::target_triple())
@@ -421,11 +446,17 @@ impl Installer {
             // package was removed and is being reinstalled). Its content address is verified
             // like any substitute's, so reusing it skips the whole rebuild safely.
             if let Some(archive) = cached_build_archive(&metadata, store_hash) {
+                let build_env = build::build_env_id_for_resolved(
+                    self.hermetic,
+                    &paths::target_triple(),
+                    resolved,
+                );
                 return install_archive(
                     &mut self.world,
                     &archive,
                     expected_hash,
                     Some(store_hash),
+                    Some(&build_env),
                     InstallOrigin::CachedBuild,
                 );
             }
@@ -439,12 +470,13 @@ impl Installer {
                 &metadata.name,
             )?;
             env.hermetic = self.hermetic;
+            let build_env = build::build_env_id_for_resolved(env.hermetic, &env.target, resolved);
             let result = build::build_package_with_env(
                 &rune.to_string_lossy(),
                 &paths::build_output_dir()?,
                 &env,
                 store_hash,
-                &self.world.store_hashes(),
+                resolved,
             )?;
             // Group siblings already landed in the build output dir; their own install
             // steps reuse them via `cached_build_archive` instead of rebuilding the group.
@@ -453,6 +485,7 @@ impl Installer {
                 &result.primary.archive,
                 expected_hash,
                 Some(&result.primary.store_hash),
+                Some(&build_env),
                 InstallOrigin::Source,
             )
         })();

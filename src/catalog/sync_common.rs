@@ -1,8 +1,8 @@
-//! Shared utilities for syncing git-backed catalogs (tomes and addenda).
+//! Shared utilities for syncing git-backed catalogs.
 //!
-//! Both tomes and addenda follow the same lifecycle: clone/copy, validate, promote,
-//! record sync state, and trust-on-first-use signer pinning. This module holds the
-//! common machinery so each consumer only wires its type-specific validation.
+//! Catalogs follow the same lifecycle: clone/copy, validate, promote, record sync state, and
+//! trust-on-first-use signer pinning. This module holds the common machinery so each consumer only
+//! wires its type-specific validation.
 
 use anyhow::{Context, Result, bail};
 use std::{

@@ -127,6 +127,7 @@ pub(crate) fn install_archive(
     archive_path: &Path,
     expected_hash: Option<String>,
     expected_store_hash: Option<&str>,
+    expected_build_env: Option<&str>,
     origin: InstallOrigin,
 ) -> Result<InstalledArchive> {
     install_store_only(
@@ -134,6 +135,7 @@ pub(crate) fn install_archive(
         archive_path,
         expected_hash,
         expected_store_hash,
+        expected_build_env,
         origin,
     )
 }
@@ -146,6 +148,7 @@ pub(crate) fn install_store_only(
     archive_path: &Path,
     expected_hash: Option<String>,
     expected_store_hash: Option<&str>,
+    expected_build_env: Option<&str>,
     origin: InstallOrigin,
 ) -> Result<InstalledArchive> {
     let target = paths::target_triple();
@@ -154,19 +157,21 @@ pub(crate) fn install_store_only(
         archive_path,
         expected_hash,
         expected_store_hash,
+        expected_build_env,
         origin,
         &target,
     )
 }
 
 /// Like [`install_store_only`], but validates and records the archive against an explicit target.
-/// `grm tome build --all --target` uses this for store-only publishing outputs; linked installs
-/// still use the host target via [`install_store_only`].
+/// Cross-target `grm tome build` uses this for store-only publishing outputs; linked installs still
+/// use the host target via [`install_store_only`].
 pub(crate) fn install_store_only_for_target(
     world: &mut InstalledWorld,
     archive_path: &Path,
     expected_hash: Option<String>,
     expected_store_hash: Option<&str>,
+    expected_build_env: Option<&str>,
     origin: InstallOrigin,
     target: &str,
 ) -> Result<InstalledArchive> {
@@ -271,6 +276,7 @@ pub(crate) fn install_store_only_for_target(
         &archive_hash,
         &store_hash,
         &package_dir.to_string_lossy(),
+        expected_build_env,
         world.get(&metadata.name),
     );
     world.insert(state);
@@ -473,6 +479,7 @@ pub(crate) fn build_package_state(
     archive_hash: &str,
     store_hash: &str,
     store_path: &str,
+    build_env: Option<&str>,
     prior: Option<&PackageState>,
 ) -> PackageState {
     let (previous_held, previous_requested) = prior
@@ -513,9 +520,7 @@ pub(crate) fn build_package_state(
         upstream_version: metadata.upstream_version.clone(),
         conflicts: metadata.conflicts.clone(),
         replaces: metadata.replaces.clone(),
-        build_env: Some(crate::build::toolchain::store_build_env_id_for_target(
-            true, target,
-        )),
+        build_env: build_env.map(str::to_owned),
         build_only: metadata.build_only,
     }
 }
@@ -548,4 +553,40 @@ pub(crate) fn make_executable(path: &Path) -> Result<()> {
     permissions.set_mode(permissions.mode() | 0o111);
     fs::set_permissions(path, permissions)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_package_state;
+
+    #[test]
+    fn package_state_records_only_the_build_env_it_was_given() {
+        let value = crate::nu::nuon_io::parse_nuon(
+            r#"{ name: "pkg", version: "1.0.0", bins: { default: { pkg: "bin/pkg" } } }"#,
+        )
+        .unwrap();
+        let metadata = crate::model::PackageMetadata::from_value(value, false).unwrap();
+
+        let recorded = build_package_state(
+            &metadata,
+            "linux-x86_64-musl",
+            "archive",
+            "store",
+            "/tmp/store/pkg",
+            Some("path:ambient-posix"),
+            None,
+        );
+        assert_eq!(recorded.build_env.as_deref(), Some("path:ambient-posix"));
+
+        let unknown = build_package_state(
+            &metadata,
+            "linux-x86_64-musl",
+            "archive",
+            "store",
+            "/tmp/store/pkg",
+            None,
+            None,
+        );
+        assert_eq!(unknown.build_env, None);
+    }
 }

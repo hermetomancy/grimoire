@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use std::{collections::BTreeMap, fs, path::Path};
 
 use crate::{
-    build::toolchain,
+    build::{self, toolchain},
     catalog::sync_common,
     install,
     install::lock,
@@ -282,18 +282,10 @@ fn check_source_build_readiness() -> Result<usize> {
 }
 
 /// build-env's dependency closure *is* the managed build requirement (the compiler toolchain plus
-/// the userland floor), so its presence is the single readiness check — no per-package list to
-/// drift out of sync with the runes.
+/// the userland floor), so doctor reports the same target-scoped contract the build code uses.
 fn report_managed_core_readiness() -> Result<()> {
-    let world = install::InstalledWorld::load_default()?;
-    if world.contains("build-env") {
-        field("managed core userland", "ready (build-env installed)");
-    } else {
-        field(
-            "managed core userland",
-            "build-env not installed (run `grm install build-env`)",
-        );
-    }
+    let readiness = build::managed_floor_readiness(&paths::target_triple())?;
+    field("managed core userland", &readiness.message());
     Ok(())
 }
 

@@ -136,8 +136,8 @@ Worked example target: FreeBSD (anticipated answers in parentheses).
    need a loader for it. (FreeBSD: dynamic by default → `grm` would be a normal dynamic ELF using
    base's loader, which is fine.)
 8. **Build host tooling.** Anything the build shells out to that the managed/floor env shadows
-   (`/usr/bin/cc` for kbuild-style host tools, host `cc` for cross build-host helpers). Mostly a
-   Linux-cross concern; a host==target build avoids it.
+   (notably host `cc` for cross build-host helpers). Mostly a Linux-cross concern; a host==target
+   build avoids it.
 
 ## What the CPU arch *does* change
 

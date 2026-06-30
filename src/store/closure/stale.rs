@@ -4,6 +4,8 @@
 //! runes would produce, so packages whose inputs changed are re-realized instead of silently
 //! reused.
 
+use std::path::PathBuf;
+
 use crate::{build, build::toolchain, install::InstalledWorld};
 
 /// Installed packages whose recorded address has drifted from the catalog: the rune currently
@@ -33,9 +35,19 @@ pub fn stale_installed(world: &InstalledWorld) -> Vec<StaleInstall> {
 }
 
 pub fn stale_installed_with_mode(world: &InstalledWorld, hermetic: bool) -> Vec<StaleInstall> {
-    let Ok(mut walker) =
-        super::Walker::with_target_and_mode(&crate::util::paths::target_triple(), hermetic)
-    else {
+    stale_installed_with_mode_and_roots(world, hermetic, &[])
+}
+
+pub(crate) fn stale_installed_with_mode_and_roots(
+    world: &InstalledWorld,
+    hermetic: bool,
+    local_roots: &[PathBuf],
+) -> Vec<StaleInstall> {
+    let Ok(mut walker) = super::Walker::with_target_mode_and_roots(
+        &crate::util::paths::target_triple(),
+        hermetic,
+        local_roots,
+    ) else {
         return Vec::new();
     };
     // Address split-member externals that are *held* against their pinned installed address,
@@ -57,7 +69,7 @@ pub fn stale_installed_with_mode(world: &InstalledWorld, hermetic: bool) -> Vec<
         if state.held {
             continue;
         }
-        let Ok(Some(rune)) = build::find_rune(&state.name) else {
+        let Ok(Some(rune)) = build::find_rune_prefer_roots(&state.name, local_roots) else {
             continue;
         };
         let Ok(metadata) = walker.metadata(&rune) else {
@@ -86,9 +98,9 @@ pub fn stale_installed_with_mode(world: &InstalledWorld, hermetic: bool) -> Vec<
     stale
 }
 
-/// Renders the difference between two build-environment identities ("tool:banner" lists)
-/// as the changed components only: `ld: ld64-1167.5 → LLD 22.1.7`. Components present on
-/// one side only render against `(none)`.
+/// Renders the difference between the recorded and current build-environment identities
+/// ("tool:banner" lists) as the changed components only. Components present on one side only
+/// render against `(none)`.
 fn diff_build_env(recorded: &str, current: &str) -> String {
     let parse = |id: &str| -> std::collections::BTreeMap<String, String> {
         id.split(',')
@@ -113,7 +125,7 @@ fn diff_build_env(recorded: &str, current: &str) -> String {
         let old = old_parts.get(tool).map(String::as_str).unwrap_or("(none)");
         let new = new_parts.get(tool).map(String::as_str).unwrap_or("(none)");
         if old != new {
-            changes.push(format!("{tool}: {old} → {new}"));
+            changes.push(format!("{tool}: installed {old}, expected {new}"));
         }
     }
     changes.join("; ")
@@ -129,14 +141,20 @@ mod tests {
         let current = "as:llvm-as 22.1.7,cc:clang version 22.1.7,ld:LLD 22.1.7,sdk:26.5";
         assert_eq!(
             diff_build_env(recorded, current),
-            "ld: ld64-1167.5 → LLD 22.1.7"
+            "ld: installed ld64-1167.5, expected LLD 22.1.7"
         );
     }
 
     #[test]
     fn diff_renders_added_and_removed_components() {
         let diff = diff_build_env("cc:clang 22,lipo:llvm-lipo", "cc:clang 22,sdk:26.5");
-        assert!(diff.contains("lipo: llvm-lipo → (none)"), "{diff}");
-        assert!(diff.contains("sdk: (none) → 26.5"), "{diff}");
+        assert!(
+            diff.contains("lipo: installed llvm-lipo, expected (none)"),
+            "{diff}"
+        );
+        assert!(
+            diff.contains("sdk: installed (none), expected 26.5"),
+            "{diff}"
+        );
     }
 }

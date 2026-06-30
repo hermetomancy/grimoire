@@ -198,20 +198,15 @@ fn mutates_install_root(command: &Command) -> bool {
             TomeCommand::Add(args) => !args.dry_run,
             TomeCommand::Update(args) => !args.dry_run,
             TomeCommand::Remove(args) => !args.dry_run,
-            // Every build writes the shared store and state/packages: a single-package build
-            // installs its build deps store-only (§8), and `--all` installs the built packages.
+            // Every build writes the shared store and state/packages: it installs build deps and
+            // built products store-only (§8), without activating a generation.
             // Both must hold the lock so a concurrent `grm clean` cannot reap store paths mid-build.
             TomeCommand::Build(_) => true,
             // Default `tome news` advances the seen marker; `--all` is a pure read.
             TomeCommand::News(args) => !args.all,
             _ => false,
         },
-        Command::Addendum { command } => match command {
-            cli::AddendumCommand::Add(args) => !args.dry_run,
-            cli::AddendumCommand::Update(args) => !args.dry_run,
-            cli::AddendumCommand::Remove(args) => !args.dry_run,
-            cli::AddendumCommand::List => false,
-        },
+        Command::Addendum { .. } => false,
 
         Command::Clean(args) => !args.dry_run,
         Command::Doctor

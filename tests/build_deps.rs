@@ -115,14 +115,17 @@ fn doctor_reports_ready_after_build_env_install() {
     );
     assert_success(&add, "add fake core tome");
 
-    let install = run(root, &["install", "build-env"]);
+    let archive = tome_path
+        .join("dist")
+        .join(format!("build-env-0.1.0-{triple}.tar.zst"));
+    let install = run(root, &["install", archive.to_str().unwrap(), "--force"]);
     assert_success(&install, "install build-env");
 
     let doctor = run(root, &["doctor"]);
     assert_success(&doctor, "doctor after build-env install");
     let out = stdout(&doctor);
     assert!(
-        out.contains("managed core userland: ready (build-env installed)"),
+        out.contains("managed core userland: ready (build-env closure installed)"),
         "doctor reports build env readiness: {out}"
     );
 }

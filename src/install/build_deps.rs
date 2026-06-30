@@ -2,7 +2,10 @@
 //! discovery environment (bin dirs, prefix variables) layered into rune builds.
 
 use anyhow::{Context, Result, bail};
-use std::{collections::HashSet, path::PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     build, fetch,
@@ -14,16 +17,14 @@ use crate::{
 use super::world::InstalledWorld;
 use super::*;
 
-/// Ensures every build dependency in `deps` is installed store-only (no lockfile, no generation).
-/// Missing deps are resolved through the solver and installed from substitutes or built from source.
-/// Already-installed packages are reused.
-pub(crate) fn ensure_build_deps_installed_with_mode(
+pub(crate) fn ensure_build_deps_installed_with_mode_and_roots(
     deps: &[Dependency],
     hermetic: bool,
+    local_roots: &[PathBuf],
 ) -> Result<()> {
     let mut world = InstalledWorld::load_default()?;
     let mut building = HashSet::new();
-    ensure_build_deps_installed_inner(&mut world, deps, hermetic, &mut building)
+    ensure_build_deps_installed_inner(&mut world, deps, hermetic, &mut building, local_roots)
 }
 
 pub(crate) fn ensure_build_deps_installed_inner(
@@ -31,6 +32,7 @@ pub(crate) fn ensure_build_deps_installed_inner(
     deps: &[Dependency],
     hermetic: bool,
     building: &mut HashSet<String>,
+    local_roots: &[PathBuf],
 ) -> Result<()> {
     if deps.is_empty() {
         return Ok(());
@@ -51,7 +53,8 @@ pub(crate) fn ensure_build_deps_installed_inner(
             Some(state) => satisfied.push(state.clone()),
         }
     }
-    let stale_info = crate::store::closure::stale_installed_with_mode(world, hermetic);
+    let stale_info =
+        crate::store::closure::stale_installed_with_mode_and_roots(world, hermetic, local_roots);
     let stale: HashSet<String> = stale_info.iter().map(|s| s.name.clone()).collect();
     for dep in deps {
         if let Some(state) = world.resolve_dep(&dep.name)
@@ -80,8 +83,9 @@ pub(crate) fn ensure_build_deps_installed_inner(
         return Ok(());
     }
 
-    let mut plan = solve::resolve(&missing, &installed, &HashSet::new(), None)?;
-    plan.compute_store_hashes_with_mode(hermetic)
+    let mut plan =
+        solve::resolve_with_local_roots(&missing, &installed, &HashSet::new(), None, local_roots)?;
+    plan.compute_store_hashes_with_mode_and_roots(hermetic, local_roots)
         .with_context(|| "compute store hashes for build dependencies")?;
 
     for step in plan.steps {
@@ -98,6 +102,13 @@ pub(crate) fn ensure_build_deps_installed_inner(
         if !building.insert(step.name.clone()) {
             bail!("build dependency cycle detected involving `{}`", step.name);
         }
+        let planned_build_env = step.rune.as_ref().map(|_| {
+            build::build_env_id_for_resolved(
+                hermetic,
+                &paths::target_triple(),
+                &step.resolved_hashes,
+            )
+        });
 
         let result = if let Some(sub) = step.substitutes.first() {
             let archive = fetch::fetch_verified(
@@ -113,6 +124,7 @@ pub(crate) fn ensure_build_deps_installed_inner(
                 &archive,
                 Some(sub.entry.archive_hash.clone()),
                 Some(&sub.store_hash),
+                planned_build_env.as_deref(),
                 InstallOrigin::BuildDep,
             )
         } else if let Some(rune) = &step.rune {
@@ -129,6 +141,7 @@ pub(crate) fn ensure_build_deps_installed_inner(
                     &archive,
                     None,
                     Some(store_hash),
+                    planned_build_env.as_deref(),
                     InstallOrigin::BuildDep,
                 )
                 .with_context(|| format!("store-only install `{}` {}", step.name, step.version))?;
@@ -137,7 +150,7 @@ pub(crate) fn ensure_build_deps_installed_inner(
                 continue;
             }
             let build_deps = build::effective_build_deps(rune, &metadata, &paths::target_triple())?;
-            ensure_build_deps_installed_inner(world, &build_deps, hermetic, building)
+            ensure_build_deps_installed_inner(world, &build_deps, hermetic, building, local_roots)
                 .with_context(|| format!("install build dependencies for `{}`", step.name))?;
             let mut env = build::build_env_for_target(
                 build_dep_bin_dirs(&build_deps)?,
@@ -151,13 +164,14 @@ pub(crate) fn ensure_build_deps_installed_inner(
                 &paths::build_output_dir()?,
                 &env,
                 store_hash,
-                &world.store_hashes(),
+                &step.resolved_hashes,
             )?;
             install_store_only(
                 world,
                 &result.primary.archive,
                 None,
                 Some(&result.primary.store_hash),
+                planned_build_env.as_deref(),
                 InstallOrigin::BuildDep,
             )
         } else {
@@ -177,7 +191,7 @@ pub(crate) fn ensure_build_deps_installed_inner(
     Ok(())
 }
 
-fn verify_build_dep_substitute(archive: &std::path::Path, sub: &solve::Substitute) -> Result<()> {
+fn verify_build_dep_substitute(archive: &Path, sub: &solve::Substitute) -> Result<()> {
     if let Some(tome) = tome::load_tomes()?
         .into_iter()
         .find(|tome| tome.name == sub.tome_name)

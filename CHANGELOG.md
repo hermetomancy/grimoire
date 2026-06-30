@@ -49,12 +49,12 @@ heading when it is tagged.
   `LC_LOAD_DYLIB`) for dynamic references to host libraries that are neither a declared
   dependency nor the libc/platform floor — the host-link class the purity scan cannot see (a
   library bound without a baked path). Warns by default, `--strict` fails the build.
-- Managed source builds are hermetic by default once the managed core floor exists: `grm build`,
-  `grm install` source fallback, and `grm tome build` see only declared deps and that floor.
-  Before the floor exists, bootstrap builds keep the POSIX ambient PATH tail (`/usr/bin`, `/bin`)
-  so they can realize the floor itself; `--impure` keeps the same tail as an explicit escape hatch
-  while packaging missing floor tools. Ambient-tail builds have distinct store hashes from
-  hermetic builds.
+- Managed source builds are hermetic by default once the cached `build-env` contract is installed:
+  `grm build`, `grm install` source fallback, and `grm tome build` see only declared deps and that
+  floor. Before `build-env` lands, bootstrap builds keep the POSIX ambient PATH tail (`/usr/bin`,
+  `/bin`) so they can realize the floor itself; `--impure` keeps the same tail as an explicit
+  escape hatch while packaging missing floor tools. Ambient-tail builds have distinct store hashes
+  from hermetic builds.
 - Capability runtime deps are content-addressable: the closure walker resolves providers
   like the solver (preference → installed → first by name, deterministically).
 - Compiled package store hashes now fold in the resolved build-dependency closure, not only the
@@ -71,6 +71,19 @@ heading when it is tagged.
 
 ### Changed
 
+- Addenda are disabled while the overlay design is reworked. `grm addendum ...` remains as a
+  command group, but it returns a clear error, no longer writes addendum state, no longer patches
+  rune metadata, and new lockfiles no longer record addenda.
+- Managed core readiness now reports the same `build-env` contract source builds use: the current
+  `build-env` rune must be installed at the matching version and its target-filtered runtime
+  closure must resolve to installed store paths before builds drop the ambient POSIX tail.
+- Linux GNU triples are no longer accepted as package/archive targets. Linux always targets musl;
+  glibc remains only a build-host libc selector for bootstrap seed choice.
+- Installed package state records the build-environment identity actually used by source builds
+  and matching substitutes; archives whose build identity is unknown leave `build_env` absent
+  instead of fabricating a hermetic identity.
+- `linux-headers.rn` now builds kbuild's unshipped helper tools through the managed `cc` path with
+  the managed host flags instead of escaping to `/usr/bin/cc`.
 - `grm tome lint` now warns, rather than fails, when a rune uses `sh -c`/`bash -c`; the authoring
   contract still prefers native Nushell build steps.
 - Rune authoring docs now make the external-command boundary explicit: missing structured
@@ -88,8 +101,8 @@ heading when it is tagged.
   authored runes reject archive-only `format`/`target`/`store_path` fields, and declared non-bin
   `provides` plus non-file `libs` capabilities survive post-build discovery.
 - Source builds for recognized-but-unwired targets now fail early with a clear build-env error:
-  `linux-*-gnu` and FreeBSD remain metadata/index targets until their managed floors are wired,
-  while source-build environments are available for `linux-*-musl` and `macos-*-darwin`.
+  FreeBSD remains a metadata/index target until its managed floor is wired, while source-build
+  environments are available for `linux-*-musl` and `macos-*-darwin`.
 - Archive validation/extraction now enforces resource caps: package archives have a bounded
   decompressed stream, a bounded member count, and a separate cap for embedded
   `.grimoire/package.nuon` metadata. `grm tome build --index` uses the same bounded archive
@@ -256,14 +269,12 @@ heading when it is tagged.
 - Dependency resolution is bounded: an over-constrained or pathologically large requirement
   graph now aborts with a clear error after a fixed backtracking budget instead of spinning
   indefinitely (the search clones state per candidate, so the worst case was exponential).
-- Addendum source patches round-trip their `platform` glob: a platform-scoped patch source no
-  longer loses its constraint when the addendum manifest is re-serialized.
 - Resolution surfaces a capability-index build failure (corrupt tome cache, unreadable index)
   instead of swallowing it into an empty map and reporting a misleading "no version satisfies".
-- Diagnostics polish: registry/news/addendum warnings use the `warn` tier (not a hand-rolled
-  `warning:` prefix on the success tier) and print the full error context; a transient read
-  error while scanning a split group is surfaced rather than silently dropping a member; the
-  build-environment drift summary no longer drops a tool whose name prefixes another's.
+- Diagnostics polish: registry/news warnings use the `warn` tier (not a hand-rolled `warning:`
+  prefix on the success tier) and print the full error context; a transient read error while
+  scanning a split group is surfaced rather than silently dropping a member; the build-environment
+  drift summary no longer drops a tool whose name prefixes another's.
 - State writes are now durable, not just atomic: `write_nuon` fsyncs the staged file before the
   rename and fsyncs the destination directory after it, and the generation-activation symlink
   flip and state-snapshot restore fsync their directory. Previously a crash right after an
@@ -293,5 +304,5 @@ heading when it is tagged.
 ## 0.1.0 — unreleased baseline
 
 Initial development line: content-addressed store, generations and semantic switching,
-tome/addendum catalogs with minisign trust, source builds via embedded Nushell runes,
+tome catalogs with minisign trust, source builds via embedded Nushell runes,
 binhost substitution keyed by store hash.

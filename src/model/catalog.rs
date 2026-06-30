@@ -1,5 +1,4 @@
-//! Catalog state and manifests for tomes and addenda, plus the [`Catalog`] abstraction
-//! `sync_common` drives them through.
+//! Catalog state and manifests for tomes, plus the [`Catalog`] abstraction `sync_common` drives.
 
 use anyhow::{Result, bail};
 use nu_protocol::{Record, Span, Value};
@@ -41,11 +40,10 @@ pub struct TomePackages {
     pub index: String,
 }
 
-/// Shared interface for catalog state (tomes and addenda).
+/// Shared interface for git-backed catalog state.
 ///
-/// Both tomes and addenda follow the same lifecycle — clone, validate, promote, record —
-/// and carry identical metadata fields. This trait lets `sync_common.rs` operate on either
-/// without duplicating the CRUD logic.
+/// Tomes follow the clone, validate, promote, record lifecycle. The trait keeps the sync
+/// machinery generic enough for future catalog-like state without duplicating the CRUD logic.
 pub trait Catalog: Clone {
     type Manifest: CatalogManifest;
     const ENTITY_KIND: &'static str;

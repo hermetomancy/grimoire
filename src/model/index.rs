@@ -167,12 +167,12 @@ mod tests {
     #[test]
     fn reads_and_finds_entries() {
         let index = parse_index(
-            "{\n  format: 2,\n  entries: {\n    \"deadbeefdeadbeef\": { name: \"hello\", version: \"1.0.0\", target: \"linux-x86_64-gnu\", archive: \"hello-1.0.0-linux-x86_64-gnu.tar.zst\", archive_hash: \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", runtime_deps: [\"libc\"] }\n  }\n}\n",
+            "{\n  format: 2,\n  entries: {\n    \"deadbeefdeadbeef\": { name: \"hello\", version: \"1.0.0\", target: \"linux-x86_64-musl\", archive: \"hello-1.0.0-linux-x86_64-musl.tar.zst\", archive_hash: \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", runtime_deps: [\"libc\"] }\n  }\n}\n",
         )
         .expect("parse index");
         assert_eq!(index.entries.len(), 1);
 
-        let candidates = index.candidates("hello", "linux-x86_64-gnu");
+        let candidates = index.candidates("hello", "linux-x86_64-musl");
         let (hash, entry) = candidates.first().expect("entry for current target");
         assert_eq!(*hash, "deadbeefdeadbeef");
         assert_eq!(entry.version, "1.0.0");
@@ -185,13 +185,13 @@ mod tests {
             vec!["libc"]
         );
         assert!(index.candidates("hello", "macos-aarch64-darwin").is_empty());
-        assert!(index.candidates("missing", "linux-x86_64-gnu").is_empty());
+        assert!(index.candidates("missing", "linux-x86_64-musl").is_empty());
     }
 
     #[test]
     fn rejects_unsafe_archive_path() {
         let err = parse_index(
-            "{\n  format: 2,\n  entries: {\n    \"deadbeefdeadbeef\": { name: \"evil\", version: \"1.0.0\", target: \"linux-x86_64-gnu\", archive: \"../escape.tar.zst\", archive_hash: \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" }\n  }\n}\n",
+            "{\n  format: 2,\n  entries: {\n    \"deadbeefdeadbeef\": { name: \"evil\", version: \"1.0.0\", target: \"linux-x86_64-musl\", archive: \"../escape.tar.zst\", archive_hash: \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" }\n  }\n}\n",
         )
         .unwrap_err();
         assert!(

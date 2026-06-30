@@ -35,6 +35,30 @@ pub fn resolve(
 ) -> Result<Plan> {
     let source = TomeCandidates {
         target: paths::target_triple(),
+        local_roots: Vec::new(),
+    };
+    let preferences = Preferences::load().unwrap_or_default();
+    resolve_with_state(
+        roots,
+        installed,
+        &BTreeMap::new(),
+        linked,
+        pins,
+        &source,
+        &preferences.providers,
+    )
+}
+
+pub(crate) fn resolve_with_local_roots(
+    roots: &[Dependency],
+    installed: &BTreeMap<String, Version>,
+    linked: &HashSet<String>,
+    pins: Option<&Pins>,
+    local_roots: &[PathBuf],
+) -> Result<Plan> {
+    let source = TomeCandidates {
+        target: paths::target_triple(),
+        local_roots: local_roots.to_vec(),
     };
     let preferences = Preferences::load().unwrap_or_default();
     resolve_with_state(
@@ -483,6 +507,7 @@ pub(crate) fn visit(
             rune: route.rune.clone(),
             substitutes: route.substitutes.clone(),
             store_hash: None,
+            resolved_hashes: Default::default(),
             runtime_deps: node.deps.clone(),
             conflicts: route.conflicts.clone(),
             replaces: route.replaces.clone(),

@@ -6,8 +6,8 @@
 //! (the current generation and the switch-back target always survive) and every store path no
 //! retained generation references — including the directories store-preserving removal left
 //! behind — are deleted; and the source/archive/build caches plus leftover transaction
-//! staging directories are emptied. Installed packages, retained generations, tomes, addenda,
-//! and the lockfile are untouched; a later install or build re-fetches what it needs.
+//! staging directories are emptied. Installed packages, retained generations, tomes, and the
+//! lockfile are untouched; a later install or build re-fetches what it needs.
 
 use anyhow::{Context, Result, bail};
 use std::{

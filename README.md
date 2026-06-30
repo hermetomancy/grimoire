@@ -51,7 +51,7 @@ now-unneeded dependencies with it in the same transaction — file-ownership que
 | Store / install / upgrade | immutable fixed-path content-addressed store, generations, switching | **Nix / Guix** |
 | Recipe authoring | imperative Nushell `build` function | **Portage / Pacman** (PKGBUILD/ebuild) |
 | Build-time customization | `build_flags` | **Portage USE flags** |
-| Catalogs / overlays | tomes + addenda | **AUR / overlays** |
+| Catalogs | tomes | **AUR** |
 | Contested commands | `grm pkg prefer` | **update-alternatives / eselect** |
 | Build / trust | managed clang/LLVM toolchain, signed binhost | **Pacman / Gentoo binhost** |
 
@@ -236,14 +236,8 @@ sync because their runes and archives are not signature-verified.
 
 ## Addenda
 
-Addenda are data-only NUON overlays that patch package metadata (sources, deps, build flags)
-without running hooks:
-
-```sh
-grm addendum add <git-url-or-local-path>
-grm addendum list
-grm addendum remove <name>
-```
+Addenda are disabled while the overlay design is reworked. `grm addendum ...` commands currently
+return an error and do not patch package metadata.
 
 ## Security
 

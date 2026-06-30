@@ -12,7 +12,7 @@ mod env;
 pub(crate) mod output;
 mod sources;
 
-pub use env::{build_env_for_target, is_musl_target};
+pub use env::{build_env_for_target, is_musl_target, managed_floor_readiness};
 use output::*;
 use sources::*;
 
@@ -25,7 +25,6 @@ use std::{
 
 use crate::{
     archive::pack,
-    catalog::addendum,
     cli::BuildArgs,
     fetch, install,
     nu::runtime::{BuildDirs, BuildEnv, EmbeddedNuRuntime},
@@ -34,19 +33,17 @@ use crate::{
     util::paths,
 };
 
-/// Reads a rune's package metadata, verifying its signature and applying addendum patches.
-/// `tome_name` scopes tome-specific patches; pass `None` when the rune is not inside a tome.
+/// Reads a rune's package metadata after verifying its signature.
+/// `_tome_name` is kept until the addendum design settles, so callers do not grow two metadata
+/// loading paths again.
 pub fn read_rune_metadata(
     rune: &Path,
-    tome_name: Option<&str>,
+    _tome_name: Option<&str>,
 ) -> Result<crate::model::PackageMetadata> {
     tome::verify_rune(rune).with_context(|| format!("verify rune signature {}", rune.display()))?;
-    let mut metadata = EmbeddedNuRuntime
+    EmbeddedNuRuntime
         .package_metadata(rune)
-        .with_context(|| format!("read rune metadata {}", rune.display()))?;
-    addendum::apply_patches(&mut metadata, tome_name, rune)
-        .with_context(|| format!("apply addendums to {}", rune.display()))?;
-    Ok(metadata)
+        .with_context(|| format!("read rune metadata {}", rune.display()))
 }
 
 /// One package produced by a source build: its archive, content address, and the final
@@ -115,9 +112,9 @@ pub fn build(args: BuildArgs) -> Result<()> {
     Ok(())
 }
 
-/// Source builds can drop the ambient POSIX tail only after the managed floor exists. Before that
-/// point, bootstrap builds still need `/usr/bin` and `/bin` to realize the floor itself, and their
-/// store hashes use the impure build-environment identity.
+/// Source builds can drop the ambient POSIX tail only after the cached `build-env` contract is
+/// installed. Before that point, bootstrap builds still need `/usr/bin` and `/bin` to realize the
+/// floor itself, and their store hashes use the impure build-environment identity.
 pub fn effective_source_build_hermetic(bootstrap: bool, impure: bool) -> Result<bool> {
     Ok(source_build_hermetic_with_floor(
         bootstrap,
@@ -138,14 +135,17 @@ pub fn build_package(
     target: Option<&str>,
 ) -> Result<BuildResult> {
     let rune = resolve_rune(package)?;
-    tome::verify_rune(&rune).with_context(|| format!("verify rune signature for {package}"))?;
     let target = target.map_or_else(paths::target_triple, |t| t.to_string());
-    let metadata = EmbeddedNuRuntime.package_metadata(&rune)?;
+    let metadata = read_rune_metadata(&rune, tome_name_for_rune(&rune)?.as_deref())?;
     let build_deps = effective_build_deps(&rune, &metadata, &target)?;
 
     if !bootstrap {
-        install::ensure_build_deps_installed_with_mode(&build_deps, hermetic)
-            .with_context(|| format!("install build dependencies for `{package}`"))?;
+        install::ensure_build_deps_installed_with_mode_and_roots(
+            &build_deps,
+            hermetic,
+            &tome_roots_for_rune(&rune),
+        )
+        .with_context(|| format!("install build dependencies for `{package}`"))?;
     }
 
     let mut env = if bootstrap {
@@ -411,7 +411,7 @@ fn build_group_with_env(
     })
 }
 
-fn build_env_id_for_resolved(
+pub fn build_env_id_for_resolved(
     hermetic: bool,
     target: &str,
     resolved: &BTreeMap<String, String>,
@@ -602,6 +602,47 @@ pub fn find_rune(package: &str) -> Result<Option<PathBuf>> {
     }
 
     Ok(None)
+}
+
+pub(crate) fn find_rune_prefer_roots(package: &str, roots: &[PathBuf]) -> Result<Option<PathBuf>> {
+    let path = PathBuf::from(package);
+    if path.is_file() {
+        return Ok(Some(path.canonicalize().with_context(|| {
+            format!("resolve rune path {}", path.display())
+        })?));
+    }
+    if package.ends_with(".rn") {
+        return Ok(None);
+    }
+    if let Some(rune) = find_rune_in_roots(package, roots)? {
+        return Ok(Some(rune));
+    }
+    find_rune(package)
+}
+
+pub(crate) fn find_rune_in_roots(package: &str, roots: &[PathBuf]) -> Result<Option<PathBuf>> {
+    for root in roots {
+        let rune = root.join("runes").join(format!("{package}.rn"));
+        if rune.is_file() {
+            return Ok(Some(rune.canonicalize().with_context(|| {
+                format!("resolve rune path {}", rune.display())
+            })?));
+        }
+    }
+    Ok(None)
+}
+
+fn tome_roots_for_rune(rune: &Path) -> Vec<PathBuf> {
+    let Some(runes_dir) = rune.parent() else {
+        return Vec::new();
+    };
+    if runes_dir.file_name().and_then(|name| name.to_str()) != Some("runes") {
+        return Vec::new();
+    }
+    runes_dir
+        .parent()
+        .map(|root| vec![root.to_path_buf()])
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

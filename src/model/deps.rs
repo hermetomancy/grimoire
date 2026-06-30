@@ -258,7 +258,7 @@ mod tests {
         let mut build = BTreeMap::new();
         build.insert("default".to_owned(), vec![Dependency::any("cmake")]);
         build.insert(
-            "linux-x86_64-gnu".to_owned(),
+            "linux-x86_64-musl".to_owned(),
             vec![Dependency::any("gcc"), Dependency::any("cmake")],
         );
         let deps = Deps {
@@ -272,14 +272,14 @@ mod tests {
                 .map(|dep| dep.name)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(names("linux-x86_64-gnu"), vec!["cmake", "gcc"]);
+        assert_eq!(names("linux-x86_64-musl"), vec!["cmake", "gcc"]);
         assert_eq!(names("macos-aarch64-darwin"), vec!["cmake"]);
     }
 
     #[test]
     fn build_for_empty_when_nothing_matches() {
         let deps = Deps::default();
-        assert!(deps.build_for("linux-x86_64-gnu").is_empty());
+        assert!(deps.build_for("linux-x86_64-musl").is_empty());
     }
 
     #[test]
