@@ -86,9 +86,17 @@ fn tome_build_publishes_prebuilt_into_index() {
         "prebuilt widget stub output"
     );
 
+    let store_dir = installed_store_dir(root, "widget").unwrap();
+    let sentinel = store_dir.join(".store-only-sentinel");
+    fs::write(&sentinel, "keep").unwrap();
+
     // A rebuild replaces the entry in place rather than duplicating it.
     let rebuild = run(root, &["tome", "build", "widget", "--path", tome_path]);
     assert_success(&rebuild, "tome build rebuild");
+    assert!(
+        sentinel.exists(),
+        "store-only reinstall of an exact match should not rewrite the store directory"
+    );
     let index = fs::read_to_string(tome_dir.join("dist").join("index.nuon")).unwrap();
     assert_eq!(
         index.matches(&archive_rel).count(),
@@ -173,9 +181,115 @@ fn tome_build_prefers_current_tome_for_build_deps() {
     );
 }
 
+#[test]
+fn tome_build_rebuilds_when_same_version_hash_changes() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    fs::create_dir_all(tome.join("runes")).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'hashtome'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    let rune = tome.join("runes").join("widget.rn");
+    fs::write(&rune, widget_rune("v1")).unwrap();
+
+    assert_success(
+        &run(
+            root,
+            &["tome", "build", "widget", "--path", tome.to_str().unwrap()],
+        ),
+        "initial widget build",
+    );
+    fs::write(&rune, widget_rune("v2")).unwrap();
+    assert_success(
+        &run(
+            root,
+            &["tome", "build", "widget", "--path", tome.to_str().unwrap()],
+        ),
+        "same-version widget rebuild",
+    );
+
+    let archive_rel = format!("widget-0.1.0-{}.tar.zst", target_triple());
+    let archive = tome.join("dist").join(&archive_rel);
+    let widget = archive_member_text(&archive, "bin/widget");
+    assert!(
+        widget.contains("v2"),
+        "same-version rune edit must rebuild archive: {widget}"
+    );
+    let index = fs::read_to_string(tome.join("dist").join("index.nuon")).unwrap();
+    assert_eq!(
+        index.matches(&archive_rel).count(),
+        1,
+        "same-version rebuild should replace the stale index entry: {index}"
+    );
+}
+
+#[test]
+fn tome_build_packs_matching_existing_store_product() {
+    let root = TempDir::new().unwrap();
+    let root = root.path();
+
+    let tome = TempDir::new().unwrap();
+    let tome = tome.path();
+    fs::create_dir_all(tome.join("runes")).unwrap();
+    fs::write(
+        tome.join("tome.rn"),
+        "export const tome = {\n  name: 'storepack'\n  packages: { repo: 'dist', format: 'local', index: 'index.nuon' }\n}\n",
+    )
+    .unwrap();
+    fs::write(tome.join("runes").join("widget.rn"), widget_rune("stored")).unwrap();
+
+    assert_success(
+        &run(
+            root,
+            &["tome", "build", "widget", "--path", tome.to_str().unwrap()],
+        ),
+        "initial widget build",
+    );
+
+    let archive_rel = format!("widget-0.1.0-{}.tar.zst", target_triple());
+    let dist = tome.join("dist");
+    fs::remove_file(dist.join(&archive_rel)).unwrap();
+    fs::remove_file(dist.join("index.nuon")).unwrap();
+
+    let repack = run(
+        root,
+        &["tome", "build", "widget", "--path", tome.to_str().unwrap()],
+    );
+    assert_success(&repack, "store-backed widget pack");
+    let stdout = stdout(&repack);
+    assert!(
+        stdout.contains("packed widget 0.1.0"),
+        "expected store-backed pack, got stdout={stdout} stderr={}",
+        stderr(&repack)
+    );
+
+    let archive = dist.join(&archive_rel);
+    let widget = archive_member_text(&archive, "bin/widget");
+    assert!(
+        widget.contains("stored"),
+        "repacked archive payload: {widget}"
+    );
+    let index = fs::read_to_string(dist.join("index.nuon")).unwrap();
+    assert!(
+        index.contains(&archive_rel),
+        "repacked archive should be indexed: {index}"
+    );
+}
+
 fn tooldep_rune(stamp: &str) -> String {
     format!(
         "export const package = {{\n  name: 'tooldep'\n  version: '0.1.0'\n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf '{stamp}\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'stamp')\n}}\n"
+    )
+}
+
+fn widget_rune(stamp: &str) -> String {
+    format!(
+        "export const package = {{\n  name: 'widget'\n  version: '0.1.0'\n}}\n\nexport def build [ctx] {{\n  mkdir ($ctx.package_dir | path join 'bin')\n  \"#!/usr/bin/env sh\\nprintf '{stamp}\\n'\\n\" | save ($ctx.package_dir | path join 'bin' 'widget')\n}}\n"
     )
 }
 

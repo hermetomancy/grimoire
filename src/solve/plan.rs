@@ -110,7 +110,13 @@ impl Plan {
             }
         }
 
-        self.compute_store_hashes_inner(&target, hermetic, &mut computed, &mut installed_versions)
+        self.compute_store_hashes_inner(
+            &target,
+            hermetic,
+            &mut computed,
+            &mut installed_versions,
+            local_roots,
+        )
     }
 
     fn compute_store_hashes_inner(
@@ -119,13 +125,19 @@ impl Plan {
         hermetic: bool,
         computed: &mut BTreeMap<String, String>,
         installed_versions: &mut BTreeMap<String, Version>,
+        local_roots: &[PathBuf],
     ) -> Result<()> {
         for step in &mut self.steps {
             let hash = if let Some(rune) = &step.rune {
-                seed_build_dep_hashes(rune, target, hermetic, computed, installed_versions)
-                    .with_context(|| {
-                        format!("compute build dependency hashes for `{}`", step.name)
-                    })?;
+                seed_build_dep_hashes(
+                    rune,
+                    target,
+                    hermetic,
+                    computed,
+                    installed_versions,
+                    local_roots,
+                )
+                .with_context(|| format!("compute build dependency hashes for `{}`", step.name))?;
                 let build_env = toolchain::store_build_env_id_for_target_with_resolved(
                     hermetic, target, computed,
                 );
@@ -147,12 +159,13 @@ impl Plan {
                 // For a split member, `computed` carries the resolver's chosen hashes for the
                 // group's external deps, so the closure walk folds those versions instead of an
                 // independent re-pick — the resolver and the build address the member identically.
-                closure::store_hash_for_rune_with_deps(
+                closure::store_hash_for_rune_with_deps_and_roots(
                     rune,
                     &dep_hashes,
                     target,
                     &build_env,
                     computed,
+                    local_roots,
                 )
                 .with_context(|| format!("compute store hash for `{}`", step.name))?
             } else if let Some(sub) = step.substitutes.first() {
@@ -179,6 +192,7 @@ fn seed_build_dep_hashes(
     hermetic: bool,
     computed: &mut BTreeMap<String, String>,
     installed_versions: &mut BTreeMap<String, Version>,
+    local_roots: &[PathBuf],
 ) -> Result<()> {
     let metadata = build::read_rune_metadata(rune, build::tome_name_for_rune(rune)?.as_deref())?;
     let build_deps = build::effective_build_deps(rune, &metadata, target)?;
@@ -186,8 +200,13 @@ fn seed_build_dep_hashes(
         return Ok(());
     }
 
-    let mut plan =
-        crate::solve::resolve(&build_deps, installed_versions, &Default::default(), None)
-            .with_context(|| format!("resolve build dependencies for `{}`", metadata.name))?;
-    plan.compute_store_hashes_inner(target, hermetic, computed, installed_versions)
+    let mut plan = crate::solve::resolve_with_local_roots(
+        &build_deps,
+        installed_versions,
+        &Default::default(),
+        None,
+        local_roots,
+    )
+    .with_context(|| format!("resolve build dependencies for `{}`", metadata.name))?;
+    plan.compute_store_hashes_inner(target, hermetic, computed, installed_versions, local_roots)
 }

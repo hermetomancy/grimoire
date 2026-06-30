@@ -16,7 +16,7 @@ use crate::{
     },
     cli::TomeBuildArgs,
     install,
-    model::{IndexEntry, PackageIndex, validate_package_name},
+    model::{IndexEntry, PackageIndex, PackageMetadata, PackageState, validate_package_name},
     nu::{nuon_io, runtime::EmbeddedNuRuntime},
     util::output::{report, status},
     util::paths,
@@ -50,7 +50,7 @@ pub fn build(args: TomeBuildArgs) -> Result<()> {
     let hermetic = crate::build::effective_source_build_hermetic(args.bootstrap, args.impure)?;
 
     if args.index {
-        let catalog = rebuild_index_with_mode(&dist_dir, hermetic)?;
+        let catalog = rebuild_index_with_mode(root, &dist_dir, hermetic)?;
         nuon_io::write_nuon(&index_path, &catalog.to_value())?;
         report(&format!(
             "rebuilt index with {} package(s) in {}",
@@ -122,61 +122,72 @@ pub(crate) fn build_runes(
 ) -> Result<()> {
     let host_target = paths::target_triple();
     let current_target = target.unwrap_or(&host_target);
+    let local_roots = [root.to_path_buf()];
     let mut any_built = false;
     for name in rune_names {
-        // A split group is one build with several outputs: skip only when *every* member is
-        // already registered with its archive present.
-        let output_names = group_output_names(root, name)?;
-        let already_built = !force
-            && output_names.iter().all(|output_name| {
-                catalog
-                    .entries
-                    .values()
-                    .find(|e| e.name == *output_name && e.target == current_target)
-                    .is_some_and(|existing| {
-                        dist_dir
-                            .join(format!(
-                                "{}-{}-{}.tar.zst",
-                                existing.name, existing.version, existing.target
-                            ))
-                            .exists()
-                    })
-            });
-        if already_built {
+        let planned = planned_products(root, name, hermetic, current_target)?;
+        let planned_archives = if force {
+            None
+        } else {
+            matching_planned_archives(dist_dir, hermetic, &local_roots, catalog, &planned)?
+        };
+        if let Some(archives) = planned_archives {
+            install_planned_archives(&archives)?;
             status(&format!(
                 "skipping {} (already built; pass --force to rebuild)",
-                output_names.join(", ")
+                planned
+                    .iter()
+                    .map(|product| product.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
             continue;
         }
-        for (store_hash, entry, archive, build_env) in
-            build_rune_into(root, name, dist_dir, bootstrap, hermetic, target)?
-        {
-            output_lint::archive_purity(&archive, strict)
-                .with_context(|| format!("purity lint for `{}`", entry.name))?;
-            output_lint::archive_linkage(&archive, &entry, strict)
-                .with_context(|| format!("linkage lint for `{}`", entry.name))?;
+        let products = if force {
+            None
+        } else {
+            pack_existing_store_products(&planned, dist_dir)?
+        };
+        let products = match products {
+            Some(products) => products,
+            None => build_rune_into(root, name, dist_dir, bootstrap, hermetic, target)?,
+        };
+        for product in products {
+            output_lint::archive_purity(&product.archive, strict)
+                .with_context(|| format!("purity lint for `{}`", product.entry.name))?;
+            output_lint::archive_linkage(&product.archive, &product.entry, strict)
+                .with_context(|| format!("linkage lint for `{}`", product.entry.name))?;
+            let verb = if product.from_store {
+                "packed"
+            } else {
+                "built"
+            };
             report(&format!(
-                "built {} {}",
-                crate::util::output::accent(&format!("{} {}", entry.name, entry.version)),
+                "{verb} {} {}",
+                crate::util::output::accent(&format!(
+                    "{} {}",
+                    product.entry.name, product.entry.version
+                )),
                 crate::util::output::faint(&format!(
                     "({}) into {}",
-                    entry.target,
-                    archive.display()
+                    product.entry.target,
+                    product.archive.display()
                 ))
             ));
-            let mut world = install::InstalledWorld::load_default()?;
-            install::install_store_only_for_target(
-                &mut world,
-                &archive,
-                None,
-                None,
-                Some(&build_env),
-                install::InstallOrigin::TomeBuild,
-                &entry.target,
-            )
-            .with_context(|| format!("store-only install of {}", entry.name))?;
-            catalog.upsert(store_hash, entry);
+            if !product.from_store {
+                let mut world = install::InstalledWorld::load_default()?;
+                install::install_store_only_for_target(
+                    &mut world,
+                    &product.archive,
+                    None,
+                    None,
+                    Some(&product.build_env),
+                    install::InstallOrigin::TomeBuild,
+                    &product.entry.target,
+                )
+                .with_context(|| format!("store-only install of {}", product.entry.name))?;
+            }
+            catalog.upsert(product.store_hash, product.entry);
             any_built = true;
         }
     }
@@ -189,23 +200,261 @@ pub(crate) fn build_runes(
     Ok(())
 }
 
-/// The package names a rune's build produces: the split group's members when `name` belongs
-/// to one, otherwise just `name`. Used to decide whether a build can be skipped.
-fn group_output_names(root: &Path, name: &str) -> Result<Vec<String>> {
+struct PlannedProduct {
+    name: String,
+    version: String,
+    target: String,
+    store_hash: String,
+    build_env: String,
+    rune: PathBuf,
+    metadata: PackageMetadata,
+    group_runes: Vec<(String, Vec<u8>)>,
+}
+
+struct PlannedArchive {
+    path: PathBuf,
+    store_hash: String,
+    archive_hash: String,
+    build_env: String,
+    target: String,
+}
+
+pub(crate) struct PublishedProduct {
+    store_hash: String,
+    entry: IndexEntry,
+    archive: PathBuf,
+    build_env: String,
+    from_store: bool,
+}
+
+fn planned_products(
+    root: &Path,
+    name: &str,
+    hermetic: bool,
+    target: &str,
+) -> Result<Vec<PlannedProduct>> {
+    validate_package_name(name)?;
     let rune_path = root.join("runes").join(format!("{name}.rn"));
     if !rune_path.exists() {
-        return Ok(vec![name.to_owned()]);
+        bail!("rune not found: {}", rune_path.display());
     }
-    match crate::build::split::group_for(&rune_path)? {
-        Some(group) => Ok(group.members().map(|member| member.name.clone()).collect()),
-        None => Ok(vec![name.to_owned()]),
+    let resolved = BTreeMap::new();
+    let build_env = crate::build::build_env_id_for_resolved(hermetic, target, &resolved);
+    let local_roots = [root.to_path_buf()];
+    if let Some(group) = crate::build::split::group_for(&rune_path)? {
+        let rune_bytes = group.rune_bytes()?;
+        let group_runes: Vec<(String, Vec<u8>)> = rune_bytes
+            .iter()
+            .map(|(name, bytes)| (name.clone(), bytes.clone()))
+            .collect();
+        let parts: Vec<(crate::model::PackageMetadata, Vec<u8>)> = group
+            .members()
+            .map(|member| {
+                let bytes = rune_bytes
+                    .get(&member.name)
+                    .with_context(|| format!("missing rune bytes for `{}`", member.name))?
+                    .clone();
+                Ok((member.metadata.clone(), bytes))
+            })
+            .collect::<Result<_>>()?;
+        let hashes = crate::store::closure::split_member_hashes_with_target_env_and_roots(
+            &parts,
+            target,
+            &build_env,
+            &resolved,
+            &local_roots,
+        )?;
+        return group
+            .members()
+            .map(|member| {
+                let store_hash = hashes
+                    .get(&member.name)
+                    .cloned()
+                    .with_context(|| format!("split group did not yield `{}`", member.name))?;
+                Ok(PlannedProduct {
+                    name: member.name.clone(),
+                    version: member.metadata.version.clone(),
+                    target: target.to_owned(),
+                    store_hash,
+                    build_env: build_env.clone(),
+                    rune: member.rune.clone(),
+                    metadata: member.metadata.clone(),
+                    group_runes: group_runes.clone(),
+                })
+            })
+            .collect();
     }
+    let metadata = crate::build::read_rune_metadata(
+        &rune_path,
+        crate::build::tome_name_for_rune(&rune_path)?.as_deref(),
+    )?;
+    let store_hash = crate::store::closure::store_hash_for_rune_with_target_env_and_roots(
+        &rune_path,
+        target,
+        &build_env,
+        &resolved,
+        &local_roots,
+    )?;
+    Ok(vec![PlannedProduct {
+        name: metadata.name.clone(),
+        version: metadata.version.clone(),
+        target: target.to_owned(),
+        store_hash,
+        build_env,
+        rune: rune_path,
+        metadata,
+        group_runes: Vec::new(),
+    }])
+}
+
+fn pack_existing_store_products(
+    planned: &[PlannedProduct],
+    dist_dir: &Path,
+) -> Result<Option<Vec<PublishedProduct>>> {
+    let world = install::InstalledWorld::load_default()?;
+    let mut states = Vec::new();
+    for product in planned {
+        let Some(state) = exact_store_state(&world, product)? else {
+            return Ok(None);
+        };
+        states.push(state.clone());
+    }
+
+    planned
+        .iter()
+        .zip(states.iter())
+        .map(|(product, state)| pack_existing_store_product(product, state, dist_dir))
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
+fn exact_store_state<'a>(
+    world: &'a install::InstalledWorld,
+    product: &PlannedProduct,
+) -> Result<Option<&'a PackageState>> {
+    let Some(state) = world.get(&product.name) else {
+        return Ok(None);
+    };
+    let expected_store_path =
+        paths::store_path(&product.store_hash, &product.name, &product.version)?;
+    if state.version != product.version
+        || state.target.as_deref() != Some(product.target.as_str())
+        || state.store_hash != product.store_hash
+        || state.build_env.as_deref() != Some(product.build_env.as_str())
+        || Path::new(&state.store_path) != expected_store_path.as_path()
+        || !expected_store_path.exists()
+    {
+        return Ok(None);
+    }
+    Ok(Some(state))
+}
+
+fn pack_existing_store_product(
+    product: &PlannedProduct,
+    state: &PackageState,
+    dist_dir: &Path,
+) -> Result<PublishedProduct> {
+    let final_prefix = paths::store_path(&product.store_hash, &product.name, &product.version)?;
+    let metadata = archive_metadata_from_state(product, state);
+    let archive = archive::pack::pack_built_rune(
+        &product.rune,
+        &metadata,
+        Path::new(&state.store_path),
+        &final_prefix,
+        &product.store_hash,
+        dist_dir,
+        &product.target,
+        &product.group_runes,
+    )?;
+    let entry = index_entry_for_archive(&metadata, &archive, &product.target)?;
+    Ok(PublishedProduct {
+        store_hash: product.store_hash.clone(),
+        entry,
+        archive,
+        build_env: product.build_env.clone(),
+        from_store: true,
+    })
+}
+
+fn archive_metadata_from_state(product: &PlannedProduct, state: &PackageState) -> PackageMetadata {
+    let mut metadata = product.metadata.clone();
+    metadata.bins = BTreeMap::from([("default".to_owned(), state.bins.clone())]);
+    metadata.provides = state.provides.clone();
+    metadata.libs = state.libs.clone();
+    metadata.notes = state.notes.clone();
+    metadata.upstream_version = state.upstream_version.clone();
+    metadata.conflicts = state.conflicts.clone();
+    metadata.replaces = state.replaces.clone();
+    metadata.build_only = state.build_only;
+    metadata
+}
+
+fn matching_planned_archives(
+    dist_dir: &Path,
+    hermetic: bool,
+    local_roots: &[PathBuf],
+    catalog: &PackageIndex,
+    planned: &[PlannedProduct],
+) -> Result<Option<Vec<PlannedArchive>>> {
+    let mut archives = Vec::new();
+    for product in planned {
+        let Some(entry) = catalog.entries.get(&product.store_hash) else {
+            return Ok(None);
+        };
+        if entry.name != product.name
+            || entry.version != product.version
+            || entry.target != product.target
+        {
+            return Ok(None);
+        }
+        let archive = dist_dir.join(&entry.archive);
+        if !archive.exists() {
+            return Ok(None);
+        }
+        let Ok((embedded_hash, embedded_entry)) =
+            read_archive_index_entry_with_mode_and_roots(&archive, hermetic, local_roots)
+        else {
+            return Ok(None);
+        };
+        if embedded_hash != product.store_hash
+            || embedded_entry.archive_hash != entry.archive_hash
+            || embedded_entry.name != product.name
+            || embedded_entry.version != product.version
+            || embedded_entry.target != product.target
+        {
+            return Ok(None);
+        }
+        archives.push(PlannedArchive {
+            path: archive,
+            store_hash: product.store_hash.clone(),
+            archive_hash: entry.archive_hash.clone(),
+            build_env: product.build_env.clone(),
+            target: product.target.clone(),
+        });
+    }
+    Ok(Some(archives))
+}
+
+fn install_planned_archives(archives: &[PlannedArchive]) -> Result<()> {
+    let mut world = install::InstalledWorld::load_default()?;
+    for archive in archives {
+        install::install_store_only_for_target(
+            &mut world,
+            &archive.path,
+            Some(archive.archive_hash.clone()),
+            Some(&archive.store_hash),
+            Some(&archive.build_env),
+            install::InstallOrigin::TomeBuild,
+            &archive.target,
+        )
+        .with_context(|| format!("store-only install of {}", archive.path.display()))?;
+    }
+    Ok(())
 }
 
 /// Builds the rune named `name` (`runes/<name>.rn`) into `dist_dir`, returning one
-/// `(store_hash, entry, archive, build_env)` per produced package — one for a standalone rune, one
-/// per member for a split group. Shared by single-package and `--all` builds so both register
-/// identical entries.
+/// published product per produced package — one for a standalone rune, one per member for a split
+/// group. Shared by single-package and `--all` builds so both register identical entries.
 pub(crate) fn build_rune_into(
     root: &Path,
     name: &str,
@@ -213,7 +462,7 @@ pub(crate) fn build_rune_into(
     bootstrap: bool,
     hermetic: bool,
     target: Option<&str>,
-) -> Result<Vec<(String, IndexEntry, PathBuf, String)>> {
+) -> Result<Vec<PublishedProduct>> {
     validate_package_name(name)?;
     let rune_path = root.join("runes").join(format!("{name}.rn"));
     if !rune_path.exists() {
@@ -234,44 +483,51 @@ pub(crate) fn build_rune_into(
     result
         .products()
         .map(|product| {
-            let archive_hash = crate::archive::archive_hash(&product.archive)?;
-            let archive_file = product
-                .archive
-                .file_name()
-                .and_then(|name| name.to_str())
-                .with_context(|| {
-                    format!(
-                        "archive path has no file name: {}",
-                        product.archive.display()
-                    )
-                })?;
             let metadata = &product.metadata;
-            let entry = IndexEntry {
-                name: metadata.name.clone(),
-                version: metadata.version.clone(),
-                target: resolved_target.clone(),
-                archive: archive_file.to_owned(),
-                archive_hash,
-                runtime_deps: metadata.deps.runtime.clone(),
-                provides: metadata.provides.clone(),
-                libs: metadata.libs.clone(),
-                conflicts: metadata.conflicts.clone(),
-                replaces: metadata.replaces.clone(),
-            };
-            Ok((
-                product.store_hash.clone(),
-                entry,
-                product.archive.clone(),
-                build_env.clone(),
-            ))
+            Ok(PublishedProduct {
+                store_hash: product.store_hash.clone(),
+                entry: index_entry_for_archive(metadata, &product.archive, &resolved_target)?,
+                archive: product.archive.clone(),
+                build_env: build_env.clone(),
+                from_store: false,
+            })
         })
         .collect()
+}
+
+fn index_entry_for_archive(
+    metadata: &PackageMetadata,
+    archive: &Path,
+    target: &str,
+) -> Result<IndexEntry> {
+    let archive_hash = crate::archive::archive_hash(archive)?;
+    let archive_file = archive
+        .file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("archive path has no file name: {}", archive.display()))?;
+    Ok(IndexEntry {
+        name: metadata.name.clone(),
+        version: metadata.version.clone(),
+        target: target.to_owned(),
+        archive: archive_file.to_owned(),
+        archive_hash,
+        runtime_deps: metadata.deps.runtime.clone(),
+        provides: metadata.provides.clone(),
+        libs: metadata.libs.clone(),
+        conflicts: metadata.conflicts.clone(),
+        replaces: metadata.replaces.clone(),
+    })
 }
 
 /// Rebuilds the package index from every `.tar.zst` archive already present in `dist_dir`.
 /// Each archive is inspected for its embedded metadata and rune so the index entry is identical
 /// to what a fresh build would produce in the selected build mode.
-pub(crate) fn rebuild_index_with_mode(dist_dir: &Path, hermetic: bool) -> Result<PackageIndex> {
+pub(crate) fn rebuild_index_with_mode(
+    root: &Path,
+    dist_dir: &Path,
+    hermetic: bool,
+) -> Result<PackageIndex> {
+    let local_roots = [root.to_path_buf()];
     let mut entries = std::collections::BTreeMap::new();
     for entry in fs::read_dir(dist_dir)
         .with_context(|| format!("read dist directory {}", dist_dir.display()))?
@@ -282,8 +538,9 @@ pub(crate) fn rebuild_index_with_mode(dist_dir: &Path, hermetic: bool) -> Result
         if !name.ends_with(".tar.zst") {
             continue;
         }
-        let (store_hash, index_entry) = read_archive_index_entry_with_mode(&path, hermetic)
-            .with_context(|| format!("index archive {}", path.display()))?;
+        let (store_hash, index_entry) =
+            read_archive_index_entry_with_mode_and_roots(&path, hermetic, &local_roots)
+                .with_context(|| format!("index archive {}", path.display()))?;
         report(&format!(
             "indexed {} {}",
             crate::util::output::accent(&format!("{} {}", index_entry.name, index_entry.version)),
@@ -296,9 +553,10 @@ pub(crate) fn rebuild_index_with_mode(dist_dir: &Path, hermetic: bool) -> Result
 
 /// Reads an existing archive and produces the `(store_hash, IndexEntry)` that would describe it
 /// in the selected build mode.
-pub(crate) fn read_archive_index_entry_with_mode(
+pub(crate) fn read_archive_index_entry_with_mode_and_roots(
     path: &Path,
     hermetic: bool,
+    local_roots: &[PathBuf],
 ) -> Result<(String, IndexEntry)> {
     archive::validate_archive_paths(path)
         .with_context(|| format!("validate archive {}", path.display()))?;
@@ -364,11 +622,12 @@ pub(crate) fn read_archive_index_entry_with_mode(
 
     let store_hash = if group_runes.is_empty() {
         let build_env = crate::build::toolchain::store_build_env_id_for_target(hermetic, &target);
-        crate::store::closure::store_hash_for_rune_bytes_with_target_and_env(
+        crate::store::closure::store_hash_for_rune_bytes_with_target_env_and_roots(
             &rune_bytes,
             &metadata,
             &target,
             &build_env,
+            local_roots,
         )
         .with_context(|| format!("compute store hash for {}", path.display()))?
     } else {
@@ -383,11 +642,12 @@ pub(crate) fn read_archive_index_entry_with_mode(
             })
             .collect::<Result<_>>()?;
         let build_env = crate::build::toolchain::store_build_env_id_for_target(hermetic, &target);
-        crate::store::closure::split_member_hashes_with_target_and_env(
+        crate::store::closure::split_member_hashes_with_target_env_and_roots(
             &group,
             &target,
             &build_env,
             &BTreeMap::new(),
+            local_roots,
         )
         .with_context(|| format!("compute split group hashes for {}", path.display()))?
         .get(&metadata.name)

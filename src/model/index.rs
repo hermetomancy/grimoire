@@ -75,9 +75,16 @@ impl PackageIndex {
         entries
     }
 
-    /// Inserts `entry` at `hash`, replacing any existing entry with the same hash so
-    /// rebuilding the same inputs updates in place.
+    /// Inserts `entry` at `hash`, replacing the same package/version/target in place. Published
+    /// archive names are `name-version-target`, so a same-version rebuild cannot keep the old
+    /// hash entry without leaving the index pointing at overwritten bytes.
     pub fn upsert(&mut self, hash: String, entry: IndexEntry) {
+        self.entries.retain(|existing_hash, existing| {
+            existing_hash == &hash
+                || existing.name != entry.name
+                || existing.version != entry.version
+                || existing.target != entry.target
+        });
         self.entries.insert(hash, entry);
     }
 

@@ -66,9 +66,20 @@ pub fn store_hash_for_rune_with_target_and_env(
     build_env: &str,
     resolved: &BTreeMap<String, String>,
 ) -> Result<String> {
+    store_hash_for_rune_with_target_env_and_roots(rune, target, build_env, resolved, &[])
+}
+
+pub fn store_hash_for_rune_with_target_env_and_roots(
+    rune: &Path,
+    target: &str,
+    build_env: &str,
+    resolved: &BTreeMap<String, String>,
+    local_roots: &[PathBuf],
+) -> Result<String> {
     let mut walker = Walker::with_target(target)?;
     walker.build_env = build_env.to_string();
     walker.resolved = resolved.clone();
+    walker.local_roots = local_roots.to_vec();
     let metadata = walker.metadata(rune)?;
     walker.of_rune(&metadata.name, rune)
 }
@@ -78,12 +89,13 @@ pub fn store_hash_for_rune_with_target_and_env(
 /// (`grm tome build --index`) addresses an archive against the target and build mode it was built
 /// for, not the indexing host's, so a cross-target build keeps the address a consumer on that
 /// target reproduces (AGENTS §9.8). Split group members cannot be addressed from a single rune;
-/// use [`split_member_hashes_with_target_and_env`], which takes the whole group.
-pub fn store_hash_for_rune_bytes_with_target_and_env(
+/// use [`split_member_hashes_with_target_env_and_roots`], which takes the whole group.
+pub fn store_hash_for_rune_bytes_with_target_env_and_roots(
     rune_bytes: &[u8],
     metadata: &crate::model::PackageMetadata,
     target: &str,
     build_env: &str,
+    local_roots: &[PathBuf],
 ) -> Result<String> {
     if metadata.is_split_member() {
         bail!(
@@ -93,6 +105,7 @@ pub fn store_hash_for_rune_bytes_with_target_and_env(
     }
     let mut walker = Walker::with_target(target)?;
     walker.build_env = build_env.to_string();
+    walker.local_roots = local_roots.to_vec();
     walker.of_rune_with_bytes(&metadata.name, metadata, rune_bytes)
 }
 
@@ -102,15 +115,17 @@ pub fn store_hash_for_rune_bytes_with_target_and_env(
 /// `.grimoire/group/` copies. External deps address against `resolved` (see
 /// [`installed_resolved`]) so the build reproduces the resolver's expected address; pass an empty
 /// map to re-derive externals from runes (the re-index path).
-pub fn split_member_hashes_with_target_and_env(
+pub fn split_member_hashes_with_target_env_and_roots(
     group: &[(crate::model::PackageMetadata, Vec<u8>)],
     target: &str,
     build_env: &str,
     resolved: &BTreeMap<String, String>,
+    local_roots: &[PathBuf],
 ) -> Result<BTreeMap<String, String>> {
     let mut walker = Walker::with_target(target)?;
     walker.build_env = build_env.to_string();
     walker.resolved = resolved.clone();
+    walker.local_roots = local_roots.to_vec();
     walker.group_hashes(&group_parts(group))
 }
 
@@ -131,12 +146,13 @@ fn group_parts(group: &[(crate::model::PackageMetadata, Vec<u8>)]) -> Vec<GroupP
 /// providers, so a by-name lookup against the rune's raw dep names is impossible here. Build deps
 /// are resolved by the closure walker because they are not part of the runtime solver plan.
 /// This is used by the solver after version resolution to compute hashes eagerly.
-pub fn store_hash_for_rune_with_deps(
+pub fn store_hash_for_rune_with_deps_and_roots(
     rune: &Path,
     dep_hashes: &[String],
     target: &str,
     build_env: &str,
     resolved: &BTreeMap<String, String>,
+    local_roots: &[PathBuf],
 ) -> Result<String> {
     let metadata = build::read_rune_metadata(rune, build::tome_name_for_rune(rune)?.as_deref())?;
 
@@ -149,6 +165,7 @@ pub fn store_hash_for_rune_with_deps(
         let mut walker = Walker::with_target(target)?;
         walker.build_env = build_env.to_string();
         walker.resolved = resolved.clone();
+        walker.local_roots = local_roots.to_vec();
         let hashes = walker.group_hashes(&disk_group_parts(&group)?)?;
         return hashes.get(&metadata.name).cloned().with_context(|| {
             format!("split group for `{}` did not yield its hash", metadata.name)
@@ -175,6 +192,7 @@ pub fn store_hash_for_rune_with_deps(
     let mut walker = Walker::with_target(target)?;
     walker.build_env = build_env.to_string();
     walker.resolved = resolved.clone();
+    walker.local_roots = local_roots.to_vec();
     let build_dep_hashes = walker.build_dep_hashes(&metadata)?;
     Ok(store::store_hash_for_metadata(
         &metadata,

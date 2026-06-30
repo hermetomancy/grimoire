@@ -63,6 +63,15 @@ pub struct BuildResult {
     pub siblings: Vec<BuiltProduct>,
 }
 
+struct BuildInvocation<'a> {
+    output: &'a Path,
+    env: &'a BuildEnv,
+    store_hash: &'a str,
+    resolved: &'a BTreeMap<String, String>,
+    local_roots: &'a [PathBuf],
+    original_cwd: &'a Path,
+}
+
 impl BuildResult {
     /// Every product of the build: the primary first, then its group siblings.
     pub fn products(&self) -> impl Iterator<Item = &BuiltProduct> {
@@ -135,6 +144,7 @@ pub fn build_package(
     target: Option<&str>,
 ) -> Result<BuildResult> {
     let rune = resolve_rune(package)?;
+    let local_roots = tome_roots_for_rune(&rune);
     let target = target.map_or_else(paths::target_triple, |t| t.to_string());
     let metadata = read_rune_metadata(&rune, tome_name_for_rune(&rune)?.as_deref())?;
     let build_deps = effective_build_deps(&rune, &metadata, &target)?;
@@ -143,7 +153,7 @@ pub fn build_package(
         install::ensure_build_deps_installed_with_mode_and_roots(
             &build_deps,
             hermetic,
-            &tome_roots_for_rune(&rune),
+            &local_roots,
         )
         .with_context(|| format!("install build dependencies for `{package}`"))?;
     }
@@ -170,11 +180,12 @@ pub fn build_package(
     // and pass it explicitly through `build_package_with_env`; here it is empty. The build env id
     // is taken from the actual env so `--impure` has a distinct address.
     let build_env_id = toolchain::store_build_env_id_for_target(env.hermetic, &env.target);
-    let store_hash = crate::store::closure::store_hash_for_rune_with_target_and_env(
+    let store_hash = crate::store::closure::store_hash_for_rune_with_target_env_and_roots(
         &rune,
         &env.target,
         &build_env_id,
         &BTreeMap::new(),
+        &local_roots,
     )?;
     build_package_with_env(package, output, &env, &store_hash, &BTreeMap::new())
 }
@@ -209,20 +220,21 @@ pub fn build_package_with_env(
     let original_cwd = std::env::current_dir().context("read current working directory")?;
     status(&format!("resolving rune ({package})"));
     let rune = resolve_rune(package)?;
+    let local_roots = tome_roots_for_rune(&rune);
 
     status(&format!("reading metadata ({package})"));
     let mut metadata = read_rune_metadata(&rune, tome_name_for_rune(&rune)?.as_deref())?;
 
     if let Some(group) = split::group_for(&rune)? {
-        return build_group_with_env(
-            &group,
-            &metadata.name,
+        let build = BuildInvocation {
             output,
             env,
             store_hash,
             resolved,
-            &original_cwd,
-        );
+            local_roots: &local_roots,
+            original_cwd: &original_cwd,
+        };
+        return build_group_with_env(&group, &metadata.name, build);
     }
 
     // Mirror the split-group path: independently recompute the address from the rune and the
@@ -230,11 +242,12 @@ pub fn build_package_with_env(
     // A silent mis-address would otherwise surface only later as a dropped binary substitution
     // (AGENTS §9.8).
     let build_env_id = build_env_id_for_resolved(env.hermetic, &target, resolved);
-    let recomputed = crate::store::closure::store_hash_for_rune_with_target_and_env(
+    let recomputed = crate::store::closure::store_hash_for_rune_with_target_env_and_roots(
         &rune,
         &target,
         &build_env_id,
         resolved,
+        &local_roots,
     )
     .with_context(|| format!("recompute store hash for `{}`", metadata.name))?;
     if recomputed != store_hash {
@@ -287,13 +300,9 @@ pub fn build_package_with_env(
 fn build_group_with_env(
     group: &split::SplitGroup,
     requested: &str,
-    output: &Path,
-    env: &BuildEnv,
-    store_hash: &str,
-    resolved: &BTreeMap<String, String>,
-    original_cwd: &Path,
+    build: BuildInvocation<'_>,
 ) -> Result<BuildResult> {
-    let target = env.target.clone();
+    let target = build.env.target.clone();
     crate::model::validate_targets(&group.parent.metadata, &target)?;
 
     let rune_bytes = group.rune_bytes()?;
@@ -310,12 +319,13 @@ fn build_group_with_env(
     // Recompute the group's member addresses against `resolved` — the closure that produced the
     // planned `store_hash` (the installer's actual closure, or empty for a canonical build) — then
     // cross-check the requested member below.
-    let build_env_id = build_env_id_for_resolved(env.hermetic, &target, resolved);
-    let hashes = crate::store::closure::split_member_hashes_with_target_and_env(
+    let build_env_id = build_env_id_for_resolved(build.env.hermetic, &target, build.resolved);
+    let hashes = crate::store::closure::split_member_hashes_with_target_env_and_roots(
         &parts,
         &target,
         &build_env_id,
-        resolved,
+        build.resolved,
+        build.local_roots,
     )?;
     let member_hash = |name: &str| -> Result<&String> {
         hashes
@@ -323,11 +333,12 @@ fn build_group_with_env(
             .with_context(|| format!("split group did not yield a hash for `{name}`"))
     };
     let requested_hash = member_hash(requested)?;
-    if requested_hash != store_hash {
+    if requested_hash != build.store_hash {
         bail!(
             "computed store hash {requested_hash} for split member `{requested}` does not \
-             match the planned {store_hash}; the group's inputs changed between resolution \
-             and build — re-run the install"
+             match the planned {}; the group's inputs changed between resolution \
+             and build — re-run the install",
+            build.store_hash
         );
     }
 
@@ -342,8 +353,8 @@ fn build_group_with_env(
         &parent.metadata,
         &parent_prefix,
         parent_hash,
-        env,
-        original_cwd,
+        build.env,
+        build.original_cwd,
     )?;
 
     status(&format!(
@@ -388,7 +399,7 @@ fn build_group_with_env(
             &pack_dir,
             &member_prefix,
             hash,
-            output,
+            build.output,
             &target,
             &group_runes,
         )?;

@@ -179,6 +179,12 @@ heading when it is tagged.
 
 ### Fixed
 
+- `grm tome build` now skips an existing archive only when the current rune inputs recompute to
+  the same store hash. Same-version rune edits rebuild and replace the stale index entry instead
+  of trusting a matching package name/version/target.
+- `grm tome build` now repacks an exact matching store product when the current rune inputs
+  recompute to an already installed store hash, avoiding a source rebuild when only the publish
+  archive/index is missing.
 - Target-specific build environments now set `ctx.target` to the requested build target instead of
   leaving it at the host triple.
 - Rollback restores of package state and the lockfile now write through an atomic staged file

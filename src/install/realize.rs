@@ -249,6 +249,19 @@ pub(crate) fn install_store_only_for_target(
     }
 
     let (package_dir, store_hash) = resolve_store_dir(&metadata, expected_store_hash)?;
+    if !linked
+        && exact_installed_store_only(
+            world,
+            &metadata,
+            target,
+            &archive_hash,
+            &store_hash,
+            &package_dir,
+            expected_build_env,
+        )
+    {
+        return installed_archive_from_metadata(&metadata, target);
+    }
 
     let staging_dir = transaction.path().join("package");
     fs::create_dir_all(&staging_dir)?;
@@ -321,19 +334,48 @@ pub(crate) fn install_store_only_for_target(
         accent(&format!("{} {}", metadata.name, metadata.version)),
         faint(&format!("— {}", origin.describe()))
     ));
+    installed_archive_from_metadata(&metadata, target)
+}
+
+fn exact_installed_store_only(
+    world: &InstalledWorld,
+    metadata: &PackageMetadata,
+    target: &str,
+    archive_hash: &str,
+    store_hash: &str,
+    package_dir: &Path,
+    build_env: Option<&str>,
+) -> bool {
+    let Some(state) = world.get(&metadata.name) else {
+        return false;
+    };
+    state.version == metadata.version
+        && state.target.as_deref() == Some(target)
+        && state.archive_hash == archive_hash
+        && state.store_hash == store_hash
+        && Path::new(&state.store_path) == package_dir
+        && state.build_env.as_deref() == build_env
+        && package_dir.exists()
+}
+
+fn installed_archive_from_metadata(
+    metadata: &PackageMetadata,
+    target: &str,
+) -> Result<InstalledArchive> {
     let version = parse_version_relaxed(&metadata.version)
         .with_context(|| format!("package version `{}` is not valid semver", metadata.version))?;
     let runtime_deps: Vec<Dependency> = metadata
         .deps
         .runtime
-        .into_iter()
+        .iter()
         .filter(|d| d.matches_platform(target))
+        .cloned()
         .collect();
     Ok(InstalledArchive {
-        name: metadata.name,
+        name: metadata.name.clone(),
         version,
         runtime_deps,
-        notes: metadata.notes,
+        notes: metadata.notes.clone(),
     })
 }
 
